@@ -189,8 +189,9 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
 
         var nav = new NavigationService();
         var settings = new ClientSettings { ServerUri = serverUri };
+        var settingsStore = new SettingsStore(Path.Combine(tempDir, "settings.json"));
 
-        var vm = new HomeViewModel(identity, () => new SignalingClient(), nav, settings)
+        var vm = new HomeViewModel(identity, () => new SignalingClient(), nav, settings, settingsStore)
         {
             DisplayName = "Alice",
         };
@@ -224,6 +225,7 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
 
         var nav = new NavigationService();
         var settings = new ClientSettings { ServerUri = droppingUri };
+        var settingsStore = new SettingsStore(Path.Combine(tempDir, "settings.json"));
 
         var factoryCallCount = 0;
         SignalingClient Factory()
@@ -232,7 +234,7 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
             return new SignalingClient();
         }
 
-        var vm = new HomeViewModel(identity, Factory, nav, settings)
+        var vm = new HomeViewModel(identity, Factory, nav, settings, settingsStore)
         {
             DisplayName = "Alice",
         };

@@ -22,6 +22,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     private readonly IdentityStore _identity;
     private readonly Func<SignalingClient> _signalingFactory;
     private readonly ClientSettings _settings;
+    private readonly SettingsStore _settingsStore;
     private readonly ICaptureProvider? _captureProvider;
 
     private WebRtcSession? _webRtc;
@@ -38,6 +39,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         IdentityStore identity,
         Func<SignalingClient> signalingFactory,
         ClientSettings settings,
+        SettingsStore settingsStore,
         ICaptureProvider? captureProvider,
         RoomJoined initial)
     {
@@ -46,6 +48,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _identity = identity;
         _signalingFactory = signalingFactory;
         _settings = settings;
+        _settingsStore = settingsStore;
         _captureProvider = captureProvider;
 
         _roomId = initial.RoomId;
@@ -394,7 +397,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         await _signaling.DisposeAsync();
 
-        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _captureProvider);
+        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider);
         _navigation.NavigateTo(home);
     }
 }

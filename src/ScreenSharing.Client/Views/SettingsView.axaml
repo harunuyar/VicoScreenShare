@@ -1,0 +1,76 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:ScreenSharing.Client.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="500"
+             x:Class="ScreenSharing.Client.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+
+    <Grid Margin="48" RowDefinitions="Auto,Auto,*,Auto">
+
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*">
+            <Button Grid.Column="0"
+                    Content="&#x2190; Back"
+                    Command="{Binding GoBackCommand}"
+                    VerticalAlignment="Center" />
+            <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="Settings" FontSize="28" FontWeight="Bold" />
+                <TextBlock Text="Video quality applies next time you start sharing."
+                           Opacity="0.6" />
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Row="1"
+                Margin="0,24,0,0"
+                CornerRadius="8"
+                BorderThickness="1"
+                BorderBrush="#40808080"
+                Padding="20">
+            <StackPanel Spacing="16">
+                <TextBlock Text="Video" FontSize="18" FontWeight="SemiBold" />
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Max resolution" Opacity="0.7" FontSize="12" />
+                    <ComboBox ItemsSource="{Binding ResolutionPresets}"
+                              SelectedItem="{Binding SelectedResolution}"
+                              HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="vm:ResolutionPreset">
+                                <TextBlock Text="{Binding DisplayName}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBlock Text="Frames larger than this are aspect-preserved and downscaled before encoding."
+                               Opacity="0.5" FontSize="11" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
+                    <TextBlock Text="Frame rate" Opacity="0.7" FontSize="12" />
+                    <ComboBox ItemsSource="{Binding FrameRatePresets}"
+                              SelectedItem="{Binding SelectedFrameRate}"
+                              HorizontalAlignment="Stretch" />
+                    <TextBlock Text="Incoming frames exceeding this rate are dropped."
+                               Opacity="0.5" FontSize="11" TextWrapping="Wrap" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <TextBlock Grid.Row="2"
+                   Text="{Binding StatusMessage}"
+                   IsVisible="{Binding StatusMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+                   Margin="0,16,0,0"
+                   Opacity="0.8"
+                   TextWrapping="Wrap" />
+
+        <StackPanel Grid.Row="3"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Spacing="12"
+                    Margin="0,16,0,0">
+            <Button Content="Save"
+                    Command="{Binding SaveCommand}"
+                    Padding="24,8" />
+        </StackPanel>
+    </Grid>
+</UserControl>

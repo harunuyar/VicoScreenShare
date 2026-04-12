@@ -15,6 +15,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     private readonly Func<SignalingClient> _signalingFactory;
     private readonly NavigationService _navigation;
     private readonly ClientSettings _settings;
+    private readonly SettingsStore _settingsStore;
     private readonly ICaptureProvider? _captureProvider;
 
     private readonly Guid _userId;
@@ -24,12 +25,14 @@ public sealed partial class HomeViewModel : ViewModelBase
         Func<SignalingClient> signalingFactory,
         NavigationService navigation,
         ClientSettings settings,
+        SettingsStore settingsStore,
         ICaptureProvider? captureProvider = null)
     {
         _identity = identity;
         _signalingFactory = signalingFactory;
         _navigation = navigation;
         _settings = settings;
+        _settingsStore = settingsStore;
         _captureProvider = captureProvider;
 
         var profile = _identity.LoadOrCreate();
@@ -64,8 +67,19 @@ public sealed partial class HomeViewModel : ViewModelBase
         var preview = new PreviewViewModel(
             _captureProvider,
             _navigation,
-            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _captureProvider));
+            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider));
         _navigation.NavigateTo(preview);
+    }
+
+    [RelayCommand]
+    private void ShowSettings()
+    {
+        var settingsVm = new SettingsViewModel(
+            _settings,
+            _settingsStore,
+            _navigation,
+            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider));
+        _navigation.NavigateTo(settingsVm);
     }
 
     [RelayCommand]
@@ -134,6 +148,7 @@ public sealed partial class HomeViewModel : ViewModelBase
                     _identity,
                     _signalingFactory,
                     _settings,
+                    _settingsStore,
                     _captureProvider,
                     joinTcs.Task.Result);
                 _navigation.NavigateTo(roomVm);

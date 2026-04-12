@@ -35,7 +35,8 @@ public partial class App : Application
 
             var identity = new IdentityStore();
             var navigation = new NavigationService();
-            var settings = new ClientSettings();
+            var settingsStore = new SettingsStore();
+            var settings = settingsStore.LoadOrCreate();
 
             var mainWindow = new MainWindow
             {
@@ -55,6 +56,7 @@ public partial class App : Application
                 () => new SignalingClient(),
                 navigation,
                 settings,
+                settingsStore,
                 captureProvider);
             navigation.NavigateTo(home);
 
