@@ -1,42 +1,42 @@
 using System;
-using System.Collections.Generic;
 using System.Net;
+using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using SIPSorceryMedia.Encoders;
 
 namespace ScreenSharing.Client.Media;
 
 /// <summary>
 /// Receiver-side counterpart to <see cref="CaptureStreamer"/>. Subscribes to an
-/// <see cref="RTCPeerConnection"/>'s <c>OnVideoFrameReceived</c>, decodes each
-/// reassembled VP8 frame, converts the decoder output to BGRA, and raises
+/// <see cref="RTCPeerConnection"/>'s <c>OnVideoFrameReceived</c>, hands each
+/// reassembled payload to an <see cref="IVideoDecoder"/>, and raises
 /// <see cref="FrameArrived"/> with a <see cref="CaptureFrameData"/> that the
 /// Phase 2 <c>WriteableBitmapRenderer</c> can render directly.
 ///
-/// IMPORTANT: SIPSorcery's <see cref="VpxVideoEncoder.DecodeVideo"/> ignores the
-/// <see cref="VideoPixelFormatsEnum"/> argument and always returns a 24-bit
-/// packed BGR buffer — <c>sample.Sample.Length == width * height * 3</c>. An
-/// earlier version of this class tried to interpret the buffer as I420 and
-/// produced the "video cut into pieces stacked on top of each other" visual
-/// because it was reading BGR bytes as planar YUV. Leave the direct BGR copy
-/// in place and do not add a PixelConverter call back here.
+/// The concrete codec lives behind the <see cref="IVideoDecoderFactory"/>
+/// passed to the constructor — default is VP8 via <see cref="VpxDecoderFactory"/>
+/// so existing call sites keep compiling, and future codecs plug in without
+/// touching this class.
 /// </summary>
 public sealed class StreamReceiver : ICaptureSource, IDisposable
 {
     private readonly RTCPeerConnection _pc;
-    private readonly VpxVideoEncoder _decoder;
+    private readonly IVideoDecoder _decoder;
     private readonly object _decodeLock = new();
-    private byte[] _bgraBuffer = Array.Empty<byte>();
     private bool _attached;
     private bool _disposed;
 
     public StreamReceiver(RTCPeerConnection pc, string displayName = "remote")
+        : this(pc, new VpxDecoderFactory(), displayName)
+    {
+    }
+
+    public StreamReceiver(RTCPeerConnection pc, IVideoDecoderFactory decoderFactory, string displayName = "remote")
     {
         _pc = pc;
         DisplayName = displayName;
-        _decoder = new VpxVideoEncoder();
+        _decoder = decoderFactory.CreateDecoder();
     }
 
     public string DisplayName { get; }
@@ -83,7 +83,7 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     public void Dispose()
     {
         // Stop new frames first, then take the decode lock so any in-flight
-        // DecodeVideo call finishes before we free the native libvpx decoder.
+        // Decode call finishes before we free the native decoder state.
         // Without this pairing we crash the CLR with ExecutionEngineException
         // when a frame arrives concurrently with Dispose.
         try { StopAsync().GetAwaiter().GetResult(); } catch { }
@@ -109,62 +109,30 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     {
         if (encodedSample is null || encodedSample.Length == 0) return;
 
-        IEnumerable<VideoSample>? samples;
+        System.Collections.Generic.IReadOnlyList<DecodedVideoFrame> frames;
         lock (_decodeLock)
         {
             if (_disposed) return;
             FramesReceived++;
-            try
-            {
-                samples = _decoder.DecodeVideo(encodedSample, VideoPixelFormatsEnum.Bgr, format.Codec);
-            }
-            catch
-            {
-                return;
-            }
+            frames = _decoder.Decode(encodedSample);
         }
-        if (samples is null) return;
 
-        foreach (var sample in samples)
+        if (frames.Count == 0) return;
+
+        foreach (var decoded in frames)
         {
-            if (sample.Sample is null || sample.Sample.Length == 0) continue;
+            if (decoded.Bgra is null || decoded.Bgra.Length == 0) continue;
 
-            var width = (int)sample.Width;
-            var height = (int)sample.Height;
-            if (width <= 0 || height <= 0) continue;
-
-            // See class comment: SIPSorcery's VP8 decoder returns packed BGR
-            // (3 bytes per pixel) regardless of the format argument. Guard on
-            // that to skip oddly-sized samples rather than blindly indexing.
-            var expectedBgr = width * height * 3;
-            if (sample.Sample.Length < expectedBgr) continue;
-
-            var bgraSize = width * height * 4;
-            if (_bgraBuffer.Length < bgraSize) _bgraBuffer = new byte[bgraSize];
-
-            var src = sample.Sample;
-            for (var y = 0; y < height; y++)
-            {
-                var srcRowStart = y * width * 3;
-                var dstRowStart = y * width * 4;
-                for (var x = 0; x < width; x++)
-                {
-                    var s = srcRowStart + x * 3;
-                    var d = dstRowStart + x * 4;
-                    _bgraBuffer[d + 0] = src[s + 0]; // B
-                    _bgraBuffer[d + 1] = src[s + 1]; // G
-                    _bgraBuffer[d + 2] = src[s + 2]; // R
-                    _bgraBuffer[d + 3] = 0xFF;
-                }
-            }
+            var bgraSize = decoded.Width * decoded.Height * 4;
+            if (decoded.Bgra.Length < bgraSize) continue;
 
             FramesDecoded++;
 
             var frame = new CaptureFrameData(
-                _bgraBuffer.AsSpan(0, bgraSize),
-                width,
-                height,
-                strideBytes: width * 4,
+                decoded.Bgra.AsSpan(0, bgraSize),
+                decoded.Width,
+                decoded.Height,
+                strideBytes: decoded.Width * 4,
                 format: CaptureFramePixelFormat.Bgra8,
                 timestamp: TimeSpan.FromTicks((long)timestamp * TimeSpan.TicksPerMillisecond / 90));
             FrameArrived?.Invoke(in frame);

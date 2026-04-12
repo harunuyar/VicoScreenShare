@@ -1,9 +1,8 @@
 using System;
 using System.Threading;
 using ScreenSharing.Client.Diagnostics;
+using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
-using SIPSorceryMedia.Abstractions;
-using SIPSorceryMedia.Encoders;
 
 namespace ScreenSharing.Client.Media;
 
@@ -37,13 +36,14 @@ public sealed class CaptureStreamer : IDisposable
 {
     private readonly ICaptureSource _source;
     private readonly Action<uint, byte[]> _onEncoded;
+    private readonly IVideoEncoderFactory _encoderFactory;
     private readonly object _encodeLock = new();
 
     private readonly int _maxEncoderWidth;
     private readonly int _maxEncoderHeight;
     private readonly long _minFrameGapTicks;
 
-    private VpxVideoEncoder _encoder;
+    private IVideoEncoder? _encoder;
     private int _encoderWidth;
     private int _encoderHeight;
 
@@ -56,14 +56,23 @@ public sealed class CaptureStreamer : IDisposable
     private bool _disposed;
 
     public CaptureStreamer(ICaptureSource source, Action<uint, byte[]> onEncoded, VideoSettings settings)
+        : this(source, onEncoded, settings, new VpxEncoderFactory())
+    {
+    }
+
+    public CaptureStreamer(
+        ICaptureSource source,
+        Action<uint, byte[]> onEncoded,
+        VideoSettings settings,
+        IVideoEncoderFactory encoderFactory)
     {
         _source = source;
         _onEncoded = onEncoded;
+        _encoderFactory = encoderFactory;
         _maxEncoderWidth = Math.Max(2, settings.MaxEncoderWidth);
         _maxEncoderHeight = Math.Max(2, settings.MaxEncoderHeight);
         var fps = Math.Clamp(settings.TargetFrameRate, 1, 120);
         _minFrameGapTicks = TimeSpan.FromSeconds(1.0 / fps).Ticks;
-        _encoder = new VpxVideoEncoder();
     }
 
     /// <summary>Total frames that reached the encoder since <see cref="Start"/>.</summary>
@@ -176,13 +185,15 @@ public sealed class CaptureStreamer : IDisposable
 
             FrameCount++;
 
-            // Rebuild the encoder if the stream dimensions changed. libvpx
-            // initializes its encoder state from the first frame's dimensions
-            // and cannot retarget on the fly.
-            if (width != _encoderWidth || height != _encoderHeight)
+            // Rebuild the encoder if the stream dimensions changed. Both libvpx
+            // and Media Foundation lock their encoder state to the first
+            // frame's dimensions and cannot retarget on the fly, so the
+            // abstraction contract is: one encoder instance per (width,height)
+            // tuple and the caller swaps them out on change.
+            if (_encoder is null || width != _encoderWidth || height != _encoderHeight)
             {
-                try { _encoder.Dispose(); } catch { }
-                _encoder = new VpxVideoEncoder();
+                try { _encoder?.Dispose(); } catch { }
+                _encoder = _encoderFactory.CreateEncoder(width, height);
                 _encoderWidth = width;
                 _encoderHeight = height;
             }
@@ -199,19 +210,7 @@ public sealed class CaptureStreamer : IDisposable
                 encoderStrideBytes,
                 _i420Buffer);
 
-            try
-            {
-                encoded = _encoder.EncodeVideo(
-                    width,
-                    height,
-                    _i420Buffer,
-                    VideoPixelFormatsEnum.I420,
-                    VideoCodecsEnum.VP8);
-            }
-            catch (Exception)
-            {
-                return;
-            }
+            encoded = _encoder.EncodeI420(_i420Buffer);
 
             if (encoded is null || encoded.Length == 0)
             {
@@ -252,7 +251,8 @@ public sealed class CaptureStreamer : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            try { _encoder.Dispose(); } catch { }
+            try { _encoder?.Dispose(); } catch { }
+            _encoder = null;
         }
     }
 }
