@@ -9,11 +9,18 @@
 
     <Grid Margin="48" RowDefinitions="Auto,Auto,*,Auto">
 
-        <StackPanel Grid.Row="0" Spacing="8">
-            <TextBlock Text="ScreenSharing" FontSize="32" FontWeight="Bold" />
-            <TextBlock Text="Self-hosted screen share. Enter a display name and create or join a room."
-                       Opacity="0.6" />
-        </StackPanel>
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+            <StackPanel Grid.Column="0" Spacing="8">
+                <TextBlock Text="ScreenSharing" FontSize="32" FontWeight="Bold" />
+                <TextBlock Text="Self-hosted screen share. Enter a display name and create or join a room."
+                           Opacity="0.6" />
+            </StackPanel>
+            <Button Grid.Column="1"
+                    Content="Preview capture"
+                    Command="{Binding ShowPreviewCommand}"
+                    IsVisible="{Binding IsPreviewAvailable}"
+                    VerticalAlignment="Top" />
+        </Grid>
 
         <StackPanel Grid.Row="1" Margin="0,24,0,0" Spacing="8">
             <TextBlock Text="Display name" />

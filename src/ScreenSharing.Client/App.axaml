@@ -12,6 +12,9 @@
         <DataTemplate DataType="vm:RoomViewModel">
             <views:RoomView />
         </DataTemplate>
+        <DataTemplate DataType="vm:PreviewViewModel">
+            <views:PreviewView />
+        </DataTemplate>
     </Application.DataTemplates>
 
     <Application.Styles>

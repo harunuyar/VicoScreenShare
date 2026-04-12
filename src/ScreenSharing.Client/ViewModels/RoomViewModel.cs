@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
@@ -18,6 +19,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     private readonly IdentityStore _identity;
     private readonly Func<SignalingClient> _signalingFactory;
     private readonly ClientSettings _settings;
+    private readonly ICaptureProvider? _captureProvider;
 
     public RoomViewModel(
         SignalingClient signaling,
@@ -25,6 +27,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         IdentityStore identity,
         Func<SignalingClient> signalingFactory,
         ClientSettings settings,
+        ICaptureProvider? captureProvider,
         RoomJoined initial)
     {
         _signaling = signaling;
@@ -32,6 +35,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _identity = identity;
         _signalingFactory = signalingFactory;
         _settings = settings;
+        _captureProvider = captureProvider;
 
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
@@ -130,7 +134,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         await _signaling.DisposeAsync();
 
-        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings);
+        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _captureProvider);
         _navigation.NavigateTo(home);
     }
 }

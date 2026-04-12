@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
@@ -14,6 +15,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     private readonly Func<SignalingClient> _signalingFactory;
     private readonly NavigationService _navigation;
     private readonly ClientSettings _settings;
+    private readonly ICaptureProvider? _captureProvider;
 
     private readonly Guid _userId;
 
@@ -21,12 +23,14 @@ public sealed partial class HomeViewModel : ViewModelBase
         IdentityStore identity,
         Func<SignalingClient> signalingFactory,
         NavigationService navigation,
-        ClientSettings settings)
+        ClientSettings settings,
+        ICaptureProvider? captureProvider = null)
     {
         _identity = identity;
         _signalingFactory = signalingFactory;
         _navigation = navigation;
         _settings = settings;
+        _captureProvider = captureProvider;
 
         var profile = _identity.LoadOrCreate();
         _userId = profile.UserId;
@@ -50,6 +54,19 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _isBusy;
+
+    public bool IsPreviewAvailable => _captureProvider is not null;
+
+    [RelayCommand]
+    private void ShowPreview()
+    {
+        if (_captureProvider is null) return;
+        var preview = new PreviewViewModel(
+            _captureProvider,
+            _navigation,
+            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _captureProvider));
+        _navigation.NavigateTo(preview);
+    }
 
     [RelayCommand]
     private Task CreateRoomAsync()
@@ -75,14 +92,6 @@ public sealed partial class HomeViewModel : ViewModelBase
         return RunRoomOperationAsync(signaling => signaling.JoinRoomAsync(roomId, password));
     }
 
-    /// <summary>
-    /// Unified create/join lifecycle. Builds a fresh <see cref="SignalingClient"/>
-    /// per operation via the injected factory so there is no cross-operation event
-    /// surface. On successful room join, ownership of the signaling instance is
-    /// transferred to the new <see cref="RoomViewModel"/>; on any other exit path
-    /// the instance is disposed. <see cref="IsBusy"/> is guaranteed to return to
-    /// <c>false</c> via the try/finally regardless of outcome.
-    /// </summary>
     private async Task RunRoomOperationAsync(Func<SignalingClient, Task> sendRequest)
     {
         IsBusy = true;
@@ -114,8 +123,6 @@ public sealed partial class HomeViewModel : ViewModelBase
 
             if (completed == joinTcs.Task)
             {
-                // Hand the signaling instance to the RoomViewModel. Unsubscribe our
-                // own handlers first so the RoomViewModel starts from a clean slate.
                 signaling.RoomJoined -= OnRoomJoined;
                 signaling.ServerError -= OnServerError;
                 signaling.ConnectionLost -= OnConnectionLost;
@@ -127,6 +134,7 @@ public sealed partial class HomeViewModel : ViewModelBase
                     _identity,
                     _signalingFactory,
                     _settings,
+                    _captureProvider,
                     joinTcs.Task.Result);
                 _navigation.NavigateTo(roomVm);
                 return;
@@ -137,7 +145,6 @@ public sealed partial class HomeViewModel : ViewModelBase
                 return;
             }
 
-            // disconnectTcs won
             var reason = disconnectTcs.Task.Result;
             StatusMessage = string.IsNullOrEmpty(reason)
                 ? "Disconnected from server. Please try again."

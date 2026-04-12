@@ -1,0 +1,64 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:ScreenSharing.Client.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="700"
+             x:Class="ScreenSharing.Client.Views.PreviewView"
+             x:DataType="vm:PreviewViewModel">
+
+    <Grid Margin="24" RowDefinitions="Auto,*,Auto">
+
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto">
+            <Button Grid.Column="0"
+                    Content="&#x2190; Back"
+                    Command="{Binding GoBackCommand}"
+                    VerticalAlignment="Center" />
+            <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="Capture preview" FontSize="22" FontWeight="Bold" />
+                <TextBlock Text="{Binding SourceLabel}"
+                           Opacity="0.7"
+                           IsVisible="{Binding SourceLabel, Converter={x:Static ObjectConverters.IsNotNull}}" />
+            </StackPanel>
+            <TextBlock Grid.Column="2"
+                       Text="{Binding Fps}"
+                       FontFamily="Consolas,monospace"
+                       VerticalAlignment="Center" />
+        </Grid>
+
+        <Border Grid.Row="1"
+                Margin="0,16,0,0"
+                CornerRadius="8"
+                BorderThickness="1"
+                BorderBrush="#40808080"
+                Background="#10000000">
+            <Grid>
+                <Image Source="{Binding PreviewImage}"
+                       Stretch="Uniform"
+                       IsVisible="{Binding PreviewImage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                <TextBlock Text="{Binding StatusMessage}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           Opacity="0.6"
+                           TextWrapping="Wrap"
+                           MaxWidth="400"
+                           IsVisible="{Binding StatusMessage, Converter={x:Static ObjectConverters.IsNotNull}}" />
+            </Grid>
+        </Border>
+
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Center"
+                    Margin="0,16,0,0"
+                    Spacing="12">
+            <Button Content="Share screen"
+                    Command="{Binding ShareScreenCommand}"
+                    IsEnabled="{Binding !IsCapturing}"
+                    Padding="16,8" />
+            <Button Content="Stop"
+                    Command="{Binding StopCaptureCommand}"
+                    IsEnabled="{Binding IsCapturing}"
+                    Padding="16,8" />
+        </StackPanel>
+    </Grid>
+</UserControl>
