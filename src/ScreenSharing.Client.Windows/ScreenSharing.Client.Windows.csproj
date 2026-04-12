@@ -13,6 +13,7 @@
   <ItemGroup>
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
     <PackageReference Include="SIPSorceryMedia.Windows" Version="8.0.14" />
+    <PackageReference Include="SIPSorceryMedia.FFmpeg" Version="8.0.12" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
     <PackageReference Include="Vortice.DXGI" Version="3.6.2" />
