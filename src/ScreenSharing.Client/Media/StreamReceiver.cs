@@ -1,5 +1,5 @@
 using System;
-using System.Linq;
+using System.Collections.Generic;
 using System.Net;
 using ScreenSharing.Client.Platform;
 using SIPSorcery.Net;
@@ -11,10 +11,11 @@ namespace ScreenSharing.Client.Media;
 /// <summary>
 /// Receiver-side counterpart to <see cref="CaptureStreamer"/>. Subscribes to an
 /// <see cref="RTCPeerConnection"/>'s <c>OnVideoFrameReceived</c>, decodes each
-/// reassembled VP8 frame, converts the I420 output to BGRA, and raises
-/// <see cref="FrameDecoded"/> with a <see cref="CaptureFrameData"/> that a
-/// <c>WriteableBitmapRenderer</c> (or any other <see cref="ICaptureSource"/>
-/// consumer) can render directly.
+/// reassembled VP8 frame into I420, converts to BGRA via SIPSorcery's own
+/// <see cref="PixelConverter"/> so encoder and decoder share identical YUV
+/// coefficients, and raises <see cref="FrameDecoded"/> with a
+/// <see cref="CaptureFrameData"/> that the Phase 2 <c>WriteableBitmapRenderer</c>
+/// can render directly.
 ///
 /// The class is effectively an <see cref="ICaptureSource"/> whose frames come
 /// from the network instead of a local capture, so tiles can reuse the Phase 2
@@ -24,9 +25,9 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 {
     private readonly RTCPeerConnection _pc;
     private readonly VpxVideoEncoder _decoder;
+    private readonly object _decodeLock = new();
+    private byte[] _bgrBuffer = Array.Empty<byte>();
     private byte[] _bgraBuffer = Array.Empty<byte>();
-    private int _lastWidth;
-    private int _lastHeight;
     private bool _attached;
     private bool _disposed;
 
@@ -80,10 +81,17 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Stop new frames first, then take the decode lock so any in-flight
+        // DecodeVideo call finishes before we free the native libvpx decoder.
+        // Without this pairing we crash the CLR with ExecutionEngineException
+        // when a frame arrives concurrently with Dispose.
         try { StopAsync().GetAwaiter().GetResult(); } catch { }
-        try { _decoder.Dispose(); } catch { }
+        lock (_decodeLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            try { _decoder.Dispose(); } catch { }
+        }
     }
 
     private void OnConnectionStateChange(RTCPeerConnectionState state)
@@ -98,18 +106,21 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     private void OnVideoFrameReceived(IPEndPoint remote, uint timestamp, byte[] encodedSample, VideoFormat format)
     {
-        if (_disposed || encodedSample is null || encodedSample.Length == 0) return;
-
-        FramesReceived++;
+        if (encodedSample is null || encodedSample.Length == 0) return;
 
         IEnumerable<VideoSample>? samples;
-        try
+        lock (_decodeLock)
         {
-            samples = _decoder.DecodeVideo(encodedSample, VideoPixelFormatsEnum.I420, format.Codec);
-        }
-        catch
-        {
-            return;
+            if (_disposed) return;
+            FramesReceived++;
+            try
+            {
+                samples = _decoder.DecodeVideo(encodedSample, VideoPixelFormatsEnum.I420, format.Codec);
+            }
+            catch
+            {
+                return;
+            }
         }
         if (samples is null) return;
 
@@ -121,27 +132,45 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             var height = (int)sample.Height;
             if (width <= 0 || height <= 0) continue;
 
-            var required = I420ToBgra.RequiredBgraSize(width, height);
-            if (_bgraBuffer.Length < required)
-            {
-                _bgraBuffer = new byte[required];
-            }
-
+            // Convert I420 -> BGR (24-bit) via SIPSorcery's converter, so encoder
+            // and decoder share identical coefficients and there is no range or
+            // chroma drift between sides. The overload with the `out stride`
+            // parameter handles padding for uneven widths. Then expand BGR ->
+            // BGRA for Avalonia's Bgra8888 bitmap format by inserting 0xFF alpha
+            // on every pixel.
+            byte[] bgrConverted;
+            int bgrStride;
             try
             {
-                I420ToBgra.Convert(sample.Sample, width, height, _bgraBuffer, bgraStrideBytes: width * 4);
+                bgrConverted = PixelConverter.I420toBGR(sample.Sample, width, height, out bgrStride);
             }
             catch
             {
                 continue;
             }
 
-            _lastWidth = width;
-            _lastHeight = height;
+            var bgraSize = width * height * 4;
+            if (_bgraBuffer.Length < bgraSize) _bgraBuffer = new byte[bgraSize];
+
+            for (var y = 0; y < height; y++)
+            {
+                var srcRowStart = y * bgrStride;
+                var dstRowStart = y * width * 4;
+                for (var x = 0; x < width; x++)
+                {
+                    var src = srcRowStart + x * 3;
+                    var dst = dstRowStart + x * 4;
+                    _bgraBuffer[dst + 0] = bgrConverted[src + 0];
+                    _bgraBuffer[dst + 1] = bgrConverted[src + 1];
+                    _bgraBuffer[dst + 2] = bgrConverted[src + 2];
+                    _bgraBuffer[dst + 3] = 0xFF;
+                }
+            }
+
             FramesDecoded++;
 
             var frame = new CaptureFrameData(
-                _bgraBuffer.AsSpan(0, required),
+                _bgraBuffer.AsSpan(0, bgraSize),
                 width,
                 height,
                 strideBytes: width * 4,

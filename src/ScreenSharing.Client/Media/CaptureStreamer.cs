@@ -8,22 +8,26 @@ namespace ScreenSharing.Client.Media;
 
 /// <summary>
 /// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery-style send path
-/// by running every frame through BGRA->I420 conversion and a VP8 encoder, then
-/// emitting the encoded payload via a callback. Production wiring passes
-/// <c>RTCPeerConnection.SendVideo</c> as the callback; tests can pass a lambda
-/// that captures the emitted samples.
+/// by handing BGRA frames directly to <see cref="VpxVideoEncoder.EncodeVideo"/>
+/// — SIPSorcery's built-in PixelConverter takes care of BGRA -> I420 using the
+/// same YUV coefficients its VP8 pipeline decodes with, so a hand-rolled
+/// conversion on our side cannot drift from the codec's expectations.
 ///
 /// The streamer is single-threaded on the capture thread: frames are encoded
-/// synchronously inside <see cref="OnFrameArrived"/>. VP8 encoding a 1080p frame
-/// on CPU is ~2-4 ms which stays well under a 16 ms frame budget at 60fps and
-/// does not meaningfully back-pressure the capture source.
+/// synchronously inside <see cref="OnFrameArrived"/>. VP8 encoding a 1080p
+/// frame on CPU is ~2-4 ms which stays well under a 16 ms budget at 60fps.
+/// <see cref="Dispose"/> and <see cref="OnFrameArrived"/> are serialized by a
+/// mutex so a stop-streaming cannot race with a mid-flight frame inside the
+/// native libvpx encoder (that race crashes the CLR with
+/// <c>ExecutionEngineException</c> the moment the encoder frees its state).
 /// </summary>
 public sealed class CaptureStreamer : IDisposable
 {
     private readonly ICaptureSource _source;
     private readonly Action<uint, byte[]> _onEncoded;
     private readonly VpxVideoEncoder _encoder;
-    private byte[] _i420Buffer = Array.Empty<byte>();
+    private readonly object _encodeLock = new();
+    private byte[] _bgraBuffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
     private bool _attached;
     private bool _disposed;
@@ -57,52 +61,74 @@ public sealed class CaptureStreamer : IDisposable
 
     private void OnFrameArrived(in CaptureFrameData frame)
     {
-        if (_disposed) return;
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
-        FrameCount++;
-
-        var required = BgraToI420.RequiredOutputSize(frame.Width, frame.Height);
-        if (_i420Buffer.Length < required)
+        // Copy out of the source-owned span into our own buffer first so we can
+        // drop out of the span scope and take the encode lock (you cannot hold a
+        // ref struct across a lock block). The buffer is reused across frames to
+        // avoid GC pressure at 60fps.
+        var byteCount = frame.Height * frame.Width * 4;
+        if (_bgraBuffer.Length < byteCount)
         {
-            _i420Buffer = new byte[required];
+            _bgraBuffer = new byte[byteCount];
+        }
+        if (frame.StrideBytes == frame.Width * 4)
+        {
+            frame.Pixels.Slice(0, byteCount).CopyTo(_bgraBuffer);
+        }
+        else
+        {
+            for (var y = 0; y < frame.Height; y++)
+            {
+                frame.Pixels
+                    .Slice(y * frame.StrideBytes, frame.Width * 4)
+                    .CopyTo(_bgraBuffer.AsSpan(y * frame.Width * 4, frame.Width * 4));
+            }
         }
 
-        BgraToI420.Convert(
-            frame.Pixels,
-            frame.Width,
-            frame.Height,
-            frame.StrideBytes,
-            _i420Buffer);
+        var width = frame.Width;
+        var height = frame.Height;
+        var timestamp = frame.Timestamp;
 
+        EncodeAndEmit(width, height, byteCount, timestamp);
+    }
+
+    private void EncodeAndEmit(int width, int height, int byteCount, TimeSpan timestamp)
+    {
         byte[]? encoded;
-        try
+        lock (_encodeLock)
         {
-            encoded = _encoder.EncodeVideo(
-                frame.Width,
-                frame.Height,
-                _i420Buffer,
-                VideoPixelFormatsEnum.I420,
-                VideoCodecsEnum.VP8);
-        }
-        catch (Exception)
-        {
-            // Encoder will surface init failures on the first frame; drop it and let
-            // the next frame retry rather than tearing down the capture source.
-            return;
+            if (_disposed) return;
+
+            FrameCount++;
+
+            try
+            {
+                encoded = _encoder.EncodeVideo(
+                    width,
+                    height,
+                    _bgraBuffer,
+                    VideoPixelFormatsEnum.Bgra,
+                    VideoCodecsEnum.VP8);
+            }
+            catch (Exception)
+            {
+                // Encoder will surface init failures on the first frame; drop it
+                // and let the next frame retry instead of tearing down capture.
+                return;
+            }
+
+            if (encoded is null || encoded.Length == 0)
+            {
+                return;
+            }
+
+            EncodedFrameCount++;
         }
 
-        if (encoded is null || encoded.Length == 0)
-        {
-            return;
-        }
-
-        EncodedFrameCount++;
-
-        // Duration is expressed in 90 kHz RTP units. Compute from the wall-clock
-        // gap between frames so the receiver's playback pacing stays honest even
-        // when the capture source delivers at a variable rate.
-        var duration = ComputeDurationRtpUnits(frame.Timestamp);
+        // The callback runs outside the lock so a slow RTCPeerConnection.SendVideo
+        // cannot block Dispose for longer than one encode pass.
+        var duration = ComputeDurationRtpUnits(timestamp);
         _onEncoded(duration, encoded);
     }
 
@@ -113,7 +139,7 @@ public sealed class CaptureStreamer : IDisposable
         var previous = Interlocked.Exchange(ref _lastTimestampTicks, ticks);
         if (previous == 0)
         {
-            // First frame — assume a nominal 30 fps step until we have a real gap.
+            // First frame -- assume a nominal 30 fps step until we have a real gap.
             return rtpClockRateHz / 30;
         }
         var elapsed = TimeSpan.FromTicks(ticks - previous);
@@ -129,9 +155,17 @@ public sealed class CaptureStreamer : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // First detach from the source so new frames stop arriving. Then acquire
+        // the encode lock so any currently-executing EncodeVideo completes before
+        // we free the native encoder. Without this pairing, libvpx's internal
+        // state gets freed under an in-flight encode and the CLR throws
+        // ExecutionEngineException from the native memory corruption.
         Stop();
-        _encoder.Dispose();
+        lock (_encodeLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            try { _encoder.Dispose(); } catch { }
+        }
     }
 }

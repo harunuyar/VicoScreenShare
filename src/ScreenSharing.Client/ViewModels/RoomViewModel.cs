@@ -27,6 +27,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     private WebRtcSession? _webRtc;
     private StreamReceiver? _streamReceiver;
     private WriteableBitmapRenderer? _remoteRenderer;
+    private WriteableBitmapRenderer? _localRenderer;
     private ICaptureSource? _localCaptureSource;
     private CaptureStreamer? _captureStreamer;
     private bool _negotiationStarted;
@@ -96,6 +97,9 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     [ObservableProperty]
     private Bitmap? _remoteStream;
+
+    [ObservableProperty]
+    private Bitmap? _localPreview;
 
     [ObservableProperty]
     private string? _localStreamLabel;
@@ -172,6 +176,14 @@ public sealed partial class RoomViewModel : ViewModelBase
             LocalStreamLabel = source.DisplayName;
             _localCaptureSource = source;
 
+            // Local preview: attach a second renderer to the same capture source
+            // so the streamer sees their own feed while the CaptureStreamer
+            // forwards encoded samples out over the peer connection.
+            var localRenderer = new WriteableBitmapRenderer();
+            localRenderer.FrameRendered += OnLocalFrameRendered;
+            localRenderer.Attach(source);
+            _localRenderer = localRenderer;
+
             var session = _webRtc;
             var streamer = new CaptureStreamer(
                 source,
@@ -197,14 +209,30 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         var streamer = _captureStreamer;
         var source = _localCaptureSource;
+        var localRenderer = _localRenderer;
 
         _captureStreamer = null;
         _localCaptureSource = null;
+        _localRenderer = null;
 
+        // Tear down order: detach the streamer's frame subscription FIRST so no
+        // more frames hit the native encoder, then dispose the streamer (which
+        // takes its own encode lock and waits for any in-flight frame), then
+        // stop and dispose the source, then the local renderer.
         if (streamer is not null)
         {
             streamer.Stop();
             streamer.Dispose();
+        }
+
+        if (localRenderer is not null && source is not null)
+        {
+            localRenderer.Detach(source);
+        }
+        if (localRenderer is not null)
+        {
+            localRenderer.FrameRendered -= OnLocalFrameRendered;
+            localRenderer.Dispose();
         }
 
         if (source is not null)
@@ -215,6 +243,21 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         IsSharing = false;
         LocalStreamLabel = null;
+        LocalPreview = null;
+    }
+
+    private void OnLocalFrameRendered()
+    {
+        var next = _localRenderer?.CurrentBitmap;
+        if (next is null) return;
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            LocalPreview = next;
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(() => LocalPreview = next);
+        }
     }
 
     private void OnPeerJoined(PeerInfo peer)

@@ -35,37 +35,57 @@
 
         <Grid Grid.Row="1" Margin="0,16,0,0" ColumnDefinitions="*,260">
 
-            <Border Grid.Column="0"
-                    CornerRadius="8"
-                    BorderThickness="1"
-                    BorderBrush="#40808080"
-                    Background="#10000000"
-                    Margin="0,0,12,0">
-                <Grid>
-                    <Image Source="{Binding RemoteStream}"
-                           Stretch="Uniform"
-                           IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNotNull}}" />
-                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="6"
-                                IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNull}}">
-                        <TextBlock Text="No incoming stream"
-                                   FontSize="14" Opacity="0.6" HorizontalAlignment="Center" />
-                        <TextBlock Text="{Binding MediaStatus}"
-                                   FontSize="12" Opacity="0.4" HorizontalAlignment="Center"
-                                   IsVisible="{Binding MediaStatus, Converter={x:Static ObjectConverters.IsNotNull}}" />
-                    </StackPanel>
-                    <Border VerticalAlignment="Top" HorizontalAlignment="Right" Margin="8"
-                            Background="#C0000000" CornerRadius="4" Padding="6,3"
-                            IsVisible="{Binding IsSharing}">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <Ellipse Width="8" Height="8" Fill="#FF5050" VerticalAlignment="Center" />
-                            <TextBlock Text="Live" FontSize="11" Foreground="White" VerticalAlignment="Center" />
-                            <TextBlock Text="{Binding LocalStreamLabel}" FontSize="11" Foreground="White"
-                                       VerticalAlignment="Center"
-                                       IsVisible="{Binding LocalStreamLabel, Converter={x:Static ObjectConverters.IsNotNull}}" />
+            <Grid Grid.Column="0" Margin="0,0,12,0" RowDefinitions="*,Auto">
+
+                <Border Grid.Row="0"
+                        CornerRadius="8"
+                        BorderThickness="1"
+                        BorderBrush="#40808080"
+                        Background="#10000000">
+                    <Grid>
+                        <Image Source="{Binding RemoteStream}"
+                               Stretch="Uniform"
+                               IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="6"
+                                    IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNull}}">
+                            <TextBlock Text="No incoming stream"
+                                       FontSize="14" Opacity="0.6" HorizontalAlignment="Center" />
+                            <TextBlock Text="{Binding MediaStatus}"
+                                       FontSize="12" Opacity="0.4" HorizontalAlignment="Center"
+                                       IsVisible="{Binding MediaStatus, Converter={x:Static ObjectConverters.IsNotNull}}" />
                         </StackPanel>
-                    </Border>
-                </Grid>
-            </Border>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="1"
+                        Margin="0,12,0,0"
+                        CornerRadius="8"
+                        BorderThickness="1"
+                        BorderBrush="#40FF5050"
+                        Background="#10000000"
+                        Padding="8"
+                        IsVisible="{Binding IsSharing}">
+                    <Grid ColumnDefinitions="Auto,*" Height="140">
+                        <Image Grid.Column="0"
+                               Source="{Binding LocalPreview}"
+                               Stretch="Uniform"
+                               Width="220"
+                               HorizontalAlignment="Left"
+                               IsVisible="{Binding LocalPreview, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                        <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" Spacing="4">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Ellipse Width="8" Height="8" Fill="#FF5050" VerticalAlignment="Center" />
+                                <TextBlock Text="Sharing your screen" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="{Binding LocalStreamLabel}"
+                                       FontSize="12"
+                                       Opacity="0.7"
+                                       TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+            </Grid>
 
             <Border Grid.Column="1"
                     CornerRadius="8"
