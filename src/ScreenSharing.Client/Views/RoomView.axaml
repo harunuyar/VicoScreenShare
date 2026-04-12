@@ -3,57 +3,101 @@
              xmlns:vm="using:ScreenSharing.Client.ViewModels"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
+             mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="700"
              x:Class="ScreenSharing.Client.Views.RoomView"
              x:DataType="vm:RoomViewModel">
 
-    <Grid Margin="32" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid Margin="24" RowDefinitions="Auto,*,Auto,Auto">
 
-        <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto">
             <StackPanel Grid.Column="0" Spacing="4">
                 <TextBlock Text="Room" Opacity="0.6" FontSize="12" />
                 <TextBlock Text="{Binding RoomId}" FontSize="28" FontWeight="Bold" />
             </StackPanel>
             <Button Grid.Column="1"
+                    Content="Share screen"
+                    Command="{Binding ShareScreenCommand}"
+                    IsEnabled="{Binding CanShareScreen}"
+                    IsVisible="{Binding !IsSharing}"
+                    VerticalAlignment="Center"
+                    Margin="0,0,8,0" />
+            <Button Grid.Column="1"
+                    Content="Stop sharing"
+                    Command="{Binding StopSharingCommand}"
+                    IsVisible="{Binding IsSharing}"
+                    VerticalAlignment="Center"
+                    Margin="0,0,8,0" />
+            <Button Grid.Column="2"
                     Content="Leave room"
                     Command="{Binding LeaveRoomCommand}"
                     VerticalAlignment="Center" />
         </Grid>
 
-        <Border Grid.Row="1"
-                Margin="0,24,0,0"
-                CornerRadius="8"
-                BorderThickness="1"
-                BorderBrush="#40808080"
-                Padding="16">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Top"
-                           Text="People in this room"
-                           FontWeight="SemiBold"
-                           Margin="0,0,0,8" />
-                <ListBox ItemsSource="{Binding Peers}">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate DataType="vm:PeerViewModel">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
-                                <Border CornerRadius="10"
-                                        Background="#4CAF50"
-                                        Padding="6,1"
-                                        IsVisible="{Binding IsHost}">
-                                    <TextBlock Text="host" FontSize="10" Foreground="White" />
-                                </Border>
-                                <Border CornerRadius="10"
-                                        Background="#4080FF"
-                                        Padding="6,1"
-                                        IsVisible="{Binding IsSelf}">
-                                    <TextBlock Text="you" FontSize="10" Foreground="White" />
-                                </Border>
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
-            </DockPanel>
-        </Border>
+        <Grid Grid.Row="1" Margin="0,16,0,0" ColumnDefinitions="*,260">
+
+            <Border Grid.Column="0"
+                    CornerRadius="8"
+                    BorderThickness="1"
+                    BorderBrush="#40808080"
+                    Background="#10000000"
+                    Margin="0,0,12,0">
+                <Grid>
+                    <Image Source="{Binding RemoteStream}"
+                           Stretch="Uniform"
+                           IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="6"
+                                IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNull}}">
+                        <TextBlock Text="No incoming stream"
+                                   FontSize="14" Opacity="0.6" HorizontalAlignment="Center" />
+                        <TextBlock Text="{Binding MediaStatus}"
+                                   FontSize="12" Opacity="0.4" HorizontalAlignment="Center"
+                                   IsVisible="{Binding MediaStatus, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                    </StackPanel>
+                    <Border VerticalAlignment="Top" HorizontalAlignment="Right" Margin="8"
+                            Background="#C0000000" CornerRadius="4" Padding="6,3"
+                            IsVisible="{Binding IsSharing}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Ellipse Width="8" Height="8" Fill="#FF5050" VerticalAlignment="Center" />
+                            <TextBlock Text="Live" FontSize="11" Foreground="White" VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding LocalStreamLabel}" FontSize="11" Foreground="White"
+                                       VerticalAlignment="Center"
+                                       IsVisible="{Binding LocalStreamLabel, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="1"
+                    CornerRadius="8"
+                    BorderThickness="1"
+                    BorderBrush="#40808080"
+                    Padding="12">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top"
+                               Text="People in this room"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,8" />
+                    <ListBox ItemsSource="{Binding Peers}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="vm:PeerViewModel">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                    <Border CornerRadius="10" Background="#4CAF50" Padding="6,1"
+                                            IsVisible="{Binding IsHost}">
+                                        <TextBlock Text="host" FontSize="10" Foreground="White" />
+                                    </Border>
+                                    <Border CornerRadius="10" Background="#4080FF" Padding="6,1"
+                                            IsVisible="{Binding IsSelf}">
+                                        <TextBlock Text="you" FontSize="10" Foreground="White" />
+                                    </Border>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+
+        </Grid>
 
         <TextBlock Grid.Row="2"
                    Text="You are the host of this room."

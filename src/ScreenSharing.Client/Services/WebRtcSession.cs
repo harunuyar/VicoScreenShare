@@ -36,9 +36,13 @@ public sealed class WebRtcSession : IAsyncDisposable
         });
 
         var videoFormat = new VideoFormat(VideoCodecsEnum.VP8, 96);
-        var direction = role == WebRtcRole.Sender
-            ? MediaStreamStatusEnum.SendOnly
-            : MediaStreamStatusEnum.RecvOnly;
+        var direction = role switch
+        {
+            WebRtcRole.Sender => MediaStreamStatusEnum.SendOnly,
+            WebRtcRole.Receiver => MediaStreamStatusEnum.RecvOnly,
+            WebRtcRole.Bidirectional => MediaStreamStatusEnum.SendRecv,
+            _ => MediaStreamStatusEnum.SendRecv,
+        };
 
         var videoTrack = new MediaStreamTrack(
             SDPMediaTypesEnum.video,
@@ -196,4 +200,12 @@ public enum WebRtcRole
 
     /// <summary>The client will receive media from the server (viewer).</summary>
     Receiver,
+
+    /// <summary>
+    /// The client will both send and receive media through a single
+    /// <see cref="RTCPeerConnection"/>. Used by the room view so one signalling
+    /// session handles both the outbound screen share and any forwarded streams
+    /// from other peers in the same room.
+    /// </summary>
+    Bidirectional,
 }

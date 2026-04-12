@@ -2,10 +2,13 @@ using System;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Platform;
+using ScreenSharing.Client.Rendering;
 using ScreenSharing.Client.Services;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
@@ -20,6 +23,13 @@ public sealed partial class RoomViewModel : ViewModelBase
     private readonly Func<SignalingClient> _signalingFactory;
     private readonly ClientSettings _settings;
     private readonly ICaptureProvider? _captureProvider;
+
+    private WebRtcSession? _webRtc;
+    private StreamReceiver? _streamReceiver;
+    private WriteableBitmapRenderer? _remoteRenderer;
+    private ICaptureSource? _localCaptureSource;
+    private CaptureStreamer? _captureStreamer;
+    private bool _negotiationStarted;
 
     public RoomViewModel(
         SignalingClient signaling,
@@ -54,6 +64,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.PeerLeft += OnPeerLeft;
         _signaling.ServerError += OnServerError;
         _signaling.ConnectionLost += OnConnectionLost;
+
+        // Kick off the peer connection handshake in the background so the room is
+        // ready to both send (when the user hits Share) and receive (whenever any
+        // other peer's RTP flows through the SFU).
+        _ = StartWebRtcAsync();
     }
 
     public ObservableCollection<PeerViewModel> Peers { get; }
@@ -73,7 +88,134 @@ public sealed partial class RoomViewModel : ViewModelBase
     [ObservableProperty]
     private string? _statusMessage;
 
+    [ObservableProperty]
+    private string? _mediaStatus = "Connecting media...";
+
+    [ObservableProperty]
+    private bool _isSharing;
+
+    [ObservableProperty]
+    private Bitmap? _remoteStream;
+
+    [ObservableProperty]
+    private string? _localStreamLabel;
+
+    public bool CanShareScreen => _captureProvider is not null;
+
     private void UpdateYouAreHost() => YouAreHost = HostPeerId == YourPeerId;
+
+    private async Task StartWebRtcAsync()
+    {
+        if (_negotiationStarted) return;
+        _negotiationStarted = true;
+
+        try
+        {
+            var session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional);
+            _webRtc = session;
+
+            var renderer = new WriteableBitmapRenderer();
+            renderer.FrameRendered += OnRemoteFrameRendered;
+            _remoteRenderer = renderer;
+
+            var receiver = new StreamReceiver(session.PeerConnection, displayName: "Remote peer");
+            renderer.Attach(receiver);
+            _streamReceiver = receiver;
+            await receiver.StartAsync().ConfigureAwait(true);
+
+            await session.NegotiateAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
+            MediaStatus = "Waiting for a streamer...";
+        }
+        catch (Exception ex)
+        {
+            MediaStatus = $"Media setup failed: {ex.Message}";
+        }
+    }
+
+    private void OnRemoteFrameRendered()
+    {
+        if (_remoteRenderer is null) return;
+        var next = _remoteRenderer.CurrentBitmap;
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            RemoteStream = next;
+            MediaStatus = null;
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                RemoteStream = next;
+                MediaStatus = null;
+            });
+        }
+    }
+
+    [RelayCommand]
+    private async Task ShareScreenAsync()
+    {
+        if (IsSharing || _captureProvider is null || _webRtc is null)
+        {
+            return;
+        }
+
+        ICaptureSource? source = null;
+        try
+        {
+            source = await _captureProvider.PickSourceAsync().ConfigureAwait(true);
+            if (source is null)
+            {
+                StatusMessage = "Picker cancelled.";
+                return;
+            }
+
+            LocalStreamLabel = source.DisplayName;
+            _localCaptureSource = source;
+
+            var session = _webRtc;
+            var streamer = new CaptureStreamer(
+                source,
+                (duration, payload) => session.PeerConnection.SendVideo(duration, payload));
+            _captureStreamer = streamer;
+            streamer.Start();
+
+            await source.StartAsync().ConfigureAwait(true);
+            IsSharing = true;
+            StatusMessage = null;
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Share failed: {ex.Message}";
+            await StopSharingInternalAsync().ConfigureAwait(true);
+        }
+    }
+
+    [RelayCommand]
+    private Task StopSharingAsync() => StopSharingInternalAsync();
+
+    private async Task StopSharingInternalAsync()
+    {
+        var streamer = _captureStreamer;
+        var source = _localCaptureSource;
+
+        _captureStreamer = null;
+        _localCaptureSource = null;
+
+        if (streamer is not null)
+        {
+            streamer.Stop();
+            streamer.Dispose();
+        }
+
+        if (source is not null)
+        {
+            try { await source.StopAsync().ConfigureAwait(true); } catch { }
+            try { await source.DisposeAsync().ConfigureAwait(true); } catch { }
+        }
+
+        IsSharing = false;
+        LocalStreamLabel = null;
+    }
 
     private void OnPeerJoined(PeerInfo peer)
     {
@@ -131,6 +273,26 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.PeerLeft -= OnPeerLeft;
         _signaling.ServerError -= OnServerError;
         _signaling.ConnectionLost -= OnConnectionLost;
+
+        await StopSharingInternalAsync().ConfigureAwait(true);
+
+        if (_streamReceiver is not null && _remoteRenderer is not null)
+        {
+            _remoteRenderer.Detach(_streamReceiver);
+            _remoteRenderer.FrameRendered -= OnRemoteFrameRendered;
+            _remoteRenderer.Dispose();
+            _remoteRenderer = null;
+        }
+        if (_streamReceiver is not null)
+        {
+            await _streamReceiver.DisposeAsync().ConfigureAwait(true);
+            _streamReceiver = null;
+        }
+        if (_webRtc is not null)
+        {
+            await _webRtc.DisposeAsync().ConfigureAwait(true);
+            _webRtc = null;
+        }
 
         await _signaling.DisposeAsync();
 
