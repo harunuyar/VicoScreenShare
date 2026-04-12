@@ -8,4 +8,7 @@
     <Project Path="src/ScreenSharing.Protocol/ScreenSharing.Protocol.csproj" />
     <Project Path="src/ScreenSharing.Server/ScreenSharing.Server.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ScreenSharing.Tests/ScreenSharing.Tests.csproj" />
+  </Folder>
 </Solution>

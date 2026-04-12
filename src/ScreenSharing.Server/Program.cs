@@ -1,4 +1,9 @@
 using System.Net.WebSockets;
+using Microsoft.Extensions.DependencyInjection;
+using ScreenSharing.Server.Auth;
+using ScreenSharing.Server.Config;
+using ScreenSharing.Server.Rooms;
+using ScreenSharing.Server.Signaling;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,14 +24,18 @@ if (string.IsNullOrEmpty(builder.Configuration["urls"]) &&
     builder.WebHost.UseUrls("http://0.0.0.0:5000");
 }
 
+builder.Services.Configure<RoomServerOptions>(
+    builder.Configuration.GetSection("Rooms"));
+builder.Services.AddSingleton<PasswordHasher>();
+builder.Services.AddSingleton<RoomManager>();
+builder.Services.AddSingleton<SessionRegistry>();
+
 var app = builder.Build();
 
 app.UseWebSockets();
 
 app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
 
-// Phase 0 placeholder: accept the upgrade but close immediately.
-// The real handler lands in Phase 1.
 app.Map("/ws", async context =>
 {
     if (!context.WebSockets.IsWebSocketRequest)
@@ -36,10 +45,8 @@ app.Map("/ws", async context =>
     }
 
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
-    await socket.CloseAsync(
-        WebSocketCloseStatus.NormalClosure,
-        "Phase 0 placeholder -- signaling lands in Phase 1",
-        context.RequestAborted);
+    var session = ActivatorUtilities.CreateInstance<WsSession>(context.RequestServices, socket);
+    await session.RunAsync(context.RequestAborted);
 });
 
 app.Run();
