@@ -11,19 +11,18 @@ namespace ScreenSharing.Client.Media;
 /// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery send path.
 ///
 /// Pipeline per frame: compact the source-owned span into a packed BGRA buffer,
-/// downscale to a manageable encoder resolution (keeping aspect ratio), convert
+/// downscale to the <see cref="VideoSettings.MaxEncoderWidth"/> x
+/// <see cref="VideoSettings.MaxEncoderHeight"/> cap (aspect preserved), convert
 /// BGRA to I420 via our own <see cref="BgraToI420"/> (SIPSorcery's
 /// EncodeVideo(Bgra) path mislabels channels), run the I420 bytes through a
 /// VP8 encoder, emit the encoded payload via an <see cref="Action{T1, T2}"/>
 /// callback. Production wiring passes <c>RTCPeerConnection.SendVideo</c>;
 /// tests can pass a lambda.
 ///
-/// Downscaling is there because keyframes at modern capture sizes (4K monitors,
-/// 2560x1392 windows) become hundreds of kilobytes each, which chops into
-/// dozens of RTP fragments and stresses SIPSorcery's RTP reassembler enough to
-/// produce visibly corrupted preview frames on the viewer side. Capping the
-/// encoder input at <see cref="MaxEncoderWidth"/> x <see cref="MaxEncoderHeight"/>
-/// keeps each frame small enough that fragmentation stays simple.
+/// Frame rate is throttled to <see cref="VideoSettings.TargetFrameRate"/> by
+/// dropping any frame whose timestamp is closer than <c>1 / targetFps</c>
+/// seconds to the previously encoded frame. This reuses the capture source's
+/// own timestamps so a slower capture rate simply passes through unchanged.
 ///
 /// The encoder is rebuilt whenever the target dimensions change. libvpx locks
 /// its encoder state on first frame and silently produces garbage if you feed
@@ -36,12 +35,13 @@ namespace ScreenSharing.Client.Media;
 /// </summary>
 public sealed class CaptureStreamer : IDisposable
 {
-    public const int MaxEncoderWidth = 1280;
-    public const int MaxEncoderHeight = 720;
-
     private readonly ICaptureSource _source;
     private readonly Action<uint, byte[]> _onEncoded;
     private readonly object _encodeLock = new();
+
+    private readonly int _maxEncoderWidth;
+    private readonly int _maxEncoderHeight;
+    private readonly long _minFrameGapTicks;
 
     private VpxVideoEncoder _encoder;
     private int _encoderWidth;
@@ -51,13 +51,18 @@ public sealed class CaptureStreamer : IDisposable
     private byte[] _scaledBgraBuffer = Array.Empty<byte>();
     private byte[] _i420Buffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
+    private long _lastAcceptedFrameTicks = long.MinValue;
     private bool _attached;
     private bool _disposed;
 
-    public CaptureStreamer(ICaptureSource source, Action<uint, byte[]> onEncoded)
+    public CaptureStreamer(ICaptureSource source, Action<uint, byte[]> onEncoded, VideoSettings settings)
     {
         _source = source;
         _onEncoded = onEncoded;
+        _maxEncoderWidth = Math.Max(2, settings.MaxEncoderWidth);
+        _maxEncoderHeight = Math.Max(2, settings.MaxEncoderHeight);
+        var fps = Math.Clamp(settings.TargetFrameRate, 1, 120);
+        _minFrameGapTicks = TimeSpan.FromSeconds(1.0 / fps).Ticks;
         _encoder = new VpxVideoEncoder();
     }
 
@@ -66,6 +71,10 @@ public sealed class CaptureStreamer : IDisposable
 
     /// <summary>Total frames whose encoder output was non-empty and forwarded to the callback.</summary>
     public long EncodedFrameCount { get; private set; }
+
+    internal int CurrentEncoderWidth => _encoderWidth;
+
+    internal int CurrentEncoderHeight => _encoderHeight;
 
     public void Start()
     {
@@ -87,6 +96,17 @@ public sealed class CaptureStreamer : IDisposable
     {
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
+        // FPS throttle: drop a frame if its timestamp is less than
+        // _minFrameGapTicks after the previously accepted frame. First frame
+        // (_lastAcceptedFrameTicks == long.MinValue) always passes.
+        var ts = frame.Timestamp.Ticks;
+        if (_lastAcceptedFrameTicks != long.MinValue &&
+            ts - _lastAcceptedFrameTicks < _minFrameGapTicks)
+        {
+            return;
+        }
+        _lastAcceptedFrameTicks = ts;
+
         // Source crop: even dimensions (libvpx chroma subsampling) and non-negative.
         var sourceWidth = frame.Width & ~1;
         var sourceHeight = frame.Height & ~1;
@@ -94,10 +114,9 @@ public sealed class CaptureStreamer : IDisposable
 
         // Decide the encoder target: aspect-preserving fit into the max box.
         var (encWidth, encHeight) = BgraDownscale.FitWithin(
-            sourceWidth, sourceHeight, MaxEncoderWidth, MaxEncoderHeight);
+            sourceWidth, sourceHeight, _maxEncoderWidth, _maxEncoderHeight);
 
-        // Compact the source into a packed BGRA buffer first (stride may be padded
-        // by the capture backend; we always pack to width*4 for downstream math).
+        // Compact the source into a packed BGRA buffer first.
         var packedRowBytes = sourceWidth * 4;
         var packedBytes = packedRowBytes * sourceHeight;
         if (_sourceBgraBuffer.Length < packedBytes)

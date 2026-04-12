@@ -228,7 +228,8 @@ public sealed partial class RoomViewModel : ViewModelBase
             var session = _webRtc;
             var streamer = new CaptureStreamer(
                 source,
-                (duration, payload) => session.PeerConnection.SendVideo(duration, payload));
+                (duration, payload) => session.PeerConnection.SendVideo(duration, payload),
+                _settings.Video);
             _captureStreamer = streamer;
             streamer.Start();
 

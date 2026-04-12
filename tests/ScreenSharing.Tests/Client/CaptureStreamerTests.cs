@@ -11,7 +11,7 @@ public class CaptureStreamerTests
     {
         var source = new FakeCaptureSource();
         var samples = new List<(uint duration, byte[] payload)>();
-        using var streamer = new CaptureStreamer(source, (d, p) => samples.Add((d, p)));
+        using var streamer = new CaptureStreamer(source, (d, p) => samples.Add((d, p)), new VideoSettings());
         streamer.Start();
 
         // 64x64 is small enough to stay fast in a unit test but big enough that
@@ -29,9 +29,10 @@ public class CaptureStreamerTests
 
         // Pump a handful of frames; VP8 typically produces bytes on the first
         // keyframe but we allow several attempts in case the encoder has warm-up.
+        // 50ms spacing = 20fps, comfortably above the default 30fps throttle floor.
         for (var frameIndex = 0; frameIndex < 5; frameIndex++)
         {
-            source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(33 * frameIndex));
+            source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(50 * frameIndex));
         }
 
         streamer.FrameCount.Should().Be(5);
@@ -43,11 +44,64 @@ public class CaptureStreamerTests
     }
 
     [Fact]
+    public void Respects_encoder_resolution_cap_from_video_settings()
+    {
+        var source = new FakeCaptureSource();
+        var settings = new VideoSettings
+        {
+            MaxEncoderWidth = 640,
+            MaxEncoderHeight = 360,
+            TargetFrameRate = 30,
+        };
+        using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
+        streamer.Start();
+
+        // Source frame is 1280x720 (double the cap in each axis).
+        const int width = 1280;
+        const int height = 720;
+        var bgra = new byte[width * height * 4];
+        source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(0));
+
+        streamer.CurrentEncoderWidth.Should().Be(640);
+        streamer.CurrentEncoderHeight.Should().Be(360);
+    }
+
+    [Fact]
+    public void Drops_frames_when_incoming_rate_exceeds_target_fps()
+    {
+        var source = new FakeCaptureSource();
+        var settings = new VideoSettings
+        {
+            MaxEncoderWidth = 1280,
+            MaxEncoderHeight = 720,
+            TargetFrameRate = 30,
+        };
+        using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
+        streamer.Start();
+
+        const int width = 64;
+        const int height = 64;
+        var bgra = new byte[width * height * 4];
+
+        // Pump 50 frames 10 ms apart → 100 fps incoming. With a 30 fps target
+        // the throttle should let through ~15 of them (gap ≈ 33.3 ms).
+        for (var i = 0; i < 50; i++)
+        {
+            source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(i * 10));
+        }
+
+        streamer.FrameCount.Should().BeLessThan(20,
+            "50 frames at 10 ms spacing should be throttled down to ~15 at 30 fps");
+        streamer.FrameCount.Should().BeGreaterThan(10,
+            "throttle should still admit roughly one frame per 33 ms window");
+    }
+
+    [Fact]
     public void Stop_detaches_from_source_and_halts_emission()
     {
         var source = new FakeCaptureSource();
         var count = 0;
-        using var streamer = new CaptureStreamer(source, (_, _) => Interlocked.Increment(ref count));
+        using var streamer = new CaptureStreamer(source, (_, _) => Interlocked.Increment(ref count), new VideoSettings());
         streamer.Start();
 
         var bgra = new byte[32 * 32 * 4];

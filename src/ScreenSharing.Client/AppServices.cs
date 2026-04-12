@@ -1,4 +1,5 @@
 using System;
+using ScreenSharing.Client.Media;
 
 namespace ScreenSharing.Client;
 
@@ -15,4 +16,13 @@ public sealed class ClientSettings
     /// Signaling server WebSocket endpoint. Defaults to localhost:5000 for local dev.
     /// </summary>
     public Uri ServerUri { get; set; } = new("ws://localhost:5000/ws");
+
+    /// <summary>
+    /// Video pipeline preferences (resolution cap, fps, future bitrate). Lives
+    /// here so the room view models can read the current values when they
+    /// build a <see cref="CaptureStreamer"/>, and the settings UI can mutate
+    /// the same instance in place before asking the <c>SettingsStore</c> to
+    /// persist it.
+    /// </summary>
+    public VideoSettings Video { get; set; } = new();
 }

@@ -48,7 +48,8 @@ public sealed class LoopbackMediaE2ETests
         var fakeSource = new FakeCaptureSource();
         using var capture = new CaptureStreamer(
             fakeSource,
-            (duration, payload) => senderRtc.PeerConnection.SendVideo(duration, payload));
+            (duration, payload) => senderRtc.PeerConnection.SendVideo(duration, payload),
+            new VideoSettings());
         capture.Start();
 
         // --- Receiver side: join room, negotiate receiver PC, attach StreamReceiver. ---

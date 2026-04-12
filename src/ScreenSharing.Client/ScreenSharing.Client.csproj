@@ -24,4 +24,8 @@
     <ProjectReference Include="..\ScreenSharing.Protocol\ScreenSharing.Protocol.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="ScreenSharing.Tests" />
+  </ItemGroup>
+
 </Project>
