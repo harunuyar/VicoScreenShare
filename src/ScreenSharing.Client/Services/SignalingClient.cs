@@ -47,6 +47,9 @@ public sealed class SignalingClient : IAsyncDisposable
     public event Action<Guid, Guid?>? PeerLeft;
     public event Action<ErrorCode, string>? ServerError;
     public event Action<string?>? ConnectionLost;
+    public event Action<string>? SdpOfferReceived;
+    public event Action<string>? SdpAnswerReceived;
+    public event Action<string>? IceCandidateReceived;
 
     public bool IsConnected =>
         Volatile.Read(ref _state) == StateConnected && _socket?.State == WebSocketState.Open;
@@ -104,6 +107,15 @@ public sealed class SignalingClient : IAsyncDisposable
 
     public Task JoinRoomAsync(string roomId, string? password, CancellationToken ct = default) =>
         SendAsync(MessageType.JoinRoom, new JoinRoom(roomId, password), ct);
+
+    public Task SendSdpOfferAsync(string sdp, CancellationToken ct = default) =>
+        SendAsync(MessageType.SdpOffer, new SdpOffer(sdp), ct);
+
+    public Task SendSdpAnswerAsync(string sdp, CancellationToken ct = default) =>
+        SendAsync(MessageType.SdpAnswer, new SdpAnswer(sdp), ct);
+
+    public Task SendIceCandidateAsync(string candidateJson, CancellationToken ct = default) =>
+        SendAsync(MessageType.IceCandidate, new IceCandidate(candidateJson, null, null), ct);
 
     public async Task SendAsync<T>(string type, T payload, CancellationToken ct = default)
     {
@@ -225,6 +237,21 @@ public sealed class SignalingClient : IAsyncDisposable
             case MessageType.Error:
                 var err = envelope.Payload.Deserialize<Error>(ProtocolJson.Options);
                 if (err is not null) ServerError?.Invoke(err.Code, err.Message);
+                break;
+
+            case MessageType.SdpOffer:
+                var offer = envelope.Payload.Deserialize<SdpOffer>(ProtocolJson.Options);
+                if (offer is not null) SdpOfferReceived?.Invoke(offer.Sdp);
+                break;
+
+            case MessageType.SdpAnswer:
+                var answer = envelope.Payload.Deserialize<SdpAnswer>(ProtocolJson.Options);
+                if (answer is not null) SdpAnswerReceived?.Invoke(answer.Sdp);
+                break;
+
+            case MessageType.IceCandidate:
+                var ice = envelope.Payload.Deserialize<IceCandidate>(ProtocolJson.Options);
+                if (ice is not null) IceCandidateReceived?.Invoke(ice.Candidate);
                 break;
         }
     }

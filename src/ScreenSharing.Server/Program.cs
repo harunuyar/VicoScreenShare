@@ -1,9 +1,4 @@
-using System.Net.WebSockets;
-using Microsoft.Extensions.DependencyInjection;
-using ScreenSharing.Server.Auth;
-using ScreenSharing.Server.Config;
-using ScreenSharing.Server.Rooms;
-using ScreenSharing.Server.Signaling;
+using ScreenSharing.Server;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,31 +19,10 @@ if (string.IsNullOrEmpty(builder.Configuration["urls"]) &&
     builder.WebHost.UseUrls("http://0.0.0.0:5000");
 }
 
-builder.Services.Configure<RoomServerOptions>(
-    builder.Configuration.GetSection("Rooms"));
-builder.Services.AddSingleton<PasswordHasher>();
-builder.Services.AddSingleton<RoomManager>();
-builder.Services.AddSingleton<SessionRegistry>();
+ServerHost.ConfigureServices(builder.Services, builder.Configuration);
 
 var app = builder.Build();
-
-app.UseWebSockets();
-
-app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
-
-app.Map("/ws", async context =>
-{
-    if (!context.WebSockets.IsWebSocketRequest)
-    {
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        return;
-    }
-
-    using var socket = await context.WebSockets.AcceptWebSocketAsync();
-    var session = ActivatorUtilities.CreateInstance<WsSession>(context.RequestServices, socket);
-    await session.RunAsync(context.RequestAborted);
-});
-
+ServerHost.ConfigureEndpoints(app);
 app.Run();
 
 // Exposed so WebApplicationFactory<Program> can target this entry point in tests.
