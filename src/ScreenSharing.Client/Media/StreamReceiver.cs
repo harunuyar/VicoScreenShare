@@ -11,22 +11,23 @@ namespace ScreenSharing.Client.Media;
 /// <summary>
 /// Receiver-side counterpart to <see cref="CaptureStreamer"/>. Subscribes to an
 /// <see cref="RTCPeerConnection"/>'s <c>OnVideoFrameReceived</c>, decodes each
-/// reassembled VP8 frame into I420, converts to BGRA via SIPSorcery's own
-/// <see cref="PixelConverter"/> so encoder and decoder share identical YUV
-/// coefficients, and raises <see cref="FrameDecoded"/> with a
-/// <see cref="CaptureFrameData"/> that the Phase 2 <c>WriteableBitmapRenderer</c>
-/// can render directly.
+/// reassembled VP8 frame, converts the decoder output to BGRA, and raises
+/// <see cref="FrameArrived"/> with a <see cref="CaptureFrameData"/> that the
+/// Phase 2 <c>WriteableBitmapRenderer</c> can render directly.
 ///
-/// The class is effectively an <see cref="ICaptureSource"/> whose frames come
-/// from the network instead of a local capture, so tiles can reuse the Phase 2
-/// rendering path without any branching.
+/// IMPORTANT: SIPSorcery's <see cref="VpxVideoEncoder.DecodeVideo"/> ignores the
+/// <see cref="VideoPixelFormatsEnum"/> argument and always returns a 24-bit
+/// packed BGR buffer — <c>sample.Sample.Length == width * height * 3</c>. An
+/// earlier version of this class tried to interpret the buffer as I420 and
+/// produced the "video cut into pieces stacked on top of each other" visual
+/// because it was reading BGR bytes as planar YUV. Leave the direct BGR copy
+/// in place and do not add a PixelConverter call back here.
 /// </summary>
 public sealed class StreamReceiver : ICaptureSource, IDisposable
 {
     private readonly RTCPeerConnection _pc;
     private readonly VpxVideoEncoder _decoder;
     private readonly object _decodeLock = new();
-    private byte[] _bgrBuffer = Array.Empty<byte>();
     private byte[] _bgraBuffer = Array.Empty<byte>();
     private bool _attached;
     private bool _disposed;
@@ -115,7 +116,7 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             FramesReceived++;
             try
             {
-                samples = _decoder.DecodeVideo(encodedSample, VideoPixelFormatsEnum.I420, format.Codec);
+                samples = _decoder.DecodeVideo(encodedSample, VideoPixelFormatsEnum.Bgr, format.Codec);
             }
             catch
             {
@@ -132,37 +133,28 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             var height = (int)sample.Height;
             if (width <= 0 || height <= 0) continue;
 
-            // Run the decoded I420 through SIPSorcery's converter. NOTE:
-            // PixelConverter.I420toBGR is misnamed — it actually lays bytes out
-            // as R, G, B (verified with a VP8 round-trip unit test). We read
-            // those bytes in RGB order here and write them out to BGRA for
-            // Avalonia's Bgra8888 bitmap format, inserting 0xFF alpha per pixel.
-            byte[] rgb;
-            int stride;
-            try
-            {
-                rgb = PixelConverter.I420toBGR(sample.Sample, width, height, out stride);
-            }
-            catch
-            {
-                continue;
-            }
+            // See class comment: SIPSorcery's VP8 decoder returns packed BGR
+            // (3 bytes per pixel) regardless of the format argument. Guard on
+            // that to skip oddly-sized samples rather than blindly indexing.
+            var expectedBgr = width * height * 3;
+            if (sample.Sample.Length < expectedBgr) continue;
 
             var bgraSize = width * height * 4;
             if (_bgraBuffer.Length < bgraSize) _bgraBuffer = new byte[bgraSize];
 
+            var src = sample.Sample;
             for (var y = 0; y < height; y++)
             {
-                var srcRowStart = y * stride;
+                var srcRowStart = y * width * 3;
                 var dstRowStart = y * width * 4;
                 for (var x = 0; x < width; x++)
                 {
-                    var src = srcRowStart + x * 3;
-                    var dst = dstRowStart + x * 4;
-                    _bgraBuffer[dst + 0] = rgb[src + 2]; // B <- RGB[2]
-                    _bgraBuffer[dst + 1] = rgb[src + 1]; // G <- RGB[1]
-                    _bgraBuffer[dst + 2] = rgb[src + 0]; // R <- RGB[0]
-                    _bgraBuffer[dst + 3] = 0xFF;
+                    var s = srcRowStart + x * 3;
+                    var d = dstRowStart + x * 4;
+                    _bgraBuffer[d + 0] = src[s + 0]; // B
+                    _bgraBuffer[d + 1] = src[s + 1]; // G
+                    _bgraBuffer[d + 2] = src[s + 2]; // R
+                    _bgraBuffer[d + 3] = 0xFF;
                 }
             }
 

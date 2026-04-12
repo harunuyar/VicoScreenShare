@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Platform;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
@@ -7,18 +8,26 @@ using SIPSorceryMedia.Encoders;
 namespace ScreenSharing.Client.Media;
 
 /// <summary>
-/// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery-style send path.
+/// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery send path.
 ///
-/// Each frame: crop to even dimensions, compact into a packed BGRA buffer, convert
-/// to I420 via our own <see cref="BgraToI420"/> (SIPSorcery's EncodeVideo(Bgra...)
-/// path mislabels channels — verified by a VP8 round-trip unit test), feed the
-/// I420 bytes to a VP8 encoder, emit the encoded payload through a callback.
-/// Production wiring passes <c>RTCPeerConnection.SendVideo</c> as the callback;
+/// Pipeline per frame: compact the source-owned span into a packed BGRA buffer,
+/// downscale to a manageable encoder resolution (keeping aspect ratio), convert
+/// BGRA to I420 via our own <see cref="BgraToI420"/> (SIPSorcery's
+/// EncodeVideo(Bgra) path mislabels channels), run the I420 bytes through a
+/// VP8 encoder, emit the encoded payload via an <see cref="Action{T1, T2}"/>
+/// callback. Production wiring passes <c>RTCPeerConnection.SendVideo</c>;
 /// tests can pass a lambda.
 ///
-/// The encoder is rebuilt whenever the captured frame dimensions change because
-/// libvpx only configures itself on construction and silently produces garbage
-/// (striped, misaligned preview) when fed a differently-sized frame later.
+/// Downscaling is there because keyframes at modern capture sizes (4K monitors,
+/// 2560x1392 windows) become hundreds of kilobytes each, which chops into
+/// dozens of RTP fragments and stresses SIPSorcery's RTP reassembler enough to
+/// produce visibly corrupted preview frames on the viewer side. Capping the
+/// encoder input at <see cref="MaxEncoderWidth"/> x <see cref="MaxEncoderHeight"/>
+/// keeps each frame small enough that fragmentation stays simple.
+///
+/// The encoder is rebuilt whenever the target dimensions change. libvpx locks
+/// its encoder state on first frame and silently produces garbage if you feed
+/// it a differently-sized frame later.
 ///
 /// <see cref="Dispose"/> and <see cref="OnFrameArrived"/> are serialized by a
 /// mutex so a stop-streaming cannot race with a mid-flight frame inside the
@@ -27,6 +36,9 @@ namespace ScreenSharing.Client.Media;
 /// </summary>
 public sealed class CaptureStreamer : IDisposable
 {
+    public const int MaxEncoderWidth = 1280;
+    public const int MaxEncoderHeight = 720;
+
     private readonly ICaptureSource _source;
     private readonly Action<uint, byte[]> _onEncoded;
     private readonly object _encodeLock = new();
@@ -35,7 +47,8 @@ public sealed class CaptureStreamer : IDisposable
     private int _encoderWidth;
     private int _encoderHeight;
 
-    private byte[] _bgraBuffer = Array.Empty<byte>();
+    private byte[] _sourceBgraBuffer = Array.Empty<byte>();
+    private byte[] _scaledBgraBuffer = Array.Empty<byte>();
     private byte[] _i420Buffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
     private bool _attached;
@@ -68,39 +81,74 @@ public sealed class CaptureStreamer : IDisposable
         _source.FrameArrived -= OnFrameArrived;
     }
 
+    private int _diagnosticFrames;
+
     private void OnFrameArrived(in CaptureFrameData frame)
     {
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
-        // libvpx's VP8 encoder wants even dimensions (I420 uses 2x2 chroma
-        // subsampling blocks). Round down each axis to the nearest even value;
-        // worst case we drop a single row or column off a window edge.
-        var width = frame.Width & ~1;
-        var height = frame.Height & ~1;
-        if (width <= 0 || height <= 0) return;
+        // Source crop: even dimensions (libvpx chroma subsampling) and non-negative.
+        var sourceWidth = frame.Width & ~1;
+        var sourceHeight = frame.Height & ~1;
+        if (sourceWidth <= 0 || sourceHeight <= 0) return;
 
-        var byteCount = height * width * 4;
-        if (_bgraBuffer.Length < byteCount)
+        // Decide the encoder target: aspect-preserving fit into the max box.
+        var (encWidth, encHeight) = BgraDownscale.FitWithin(
+            sourceWidth, sourceHeight, MaxEncoderWidth, MaxEncoderHeight);
+
+        // Compact the source into a packed BGRA buffer first (stride may be padded
+        // by the capture backend; we always pack to width*4 for downstream math).
+        var packedRowBytes = sourceWidth * 4;
+        var packedBytes = packedRowBytes * sourceHeight;
+        if (_sourceBgraBuffer.Length < packedBytes)
         {
-            _bgraBuffer = new byte[byteCount];
+            _sourceBgraBuffer = new byte[packedBytes];
         }
-
-        // Compact the cropped rectangle from the source-owned span (which may
-        // have arbitrary stride padding) into a packed width*4 buffer. Doing
-        // this outside the lock lets us drop out of the ref-struct span scope
-        // before we try to acquire _encodeLock.
-        for (var y = 0; y < height; y++)
+        for (var y = 0; y < sourceHeight; y++)
         {
             frame.Pixels
-                .Slice(y * frame.StrideBytes, width * 4)
-                .CopyTo(_bgraBuffer.AsSpan(y * width * 4, width * 4));
+                .Slice(y * frame.StrideBytes, packedRowBytes)
+                .CopyTo(_sourceBgraBuffer.AsSpan(y * packedRowBytes, packedRowBytes));
+        }
+
+        // Downscale (if needed) into the scaled buffer.
+        byte[] encoderInput;
+        int encoderInputStride;
+        if (encWidth == sourceWidth && encHeight == sourceHeight)
+        {
+            encoderInput = _sourceBgraBuffer;
+            encoderInputStride = packedRowBytes;
+        }
+        else
+        {
+            var scaledBytes = encWidth * encHeight * 4;
+            if (_scaledBgraBuffer.Length < scaledBytes)
+            {
+                _scaledBgraBuffer = new byte[scaledBytes];
+            }
+            BgraDownscale.Downscale(
+                _sourceBgraBuffer.AsSpan(0, packedBytes),
+                sourceWidth,
+                sourceHeight,
+                _scaledBgraBuffer.AsSpan(0, scaledBytes),
+                encWidth,
+                encHeight);
+            encoderInput = _scaledBgraBuffer;
+            encoderInputStride = encWidth * 4;
+        }
+
+        if (_diagnosticFrames < 3)
+        {
+            Interlocked.Increment(ref _diagnosticFrames);
+            DebugLog.Write(
+                $"[send] src w={frame.Width} h={frame.Height} stride={frame.StrideBytes} -> enc w={encWidth} h={encHeight}");
         }
 
         var timestamp = frame.Timestamp;
-        EncodeAndEmit(width, height, byteCount, timestamp);
+        EncodeAndEmit(encoderInput, encoderInputStride, encWidth, encHeight, timestamp);
     }
 
-    private void EncodeAndEmit(int width, int height, int byteCount, TimeSpan timestamp)
+    private void EncodeAndEmit(byte[] encoderInput, int encoderStrideBytes, int width, int height, TimeSpan timestamp)
     {
         byte[]? encoded;
         lock (_encodeLock)
@@ -111,8 +159,7 @@ public sealed class CaptureStreamer : IDisposable
 
             // Rebuild the encoder if the stream dimensions changed. libvpx
             // initializes its encoder state from the first frame's dimensions
-            // and cannot retarget on the fly. Feeding it a differently-sized
-            // buffer after init produces a striped / shifted output frame.
+            // and cannot retarget on the fly.
             if (width != _encoderWidth || height != _encoderHeight)
             {
                 try { _encoder.Dispose(); } catch { }
@@ -127,10 +174,10 @@ public sealed class CaptureStreamer : IDisposable
                 _i420Buffer = new byte[i420Required];
             }
             BgraToI420.Convert(
-                _bgraBuffer.AsSpan(0, byteCount),
+                encoderInput.AsSpan(0, height * encoderStrideBytes),
                 width,
                 height,
-                bgraStrideBytes: width * 4,
+                encoderStrideBytes,
                 _i420Buffer);
 
             try
@@ -144,8 +191,6 @@ public sealed class CaptureStreamer : IDisposable
             }
             catch (Exception)
             {
-                // Encoder will surface init failures on the first frame; drop it
-                // and let the next frame retry instead of tearing down capture.
                 return;
             }
 
@@ -157,8 +202,6 @@ public sealed class CaptureStreamer : IDisposable
             EncodedFrameCount++;
         }
 
-        // The callback runs outside the lock so a slow RTCPeerConnection.SendVideo
-        // cannot block Dispose for longer than one encode pass.
         var duration = ComputeDurationRtpUnits(timestamp);
         _onEncoded(duration, encoded);
     }
@@ -170,7 +213,6 @@ public sealed class CaptureStreamer : IDisposable
         var previous = Interlocked.Exchange(ref _lastTimestampTicks, ticks);
         if (previous == 0)
         {
-            // First frame -- assume a nominal 30 fps step until we have a real gap.
             return rtpClockRateHz / 30;
         }
         var elapsed = TimeSpan.FromTicks(ticks - previous);
@@ -186,11 +228,6 @@ public sealed class CaptureStreamer : IDisposable
 
     public void Dispose()
     {
-        // First detach from the source so new frames stop arriving. Then acquire
-        // the encode lock so any currently-executing EncodeVideo completes before
-        // we free the native encoder. Without this pairing, libvpx's internal
-        // state gets freed under an in-flight encode and the CLR throws
-        // ExecutionEngineException from the native memory corruption.
         Stop();
         lock (_encodeLock)
         {

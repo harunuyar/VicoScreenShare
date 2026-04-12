@@ -1,19 +1,26 @@
 using FluentAssertions;
+using ScreenSharing.Client.Media;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
 
 namespace ScreenSharing.Tests.Client;
 
 /// <summary>
-/// Drives SIPSorcery's own VP8 encoder + decoder with known solid-color BGRA
-/// frames and inspects the decoded output. Locks in the RGB/BGR byte-order
-/// interpretation we established empirically: <c>PixelConverter.I420toBGR</c>
-/// actually lays bytes out in R, G, B order despite the name, so the receiver
-/// must read the returned buffer as RGB and swap into BGRA.
+/// Drives SIPSorcery's own VP8 encoder + decoder with solid-color BGRA frames
+/// and inspects the decoded output to lock in the two empirical facts the
+/// Phase 3 receiver relies on:
 ///
-/// VP8 lossy round-trip introduces significant chroma drift even on solid
-/// colors at low quality presets; the assertions are loose ("the right channel
-/// is the dominant one") rather than pixel-accurate.
+/// 1. <see cref="VpxVideoEncoder.EncodeVideo"/> with <see cref="VideoPixelFormatsEnum.Bgra"/>
+///    mislabels channels, so the sender hand-rolls <see cref="BgraToI420"/> and
+///    passes the I420 buffer instead.
+/// 2. <see cref="VpxVideoEncoder.DecodeVideo"/> ignores the pixel format
+///    argument and always returns a 24-bit packed BGR buffer — sample.Length
+///    == width * height * 3. Treating this as I420 produces the "video cut
+///    into pieces stacked on top of each other" visual. The receiver copies
+///    these bytes straight into BGRA (inserting alpha) instead.
+///
+/// If either of these regresses, one of these tests will fail in CI and the
+/// Phase 3 receive path will visibly break again.
 /// </summary>
 public class Vp8RoundtripTests
 {
@@ -38,7 +45,7 @@ public class Vp8RoundtripTests
         using var encoder = new VpxVideoEncoder();
         using var decoder = new VpxVideoEncoder();
 
-        var i420 = ScreenSharing.Client.Media.BgraToI420.ConvertToArray(bgra, width, height, width * 4);
+        var i420 = BgraToI420.ConvertToArray(bgra, width, height, width * 4);
 
         byte[]? encoded = null;
         for (var attempt = 0; attempt < 10 && (encoded is null || encoded.Length == 0); attempt++)
@@ -48,7 +55,7 @@ public class Vp8RoundtripTests
         encoded.Should().NotBeNull();
         encoded!.Length.Should().BeGreaterThan(0);
 
-        var samples = decoder.DecodeVideo(encoded, VideoPixelFormatsEnum.I420, VideoCodecsEnum.VP8);
+        var samples = decoder.DecodeVideo(encoded, VideoPixelFormatsEnum.Bgr, VideoCodecsEnum.VP8);
         samples.Should().NotBeNull();
 
         var matched = false;
@@ -56,39 +63,40 @@ public class Vp8RoundtripTests
         {
             var w = (int)sample.Width;
             var h = (int)sample.Height;
+            w.Should().Be(width);
+            h.Should().Be(height);
 
-            // PixelConverter.I420toBGR is misnamed: it lays bytes out as R,G,B.
-            // Mirror the StreamReceiver's fix: read the result as RGB.
-            var rgb = PixelConverter.I420toBGR(sample.Sample!, w, h, out var stride);
+            // Lock in the 24-bit packed layout the receiver depends on.
+            sample.Sample.Should().NotBeNull();
+            sample.Sample!.Length.Should().Be(w * h * 3,
+                "SIPSorcery's VP8 decoder returns width*height*3 packed BGR regardless of the " +
+                "VideoPixelFormatsEnum argument; the receiver relies on this exact layout");
+
             var cy = h / 2;
             var cx = w / 2;
-            var idx = cy * stride + cx * 3;
-            var r = rgb[idx + 0];
-            var g = rgb[idx + 1];
-            var b = rgb[idx + 2];
+            var idx = cy * w * 3 + cx * 3;
 
-            // The dominant channel of the input must be the dominant channel of
-            // the output. VP8 at low preset chops a LOT of magnitude off solid
-            // colors (observed ~113 for 255 green, for example), so we just
-            // check that the intended channel is the max and is still visibly
-            // present.
+            var b = sample.Sample[idx + 0];
+            var g = sample.Sample[idx + 1];
+            var r = sample.Sample[idx + 2];
+
             if (inR == 0xFF)
             {
-                r.Should().BeGreaterThan(g, $"{name}: red should dominate");
-                r.Should().BeGreaterThan(b, $"{name}: red should dominate");
-                r.Should().BeGreaterThan(50, $"{name}: red should remain visibly present");
+                r.Should().BeGreaterThan(g, $"{name}: red should dominate (B={b} G={g} R={r})");
+                r.Should().BeGreaterThan(b, $"{name}: red should dominate (B={b} G={g} R={r})");
+                r.Should().BeGreaterThan(50, $"{name}: red should remain visibly present (B={b} G={g} R={r})");
             }
             else if (inG == 0xFF)
             {
-                g.Should().BeGreaterThan(r, $"{name}: green should dominate");
-                g.Should().BeGreaterThan(b, $"{name}: green should dominate");
-                g.Should().BeGreaterThan(50, $"{name}: green should remain visibly present");
+                g.Should().BeGreaterThan(r, $"{name}: green should dominate (B={b} G={g} R={r})");
+                g.Should().BeGreaterThan(b, $"{name}: green should dominate (B={b} G={g} R={r})");
+                g.Should().BeGreaterThan(50, $"{name}: green should remain visibly present (B={b} G={g} R={r})");
             }
             else if (inB == 0xFF)
             {
-                b.Should().BeGreaterThan(r, $"{name}: blue should dominate");
-                b.Should().BeGreaterThan(g, $"{name}: blue should dominate");
-                b.Should().BeGreaterThan(50, $"{name}: blue should remain visibly present");
+                b.Should().BeGreaterThan(r, $"{name}: blue should dominate (B={b} G={g} R={r})");
+                b.Should().BeGreaterThan(g, $"{name}: blue should dominate (B={b} G={g} R={r})");
+                b.Should().BeGreaterThan(50, $"{name}: blue should remain visibly present (B={b} G={g} R={r})");
             }
             matched = true;
         }

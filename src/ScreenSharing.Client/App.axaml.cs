@@ -2,6 +2,7 @@ using System;
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
 using ScreenSharing.Client.ViewModels;
@@ -27,6 +28,11 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            // Start each run with a fresh debug log so users can find only the
+            // current session's diagnostic data at DebugLog.FilePath.
+            DebugLog.Reset();
+            DebugLog.Write($"== ScreenSharing client start @ {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==");
+
             var identity = new IdentityStore();
             var navigation = new NavigationService();
             var settings = new ClientSettings();
