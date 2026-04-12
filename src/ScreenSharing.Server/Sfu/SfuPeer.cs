@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Text.Json;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
@@ -53,6 +54,7 @@ public sealed class SfuPeer : IAsyncDisposable
 
         _pc.onicecandidate += OnLocalIceCandidate;
         _pc.onconnectionstatechange += OnConnectionStateChange;
+        _pc.OnRtpPacketReceived += OnRtpPacketReceived;
     }
 
     public Guid PeerId { get; }
@@ -66,6 +68,49 @@ public sealed class SfuPeer : IAsyncDisposable
     /// into its own peer connection.
     /// </summary>
     public event Action<string>? LocalIceCandidateReady;
+
+    /// <summary>
+    /// Fired for every RTP packet received from the remote peer. Consumed by the
+    /// <see cref="SfuSession"/> RTP forwarder to fan the packet out to every
+    /// other peer in the same room.
+    /// </summary>
+    public event Action<SDPMediaTypesEnum, RTPPacket>? RtpPacketReceived;
+
+    private void OnRtpPacketReceived(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    {
+        try
+        {
+            RtpPacketReceived?.Invoke(mediaType, rtpPacket);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "SfuPeer {PeerId} RTP forwarder handler threw", PeerId);
+        }
+    }
+
+    /// <summary>
+    /// Forward an RTP packet we received from another peer out through this peer's
+    /// send track. The receiver sees it as a normal stream; SIPSorcery's
+    /// <c>SendRtpRaw</c> assigns its own SSRC and sequence number for this outbound
+    /// path, which is exactly the SFU fan-out behavior we want.
+    /// </summary>
+    public void SendForwardedRtp(SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    {
+        if (_disposed) return;
+        try
+        {
+            _pc.SendRtpRaw(
+                mediaType,
+                rtpPacket.Payload,
+                rtpPacket.Header.Timestamp,
+                rtpPacket.Header.MarkerBit,
+                rtpPacket.Header.PayloadType);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "SfuPeer {PeerId} failed to forward RTP", PeerId);
+        }
+    }
 
     private void OnLocalIceCandidate(RTCIceCandidate candidate)
     {
@@ -201,6 +246,7 @@ public sealed class SfuPeer : IAsyncDisposable
 
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }
         try { _pc.onconnectionstatechange -= OnConnectionStateChange; } catch { }
+        try { _pc.OnRtpPacketReceived -= OnRtpPacketReceived; } catch { }
         try { _pc.close(); } catch { }
         try { _pc.Dispose(); } catch { }
 
