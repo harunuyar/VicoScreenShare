@@ -1,0 +1,71 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:ScreenSharing.Client.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
+             x:Class="ScreenSharing.Client.Views.RoomView"
+             x:DataType="vm:RoomViewModel">
+
+    <Grid Margin="32" RowDefinitions="Auto,*,Auto,Auto">
+
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto">
+            <StackPanel Grid.Column="0" Spacing="4">
+                <TextBlock Text="Room" Opacity="0.6" FontSize="12" />
+                <TextBlock Text="{Binding RoomId}" FontSize="28" FontWeight="Bold" />
+            </StackPanel>
+            <Button Grid.Column="1"
+                    Content="Leave room"
+                    Command="{Binding LeaveRoomCommand}"
+                    VerticalAlignment="Center" />
+        </Grid>
+
+        <Border Grid.Row="1"
+                Margin="0,24,0,0"
+                CornerRadius="8"
+                BorderThickness="1"
+                BorderBrush="#40808080"
+                Padding="16">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top"
+                           Text="People in this room"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,8" />
+                <ListBox ItemsSource="{Binding Peers}">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="vm:PeerViewModel">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                <Border CornerRadius="10"
+                                        Background="#4CAF50"
+                                        Padding="6,1"
+                                        IsVisible="{Binding IsHost}">
+                                    <TextBlock Text="host" FontSize="10" Foreground="White" />
+                                </Border>
+                                <Border CornerRadius="10"
+                                        Background="#4080FF"
+                                        Padding="6,1"
+                                        IsVisible="{Binding IsSelf}">
+                                    <TextBlock Text="you" FontSize="10" Foreground="White" />
+                                </Border>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </DockPanel>
+        </Border>
+
+        <TextBlock Grid.Row="2"
+                   Text="You are the host of this room."
+                   IsVisible="{Binding YouAreHost}"
+                   Opacity="0.6"
+                   Margin="0,12,0,0" />
+
+        <TextBlock Grid.Row="3"
+                   Text="{Binding StatusMessage}"
+                   IsVisible="{Binding StatusMessage, Converter={x:Static ObjectConverters.IsNotNull}}"
+                   Margin="0,12,0,0"
+                   Foreground="#FFB8A0"
+                   TextWrapping="Wrap" />
+    </Grid>
+</UserControl>

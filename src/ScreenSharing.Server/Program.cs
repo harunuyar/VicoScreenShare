@@ -50,3 +50,6 @@ app.Map("/ws", async context =>
 });
 
 app.Run();
+
+// Exposed so WebApplicationFactory<Program> can target this entry point in tests.
+public partial class Program { }
