@@ -26,6 +26,12 @@ public sealed class WindowsCaptureSource : ICaptureSource
     private readonly D3D11DeviceManager _devices;
     private readonly Stopwatch _timer = Stopwatch.StartNew();
 
+    // Serializes the free-threaded framepool callback against StopAsync /
+    // DisposeAsync. Without it, a frame callback can be running CopyResource +
+    // Map on the D3D11 Context when the UI thread disposes the framepool and
+    // staging texture out from under it, which corrupts the native heap and
+    // surfaces as a stack-less ExecutionEngineException.
+    private readonly object _frameLock = new();
     private Direct3D11CaptureFramePool? _framePool;
     private GraphicsCaptureSession? _session;
     private ID3D11Texture2D? _stagingTexture;
@@ -84,12 +90,20 @@ public sealed class WindowsCaptureSource : ICaptureSource
 
     public Task StopAsync()
     {
-        _session?.Dispose();
-        _session = null;
+        // Unsubscribe outside the lock so we don't deadlock against a callback
+        // that's already waiting to acquire _frameLock. C# event removal is
+        // atomic enough that no new callback will be dispatched once this
+        // returns; the lock handles the already-in-flight one.
         if (_framePool is not null)
         {
             _framePool.FrameArrived -= OnFrameArrived;
-            _framePool.Dispose();
+        }
+
+        lock (_frameLock)
+        {
+            _session?.Dispose();
+            _session = null;
+            _framePool?.Dispose();
             _framePool = null;
         }
         return Task.CompletedTask;
@@ -98,10 +112,14 @@ public sealed class WindowsCaptureSource : ICaptureSource
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        _disposed = true;
         await StopAsync().ConfigureAwait(false);
-        _stagingTexture?.Dispose();
-        _stagingTexture = null;
+        lock (_frameLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _stagingTexture?.Dispose();
+            _stagingTexture = null;
+        }
         _item.Closed -= OnItemClosed;
     }
 
@@ -113,11 +131,23 @@ public sealed class WindowsCaptureSource : ICaptureSource
 
     private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
     {
-        if (_disposed) return;
+        // The entire callback runs under _frameLock so a concurrent teardown
+        // cannot dispose the framepool, staging texture, or D3D context while
+        // we're mid-copy. The lock body is a handful of GPU ops + a memcpy, so
+        // the contention it adds to shutdown is negligible (sub-millisecond).
+        lock (_frameLock)
+        {
+            if (_disposed || _framePool is null) return;
 
-        using var frame = sender.TryGetNextFrame();
-        if (frame is null) return;
+            using var frame = sender.TryGetNextFrame();
+            if (frame is null) return;
 
+            ProcessFrameLocked(sender, frame);
+        }
+    }
+
+    private void ProcessFrameLocked(Direct3D11CaptureFramePool sender, Direct3D11CaptureFrame frame)
+    {
         var width = frame.ContentSize.Width;
         var height = frame.ContentSize.Height;
         if (width <= 0 || height <= 0) return;
