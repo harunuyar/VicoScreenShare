@@ -19,10 +19,14 @@ namespace ScreenSharing.Client.Services;
 /// (Avalonia's <c>Dispatcher.UIThread</c>).
 ///
 /// Each <see cref="ConnectAsync"/> call creates a fresh <see cref="Session"/> holding
-/// that connection's socket, outbound channel, and cancellation source. The reader
-/// and writer tasks only touch their owning Session, so a stale reader unwinding
-/// concurrently with a new <see cref="ConnectAsync"/> cannot complete the new
-/// session's channel or fire <see cref="ConnectionLost"/> into a new operation.
+/// that connection's socket, outbound channel, and a per-session delivery lock. The
+/// reader and writer tasks only touch their owning Session. Event delivery is gated
+/// by the Session's delivery lock: every reader-side fire snapshots the delegate list
+/// under the lock while checking <see cref="Session.IsRetired"/>, and retirement
+/// acquires the same lock to flip the flag. If retirement acquires first, any later
+/// reader fire sees <c>IsRetired == true</c> and stays silent, so a stale reader
+/// unwinding concurrently with a new reconnect cannot leak events into the new
+/// session's subscribers.
 /// </summary>
 public sealed class SignalingClient : IAsyncDisposable
 {
@@ -59,15 +63,13 @@ public sealed class SignalingClient : IAsyncDisposable
             }
         }
 
-        // If there's an older session still unwinding (e.g. after a drop) or even
-        // mid-finally, retire it with suppression: the caller is explicitly
-        // reconnecting, so any pending ConnectionLost from the old reader must not
-        // leak into the new operation's subscribers. The suppression is atomic via
-        // Interlocked.CompareExchange on Session.NotifyClaimed, so the reader and
-        // the retirement path can never both fire.
+        // Retire any prior session before publishing a new one. This both flips
+        // IsRetired under the delivery lock (suppressing any pending reader fire)
+        // and awaits the reader/writer tasks so a stale reader cannot race the new
+        // session's setup.
         if (previous is not null)
         {
-            await RetireSessionAsync(previous, suppressConnectionLost: true).ConfigureAwait(false);
+            await RetireSessionAsync(previous).ConfigureAwait(false);
         }
 
         var socket = new ClientWebSocket();
@@ -99,9 +101,9 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         catch
         {
-            // Partial-start rollback: retire this new session silently and rethrow so
-            // the caller sees a clean error state.
-            await RetireSessionAsync(session, suppressConnectionLost: true).ConfigureAwait(false);
+            // Partial-start rollback: retire this new session and rethrow so the
+            // caller sees a clean error state and can retry.
+            await RetireSessionAsync(session).ConfigureAwait(false);
             throw;
         }
     }
@@ -175,31 +177,56 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         finally
         {
-            // Always complete THIS session's own channel so the writer exits. The
-            // channel reference lives on the Session, so there is no chance of
-            // completing a newer session's channel here.
+            // Complete THIS session's own channel so the writer exits. Per-session,
+            // never touches a newer session's channel.
             session.Outbound.Writer.TryComplete();
 
-            // Claim the one-shot notification slot for this session. If retirement
-            // has already claimed it (suppressing stale events during a reconnect),
-            // the CAS here fails and we stay silent. Otherwise we fire exactly once.
-            if (Interlocked.CompareExchange(ref session.NotifyClaimed, 1, 0) == 0)
+            // Atomic one-shot ConnectionLost delivery. Under the session's delivery
+            // lock we check IsRetired, mark it retired if not, and snapshot the
+            // subscriber list. The invocation itself happens outside the lock.
+            Action<string?>? handler = null;
+            lock (session.DeliveryLock)
             {
-                ConnectionLost?.Invoke(lostReason);
+                if (!session.IsRetired)
+                {
+                    session.IsRetired = true;
+                    handler = ConnectionLost;
+                }
             }
+            handler?.Invoke(lostReason);
         }
     }
 
     private void HandleEnvelope(Session session, MessageEnvelope envelope)
     {
+        // Snapshot handler references inside the delivery lock, bailing out if the
+        // session has already been retired. This keeps stale readers from racing
+        // into the new session's subscriber list for *any* event type.
+        Action<string>? onRoomCreated;
+        Action<RoomJoined>? onRoomJoined;
+        Action<PeerInfo>? onPeerJoined;
+        Action<Guid, Guid?>? onPeerLeft;
+        Action<ErrorCode, string>? onServerError;
+
+        lock (session.DeliveryLock)
+        {
+            if (session.IsRetired) return;
+            onRoomCreated = RoomCreated;
+            onRoomJoined = RoomJoined;
+            onPeerJoined = PeerJoined;
+            onPeerLeft = PeerLeft;
+            onServerError = ServerError;
+        }
+
         switch (envelope.Type)
         {
             case MessageType.Ping:
                 var ping = envelope.Payload.Deserialize<Ping>(ProtocolJson.Options);
                 if (ping is not null)
                 {
-                    // Write directly to the session's channel — never through SendAsync,
-                    // which reads _current and could race with a newer reconnect.
+                    // Pong replies are written straight to this session's channel;
+                    // never routed through SendAsync (which reads _current) so a
+                    // reconnect can't send them on the new session.
                     var element = JsonSerializer.SerializeToElement(new Pong(ping.Timestamp), ProtocolJson.Options);
                     var pong = new MessageEnvelope(MessageType.Pong, null, element);
                     var json = JsonSerializer.Serialize(pong, ProtocolJson.Options);
@@ -212,27 +239,27 @@ public sealed class SignalingClient : IAsyncDisposable
 
             case MessageType.RoomCreated:
                 var created = envelope.Payload.Deserialize<RoomCreated>(ProtocolJson.Options);
-                if (created is not null) RoomCreated?.Invoke(created.RoomId);
+                if (created is not null) onRoomCreated?.Invoke(created.RoomId);
                 break;
 
             case MessageType.RoomJoined:
                 var joined = envelope.Payload.Deserialize<RoomJoined>(ProtocolJson.Options);
-                if (joined is not null) RoomJoined?.Invoke(joined);
+                if (joined is not null) onRoomJoined?.Invoke(joined);
                 break;
 
             case MessageType.PeerJoined:
                 var pj = envelope.Payload.Deserialize<PeerJoined>(ProtocolJson.Options);
-                if (pj is not null) PeerJoined?.Invoke(pj.Peer);
+                if (pj is not null) onPeerJoined?.Invoke(pj.Peer);
                 break;
 
             case MessageType.PeerLeft:
                 var pl = envelope.Payload.Deserialize<PeerLeft>(ProtocolJson.Options);
-                if (pl is not null) PeerLeft?.Invoke(pl.PeerId, pl.NewHostPeerId);
+                if (pl is not null) onPeerLeft?.Invoke(pl.PeerId, pl.NewHostPeerId);
                 break;
 
             case MessageType.Error:
                 var err = envelope.Payload.Deserialize<Error>(ProtocolJson.Options);
-                if (err is not null) ServerError?.Invoke(err.Code, err.Message);
+                if (err is not null) onServerError?.Invoke(err.Code, err.Message);
                 break;
         }
     }
@@ -288,28 +315,25 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         if (session is not null)
         {
-            await RetireSessionAsync(session, suppressConnectionLost: true).ConfigureAwait(false);
+            await RetireSessionAsync(session).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Cancels the session, optionally suppresses any pending ConnectionLost event
-    /// from the reader, and waits for reader and writer to unwind before disposing
-    /// the socket and cts. Suppression is atomic: claiming
-    /// <see cref="Session.NotifyClaimed"/> before awaiting the reader guarantees that
-    /// if the reader has not yet fired its finally-block event, it will lose the CAS
-    /// and stay silent. If the reader has already fired, retirement is a no-op on
-    /// the slot and still awaits the task to completion.
+    /// Atomically mark the session retired (suppressing any pending reader fire),
+    /// cancel its cts, close the socket, and wait for the reader/writer tasks to
+    /// finish before disposing the resources. After this returns the session is
+    /// inert and cannot affect the client's event stream.
     /// </summary>
-    private static async Task RetireSessionAsync(Session session, bool suppressConnectionLost)
+    private static async Task RetireSessionAsync(Session session)
     {
-        session.IsRetired = true;
-
-        if (suppressConnectionLost)
+        // Flip IsRetired under the delivery lock. If the reader has not yet entered
+        // its event-fire block, it will see IsRetired == true and stay silent. If
+        // the reader was mid-fire (already past the check but not done invoking),
+        // we wait for it via ReaderTask below.
+        lock (session.DeliveryLock)
         {
-            // Claim the notification slot atomically BEFORE the reader can run its
-            // CAS in its finally. If the reader already claimed it, no harm done.
-            Interlocked.Exchange(ref session.NotifyClaimed, 1);
+            session.IsRetired = true;
         }
 
         try { session.Cts.Cancel(); } catch (ObjectDisposedException) { }
@@ -342,17 +366,11 @@ public sealed class SignalingClient : IAsyncDisposable
 
     /// <summary>
     /// Per-connection state. Captured by the reader/writer tasks so they never touch
-    /// the client's fields. Two distinct flags:
-    /// <list type="bullet">
-    ///   <item><see cref="IsRetired"/> is a coarse "session has been asked to shut
-    ///   down" marker, set at the start of <see cref="RetireSessionAsync"/> so
-    ///   <see cref="IsConnected"/> and the "already connected" gate immediately stop
-    ///   reporting the session as live.</item>
-    ///   <item><see cref="NotifyClaimed"/> is a compare-exchange slot that gates the
-    ///   one-shot <see cref="ConnectionLost"/> invocation: either the reader's
-    ///   finally wins it, or the retirement path claims it first to suppress a
-    ///   stale event, but never both.</item>
-    /// </list>
+    /// the client's fields. <see cref="DeliveryLock"/> serializes event delivery with
+    /// retirement: every reader-side fire snapshots the delegate list under the lock
+    /// while checking <see cref="IsRetired"/>, and retirement acquires the same lock
+    /// to flip the flag. No race window, no lost events for a live session, no stale
+    /// events after retirement.
     /// </summary>
     private sealed class Session
     {
@@ -368,7 +386,7 @@ public sealed class SignalingClient : IAsyncDisposable
         public Channel<string> Outbound { get; }
         public Task ReaderTask { get; set; } = Task.CompletedTask;
         public Task WriterTask { get; set; } = Task.CompletedTask;
-        public volatile bool IsRetired;
-        public int NotifyClaimed;
+        public object DeliveryLock { get; } = new();
+        public bool IsRetired; // guarded by DeliveryLock
     }
 }

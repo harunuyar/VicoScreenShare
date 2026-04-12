@@ -93,6 +93,70 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Subscriber_added_during_handler_invocation_does_not_receive_in_flight_event()
+    {
+        // The reader snapshots the handler delegate list inside DeliveryLock and
+        // invokes that snapshot outside the lock. A new subscriber added between
+        // the snapshot and the invoke must NOT receive the in-flight event: the
+        // snapshot is captured by value (multicast delegate is immutable).
+        //
+        // We force the scenario deterministically: the first handler blocks until
+        // we say so, during which time we add a second handler, then release the
+        // first handler and assert the second never ran.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        await using var server = StartRoomCreatedServer(out var uri);
+
+        var client = new SignalingClient();
+        var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
+
+        var firstHandlerEntered = new ManualResetEventSlim(false);
+        var firstHandlerMayProceed = new ManualResetEventSlim(false);
+        var firstHandlerFired = false;
+        var secondHandlerFired = false;
+
+        void FirstHandler(string roomId)
+        {
+            firstHandlerFired = true;
+            firstHandlerEntered.Set();
+            firstHandlerMayProceed.Wait(TimeSpan.FromSeconds(5));
+        }
+        void SecondHandler(string roomId)
+        {
+            secondHandlerFired = true;
+        }
+
+        client.RoomCreated += FirstHandler;
+        await client.ConnectAsync(uri, hello, cts.Token);
+
+        // Trigger the server to emit room_created; FirstHandler will be invoked
+        // and will block on firstHandlerMayProceed.
+        await client.CreateRoomAsync(null, cts.Token);
+        firstHandlerEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
+            "the server's room_created must reach the first handler");
+
+        // First handler is currently parked inside its invocation. Subscribe a
+        // second handler; it was NOT present when the reader took the snapshot.
+        client.RoomCreated += SecondHandler;
+
+        // Release the first handler and let the reader continue.
+        firstHandlerMayProceed.Set();
+
+        // Give the reader a tick to finish invoking and any subsequent messages to
+        // flow through. We are not expecting more room_created messages, so the
+        // second handler should stay idle.
+        await Task.Delay(200, cts.Token);
+
+        firstHandlerFired.Should().BeTrue();
+        secondHandlerFired.Should().BeFalse(
+            "the snapshot of the delegate list was taken before SecondHandler was subscribed");
+
+        client.RoomCreated -= FirstHandler;
+        client.RoomCreated -= SecondHandler;
+        await client.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Reconnect_during_drop_does_not_leak_stale_ConnectionLost_into_new_session()
     {
         // Scenario: server A drops the socket, then we reconnect to server B. The old
@@ -243,6 +307,59 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                     // Second frame (create_room) triggers an abort without sending a reply.
                     await socket.CloseAsync(WebSocketCloseStatus.InternalServerError, "simulated", CancellationToken.None);
                     break;
+                }
+            }
+            catch { }
+        });
+        app.StartAsync().GetAwaiter().GetResult();
+        serverUri = ResolveWsUri(app);
+        return app;
+    }
+
+    /// <summary>
+    /// Minimal Kestrel listener that accepts the client hello and, on receiving the
+    /// follow-up create_room request, replies with a canned room_created envelope.
+    /// Used to drive client-side delegate-snapshot behavior deterministically without
+    /// spinning up the full signaling server.
+    /// </summary>
+    private static WebApplication StartRoomCreatedServer(out Uri serverUri)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        app.UseWebSockets();
+        app.Map("/ws", async context =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = 400;
+                return;
+            }
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            var buf = new byte[4096];
+            var framesReceived = 0;
+            try
+            {
+                while (socket.State == WebSocketState.Open)
+                {
+                    var res = await socket.ReceiveAsync(buf, context.RequestAborted);
+                    if (res.MessageType == WebSocketMessageType.Close) break;
+                    framesReceived++;
+                    // Second frame is the create_room request; reply with a canned
+                    // room_created envelope so the client's RoomCreated event fires.
+                    if (framesReceived == 2)
+                    {
+                        var payload = System.Text.Json.JsonSerializer.SerializeToElement(
+                            new ScreenSharing.Protocol.Messages.RoomCreated("TEST01"),
+                            ScreenSharing.Protocol.ProtocolJson.Options);
+                        var envelope = new ScreenSharing.Protocol.MessageEnvelope(
+                            ScreenSharing.Protocol.MessageType.RoomCreated, null, payload);
+                        var json = System.Text.Json.JsonSerializer.Serialize(
+                            envelope, ScreenSharing.Protocol.ProtocolJson.Options);
+                        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+                        await socket.SendAsync(bytes, WebSocketMessageType.Text, true, context.RequestAborted);
+                    }
                 }
             }
             catch { }
