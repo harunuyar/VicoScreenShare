@@ -1,5 +1,4 @@
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -16,10 +15,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     private readonly NavigationService _navigation;
     private readonly ClientSettings _settings;
 
-    private Guid _userId;
-    private TaskCompletionSource<RoomJoined>? _joinWaiter;
-    private TaskCompletionSource<string>? _createWaiter;
-    private TaskCompletionSource<ServerErrorInfo>? _errorWaiter;
+    private readonly Guid _userId;
 
     public HomeViewModel(
         IdentityStore identity,
@@ -56,89 +52,86 @@ public sealed partial class HomeViewModel : ViewModelBase
     private bool _isBusy;
 
     [RelayCommand]
-    private async Task CreateRoomAsync()
+    private Task CreateRoomAsync()
     {
-        if (!ValidateDisplayName()) return;
+        if (!ValidateDisplayName()) return Task.CompletedTask;
         SaveDisplayName();
-
-        IsBusy = true;
-        StatusMessage = "Connecting...";
-
-        try
-        {
-            var password = string.IsNullOrWhiteSpace(CreatePassword) ? null : CreatePassword;
-            await ConnectIfNeededAsync();
-
-            _createWaiter = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _joinWaiter = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _errorWaiter = new TaskCompletionSource<ServerErrorInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            await _signaling.CreateRoomAsync(password);
-
-            var outcome = await Task.WhenAny(_joinWaiter.Task, _errorWaiter.Task).ConfigureAwait(true);
-            if (outcome == _errorWaiter.Task)
-            {
-                var err = await _errorWaiter.Task.ConfigureAwait(true);
-                StatusMessage = $"Error: {err.Message}";
-                return;
-            }
-
-            var joined = await _joinWaiter.Task.ConfigureAwait(true);
-            NavigateToRoom(joined);
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"Failed to create room: {ex.Message}";
-        }
-        finally
-        {
-            ClearWaiters();
-            IsBusy = false;
-        }
+        var password = string.IsNullOrWhiteSpace(CreatePassword) ? null : CreatePassword;
+        return RunRoomOperationAsync(() => _signaling.CreateRoomAsync(password));
     }
 
     [RelayCommand]
-    private async Task JoinRoomAsync()
+    private Task JoinRoomAsync()
     {
-        if (!ValidateDisplayName()) return;
+        if (!ValidateDisplayName()) return Task.CompletedTask;
         if (string.IsNullOrWhiteSpace(JoinRoomId))
         {
             StatusMessage = "Enter a room id to join.";
-            return;
+            return Task.CompletedTask;
         }
         SaveDisplayName();
+        var password = string.IsNullOrWhiteSpace(JoinPassword) ? null : JoinPassword;
+        var roomId = JoinRoomId.Trim().ToUpperInvariant();
+        return RunRoomOperationAsync(() => _signaling.JoinRoomAsync(roomId, password));
+    }
 
+    /// <summary>
+    /// Unified create/join lifecycle. Subscribes to <see cref="SignalingClient"/> events
+    /// for the lifetime of this operation, completes on RoomJoined / ServerError /
+    /// ConnectionLost (whichever comes first), and guarantees <see cref="IsBusy"/>
+    /// returns to false via a try/finally. Subscriptions are always cleared in finally
+    /// so a retry after failure starts from a clean slate.
+    /// </summary>
+    private async Task RunRoomOperationAsync(Func<Task> sendRequest)
+    {
         IsBusy = true;
         StatusMessage = "Connecting...";
 
+        var joinTcs = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var errorTcs = new TaskCompletionSource<ServerErrorInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disconnectTcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnRoomJoined(RoomJoined j) => joinTcs.TrySetResult(j);
+        void OnServerError(ErrorCode c, string m) => errorTcs.TrySetResult(new ServerErrorInfo(c, m));
+        void OnConnectionLost(string? reason) => disconnectTcs.TrySetResult(reason);
+
+        _signaling.RoomJoined += OnRoomJoined;
+        _signaling.ServerError += OnServerError;
+        _signaling.ConnectionLost += OnConnectionLost;
+
         try
         {
-            var password = string.IsNullOrWhiteSpace(JoinPassword) ? null : JoinPassword;
-            await ConnectIfNeededAsync();
+            await ConnectIfNeededAsync().ConfigureAwait(true);
+            await sendRequest().ConfigureAwait(true);
 
-            _joinWaiter = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _errorWaiter = new TaskCompletionSource<ServerErrorInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var completed = await Task.WhenAny(joinTcs.Task, errorTcs.Task, disconnectTcs.Task)
+                .ConfigureAwait(true);
 
-            await _signaling.JoinRoomAsync(JoinRoomId.Trim().ToUpperInvariant(), password);
-
-            var outcome = await Task.WhenAny(_joinWaiter.Task, _errorWaiter.Task).ConfigureAwait(true);
-            if (outcome == _errorWaiter.Task)
+            if (completed == joinTcs.Task)
             {
-                var err = await _errorWaiter.Task.ConfigureAwait(true);
-                StatusMessage = ErrorFriendlyMessage(err);
+                NavigateToRoom(joinTcs.Task.Result);
                 return;
             }
-
-            var joined = await _joinWaiter.Task.ConfigureAwait(true);
-            NavigateToRoom(joined);
+            if (completed == errorTcs.Task)
+            {
+                StatusMessage = ErrorFriendlyMessage(errorTcs.Task.Result);
+                return;
+            }
+            // disconnectTcs
+            var reason = disconnectTcs.Task.Result;
+            StatusMessage = string.IsNullOrEmpty(reason)
+                ? "Disconnected from server. Please try again."
+                : $"Disconnected: {reason}";
         }
         catch (Exception ex)
         {
-            StatusMessage = $"Failed to join room: {ex.Message}";
+            StatusMessage = $"Could not reach server: {ex.Message}";
         }
         finally
         {
-            ClearWaiters();
+            _signaling.RoomJoined -= OnRoomJoined;
+            _signaling.ServerError -= OnServerError;
+            _signaling.ConnectionLost -= OnConnectionLost;
             IsBusy = false;
         }
     }
@@ -161,37 +154,14 @@ public sealed partial class HomeViewModel : ViewModelBase
     private async Task ConnectIfNeededAsync()
     {
         if (_signaling.IsConnected) return;
-
-        _signaling.RoomCreated += OnRoomCreated;
-        _signaling.RoomJoined += OnRoomJoined;
-        _signaling.ServerError += OnServerError;
-
         var hello = new ClientHello(_userId, DisplayName.Trim(), ProtocolVersion.Current);
-        await _signaling.ConnectAsync(_settings.ServerUri, hello);
+        await _signaling.ConnectAsync(_settings.ServerUri, hello).ConfigureAwait(true);
     }
-
-    private void OnRoomCreated(string roomId) => _createWaiter?.TrySetResult(roomId);
-
-    private void OnRoomJoined(RoomJoined joined) => _joinWaiter?.TrySetResult(joined);
-
-    private void OnServerError(ErrorCode code, string message) =>
-        _errorWaiter?.TrySetResult(new ServerErrorInfo(code, message));
 
     private void NavigateToRoom(RoomJoined joined)
     {
-        _signaling.RoomCreated -= OnRoomCreated;
-        _signaling.RoomJoined -= OnRoomJoined;
-        _signaling.ServerError -= OnServerError;
-
         var roomVm = new RoomViewModel(_signaling, _navigation, joined);
         _navigation.NavigateTo(roomVm);
-    }
-
-    private void ClearWaiters()
-    {
-        _createWaiter = null;
-        _joinWaiter = null;
-        _errorWaiter = null;
     }
 
     private static string ErrorFriendlyMessage(ServerErrorInfo err) => err.Code switch

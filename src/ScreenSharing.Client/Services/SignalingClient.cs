@@ -17,22 +17,23 @@ namespace ScreenSharing.Client.Services;
 /// raises strongly-typed events for UI-layer subscribers. Events fire on whatever
 /// thread the reader loop is on; subscribers must marshal to the UI thread themselves
 /// (Avalonia's <c>Dispatcher.UIThread</c>).
+///
+/// Instances are reusable: after a failed <see cref="ConnectAsync"/> or a lost
+/// connection the caller may call <see cref="ConnectAsync"/> again. The outbound
+/// channel and internal task handles are recreated per connect so a completed channel
+/// from a prior session never poisons the next attempt.
 /// </summary>
 public sealed class SignalingClient : IAsyncDisposable
 {
     private const int MaxMessageBytes = 64 * 1024;
 
+    private readonly object _stateLock = new();
+
     private ClientWebSocket? _socket;
     private CancellationTokenSource? _cts;
     private Task? _readerTask;
     private Task? _writerTask;
-    private readonly Channel<string> _outbound = Channel.CreateBounded<string>(
-        new BoundedChannelOptions(64)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false,
-        });
+    private Channel<string> _outbound = CreateOutboundChannel();
 
     public event Action<string>? RoomCreated;
     public event Action<RoomJoined>? RoomJoined;
@@ -45,19 +46,56 @@ public sealed class SignalingClient : IAsyncDisposable
 
     public async Task ConnectAsync(Uri serverUri, ClientHello hello, CancellationToken ct = default)
     {
-        if (_socket is not null)
+        lock (_stateLock)
         {
-            throw new InvalidOperationException("SignalingClient is already connected. Call DisposeAsync first.");
+            if (_socket is not null && _socket.State == WebSocketState.Open)
+            {
+                throw new InvalidOperationException("SignalingClient is already connected.");
+            }
+            // Reset per-connection state. A previously-completed channel or cancelled
+            // cts must not bleed into the new session.
+            _outbound.Writer.TryComplete();
+            _outbound = CreateOutboundChannel();
+            _cts?.Dispose();
+            _cts = null;
+            _readerTask = null;
+            _writerTask = null;
         }
 
-        _socket = new ClientWebSocket();
-        await _socket.ConnectAsync(serverUri, ct).ConfigureAwait(false);
+        // ClientWebSocket is the only resource that has to survive the connect attempt
+        // if it succeeds and must be disposed if it fails. Work on a local until the
+        // connect call returns, then publish to the field only on success.
+        var socket = new ClientWebSocket();
+        try
+        {
+            await socket.ConnectAsync(serverUri, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
 
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _readerTask = Task.Run(() => RunReaderAsync(_cts.Token));
-        _writerTask = Task.Run(() => RunWriterAsync(_cts.Token));
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        lock (_stateLock)
+        {
+            _socket = socket;
+            _cts = cts;
+            _readerTask = Task.Run(() => RunReaderAsync(cts.Token));
+            _writerTask = Task.Run(() => RunWriterAsync(cts.Token));
+        }
 
-        await SendAsync(MessageType.ClientHello, hello).ConfigureAwait(false);
+        try
+        {
+            await SendAsync(MessageType.ClientHello, hello, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Rolling back a partially-started session: dispose and rethrow so the
+            // caller can surface a fresh error and retry cleanly.
+            await DisposeInternalAsync(suppressConnectionLost: true).ConfigureAwait(false);
+            throw;
+        }
     }
 
     public Task CreateRoomAsync(string? password, CancellationToken ct = default) =>
@@ -71,19 +109,22 @@ public sealed class SignalingClient : IAsyncDisposable
         var element = JsonSerializer.SerializeToElement(payload, ProtocolJson.Options);
         var envelope = new MessageEnvelope(type, null, element);
         var json = JsonSerializer.Serialize(envelope, ProtocolJson.Options);
-        await _outbound.Writer.WriteAsync(json, ct).ConfigureAwait(false);
+        var outbound = _outbound;
+        await outbound.Writer.WriteAsync(json, ct).ConfigureAwait(false);
     }
 
     private async Task RunWriterAsync(CancellationToken ct)
     {
-        if (_socket is null) return;
+        var socket = _socket;
+        var channel = _outbound;
+        if (socket is null) return;
         try
         {
-            await foreach (var json in _outbound.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            await foreach (var json in channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                if (_socket.State != WebSocketState.Open) break;
+                if (socket.State != WebSocketState.Open) break;
                 var bytes = Encoding.UTF8.GetBytes(json);
-                await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
+                await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
@@ -92,12 +133,15 @@ public sealed class SignalingClient : IAsyncDisposable
 
     private async Task RunReaderAsync(CancellationToken ct)
     {
+        var socket = _socket;
+        if (socket is null) return;
+
         string? lostReason = null;
         try
         {
-            while (!ct.IsCancellationRequested && _socket?.State == WebSocketState.Open)
+            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
-                var json = await ReceiveTextAsync(ct).ConfigureAwait(false);
+                var json = await ReceiveTextAsync(socket, ct).ConfigureAwait(false);
                 if (json is null)
                 {
                     lostReason = "socket closed";
@@ -176,9 +220,8 @@ public sealed class SignalingClient : IAsyncDisposable
         }
     }
 
-    private async Task<string?> ReceiveTextAsync(CancellationToken ct)
+    private static async Task<string?> ReceiveTextAsync(WebSocket socket, CancellationToken ct)
     {
-        if (_socket is null) return null;
         var buffer = ArrayPool<byte>.Shared.Rent(4096);
         try
         {
@@ -188,7 +231,7 @@ public sealed class SignalingClient : IAsyncDisposable
                 WebSocketReceiveResult result;
                 try
                 {
-                    result = await _socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
+                    result = await socket.ReceiveAsync(buffer, ct).ConfigureAwait(false);
                 }
                 catch (WebSocketException)
                 {
@@ -218,32 +261,67 @@ public sealed class SignalingClient : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => DisposeInternalAsync(suppressConnectionLost: false);
+
+    private async ValueTask DisposeInternalAsync(bool suppressConnectionLost)
     {
-        try
+        Action<string?>? restoredHandler = null;
+        if (suppressConnectionLost)
         {
-            _cts?.Cancel();
+            restoredHandler = ConnectionLost;
+            ConnectionLost = null;
         }
-        catch (ObjectDisposedException) { }
 
-        _outbound.Writer.TryComplete();
+        ClientWebSocket? socket;
+        CancellationTokenSource? cts;
+        Task? readerTask;
+        Task? writerTask;
+        Channel<string> channel;
+
+        lock (_stateLock)
+        {
+            socket = _socket;
+            cts = _cts;
+            readerTask = _readerTask;
+            writerTask = _writerTask;
+            channel = _outbound;
+
+            _socket = null;
+            _cts = null;
+            _readerTask = null;
+            _writerTask = null;
+        }
+
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { }
+        channel.Writer.TryComplete();
 
         try
         {
-            if (_socket is { State: WebSocketState.Open })
+            if (socket is { State: WebSocketState.Open })
             {
-                await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None)
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None)
                     .ConfigureAwait(false);
             }
         }
         catch { }
 
-        try { if (_readerTask is not null) await _readerTask.ConfigureAwait(false); } catch { }
-        try { if (_writerTask is not null) await _writerTask.ConfigureAwait(false); } catch { }
+        try { if (readerTask is not null) await readerTask.ConfigureAwait(false); } catch { }
+        try { if (writerTask is not null) await writerTask.ConfigureAwait(false); } catch { }
 
-        _socket?.Dispose();
-        _cts?.Dispose();
-        _socket = null;
-        _cts = null;
+        socket?.Dispose();
+        cts?.Dispose();
+
+        if (restoredHandler is not null)
+        {
+            ConnectionLost = restoredHandler;
+        }
     }
+
+    private static Channel<string> CreateOutboundChannel() =>
+        Channel.CreateBounded<string>(new BoundedChannelOptions(64)
+        {
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = true,
+            SingleWriter = false,
+        });
 }
