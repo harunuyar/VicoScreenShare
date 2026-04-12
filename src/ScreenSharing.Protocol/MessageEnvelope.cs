@@ -1,13 +1,14 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace ScreenSharing.Protocol;
 
 /// <summary>
-/// Wire envelope for every signaling message. `Type` is the discriminator (see <see cref="MessageType"/>),
-/// `CorrelationId` optionally pairs requests with responses, and `Payload` holds the type-specific body.
+/// Wire envelope for every signaling message. <see cref="Type"/> is the discriminator
+/// (see <see cref="MessageType"/>), <see cref="CorrelationId"/> optionally pairs requests
+/// with responses, and <see cref="Payload"/> holds the type-specific body.
+/// All serialization must go through <see cref="ProtocolJson.Options"/>.
 /// </summary>
 public sealed record MessageEnvelope(
-    [property: JsonPropertyName("type")] string Type,
-    [property: JsonPropertyName("correlationId")] string? CorrelationId,
-    [property: JsonPropertyName("payload")] JsonElement Payload);
+    string Type,
+    string? CorrelationId,
+    JsonElement Payload);

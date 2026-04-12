@@ -9,10 +9,15 @@ builder.Logging.AddSimpleConsole(options =>
     options.SingleLine = true;
 });
 
-builder.WebHost.ConfigureKestrel(options =>
+// Kestrel binds via standard configuration: ASPNETCORE_URLS env var,
+// appsettings Kestrel:Endpoints, or the --urls CLI arg. Default when nothing is set
+// is all interfaces on port 5000 so a VPS deploy works out of the box.
+// launchSettings.json pins Development to http://localhost:5000.
+if (string.IsNullOrEmpty(builder.Configuration["urls"]) &&
+    string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
 {
-    options.ListenLocalhost(5000);
-});
+    builder.WebHost.UseUrls("http://0.0.0.0:5000");
+}
 
 var app = builder.Build();
 
@@ -33,9 +38,8 @@ app.Map("/ws", async context =>
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
     await socket.CloseAsync(
         WebSocketCloseStatus.NormalClosure,
-        "Phase 0 placeholder — signaling lands in Phase 1",
+        "Phase 0 placeholder -- signaling lands in Phase 1",
         context.RequestAborted);
 });
 
-app.Logger.LogInformation("ScreenSharing server listening on http://localhost:5000");
 app.Run();

@@ -8,6 +8,6 @@
         Title="ScreenSharing">
     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
         <TextBlock Text="ScreenSharing" FontSize="32" FontWeight="Bold" HorizontalAlignment="Center" />
-        <TextBlock Text="Phase 0 skeleton — nothing to see yet" Opacity="0.6" HorizontalAlignment="Center" />
+        <TextBlock Text="Phase 0 skeleton -- nothing to see yet" Opacity="0.6" HorizontalAlignment="Center" />
     </StackPanel>
 </Window>
