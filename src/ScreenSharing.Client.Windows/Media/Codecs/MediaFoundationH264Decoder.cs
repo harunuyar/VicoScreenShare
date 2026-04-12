@@ -18,6 +18,8 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 {
     private const uint MF_E_TRANSFORM_STREAM_CHANGE = 0xC00D6D61u;
     private const uint MF_E_TRANSFORM_NEED_MORE_INPUT = 0xC00D6D72u;
+    private const uint MF_E_TRANSFORM_TYPE_NOT_SET = 0xC00D6D60u;
+    private bool _warnedTypeNotSet;
 
     private readonly IMFTransform _transform;
     private int _width;
@@ -30,15 +32,25 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         _transform = CreateDecoder()
                      ?? throw new InvalidOperationException("No H.264 decoder MFT is available from Media Foundation");
 
-        // Set a minimal input type so ProcessInput is allowed. The decoder
-        // raises MF_E_TRANSFORM_STREAM_CHANGE after the first keyframe, at
-        // which point we pick the real NV12 output type.
+        // Media Foundation's H.264 decoder requires both input AND output
+        // types to be set before ProcessInput is called. Without an output
+        // type, ProcessOutput fails with MF_E_TRANSFORM_TYPE_NOT_SET
+        // (0xC00D6D60) and the MFT goes into a wedged state where
+        // ProcessInput returns MF_E_NOTACCEPTING. The initial output type
+        // can be a generic NV12 — the decoder raises STREAM_CHANGE with
+        // real dimensions on the first keyframe and we re-negotiate.
         var inputType = MediaFactory.MFCreateMediaType();
         inputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
         inputType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
         inputType.SetEnumValue(MediaTypeAttributeKeys.InterlaceMode, VideoInterlaceMode.Progressive);
         _transform.SetInputType(0, inputType, 0);
         inputType.Dispose();
+
+        NegotiateOutputType();
+        if (!_outputTypeNegotiated)
+        {
+            DebugLog.Write("[mf] H264 decoder could not pick an NV12 output type at init");
+        }
 
         _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, 0);
     }
@@ -111,6 +123,24 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                 {
                     NegotiateOutputType();
                     continue;
+                }
+
+                if ((uint)result.Code == MF_E_TRANSFORM_TYPE_NOT_SET)
+                {
+                    // We ended up here without a negotiated output type —
+                    // try once, log if it still fails, and stop draining
+                    // so we don't spam the log on every frame.
+                    if (!_outputTypeNegotiated)
+                    {
+                        NegotiateOutputType();
+                        if (_outputTypeNegotiated) continue;
+                    }
+                    if (!_warnedTypeNotSet)
+                    {
+                        _warnedTypeNotSet = true;
+                        DebugLog.Write("[mf] H264 decoder ProcessOutput stuck with TYPE_NOT_SET; decoder output format could not be negotiated");
+                    }
+                    return (IReadOnlyList<DecodedVideoFrame>?)results ?? Array.Empty<DecodedVideoFrame>();
                 }
 
                 if (result.Failure)

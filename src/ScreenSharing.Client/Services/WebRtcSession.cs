@@ -41,7 +41,22 @@ public sealed class WebRtcSession : IAsyncDisposable
             },
         });
 
-        var videoFormat = new VideoFormat(MapCodec(codec), 96);
+        // Advertise the preferred codec first, followed by VP8 as a universal
+        // fallback. WebRTC codec selection is driven by intersection order, so
+        // listing the user's pick at index 0 means both peers agree on it
+        // whenever both sides support it — and if the other side only knows
+        // VP8, the intersection still has one common entry and negotiation
+        // doesn't fail with VideoIncompatible.
+        var preferred = MapCodec(codec);
+        var capabilities = new List<SDPAudioVideoMediaFormat>
+        {
+            new(new VideoFormat(preferred, 96)),
+        };
+        if (preferred != VideoCodecsEnum.VP8)
+        {
+            capabilities.Add(new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.VP8, 97)));
+        }
+
         var direction = role switch
         {
             WebRtcRole.Sender => MediaStreamStatusEnum.SendOnly,
@@ -53,7 +68,7 @@ public sealed class WebRtcSession : IAsyncDisposable
         var videoTrack = new MediaStreamTrack(
             SDPMediaTypesEnum.video,
             isRemote: false,
-            capabilities: new List<SDPAudioVideoMediaFormat> { new(videoFormat) },
+            capabilities: capabilities,
             streamStatus: direction);
         _pc.addTrack(videoTrack);
 
