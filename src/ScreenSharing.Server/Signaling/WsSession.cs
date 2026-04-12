@@ -44,6 +44,7 @@ public sealed class WsSession
     private string? _currentRoomId;
     private long _lastPongTicks = DateTime.UtcNow.Ticks;
     private bool _sfuPeerBound;
+    private string? _currentStreamId;
 
     public WsSession(
         WebSocket socket,
@@ -165,6 +166,14 @@ public sealed class WsSession
 
             case MessageType.IceCandidate:
                 await HandleIceCandidateAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.StreamStarted:
+                await HandleStreamStartedAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.StreamEnded:
+                await HandleStreamEndedAsync(envelope).ConfigureAwait(false);
                 break;
 
             default:
@@ -402,6 +411,57 @@ public sealed class WsSession
         peer.AddRemoteIceCandidate(ice.Candidate);
     }
 
+    private async Task HandleStreamStartedAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null)
+        {
+            await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before announcing a stream", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var room = _rooms.FindRoom(_currentRoomId);
+        if (room is null) return;
+
+        var request = WsMessageCodec.DecodePayload<StreamStarted>(envelope.Payload);
+
+        // Server is authoritative on the PeerId the message carries — a client
+        // cannot claim to be someone else. The stream id is client-chosen so
+        // the viewer can distinguish concurrent streams from the same peer
+        // once Phase 4 multi-stream lands; Phase 3 only cares about PeerId.
+        if (!room.TrySetPeerStreaming(PeerId, true))
+        {
+            // Either already marked streaming or peer has been removed; either
+            // way, no fan-out needed.
+            return;
+        }
+        _currentStreamId = request.StreamId;
+
+        var authoritative = request with { PeerId = PeerId };
+        await BroadcastToRoomAsync(room, MessageType.StreamStarted, authoritative, excludePeer: PeerId)
+            .ConfigureAwait(false);
+    }
+
+    private async Task HandleStreamEndedAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null) return;
+
+        var room = _rooms.FindRoom(_currentRoomId);
+        if (room is null) return;
+
+        if (!room.TrySetPeerStreaming(PeerId, false))
+        {
+            return;
+        }
+        var streamId = _currentStreamId ?? string.Empty;
+        _currentStreamId = null;
+
+        var authoritative = new StreamEnded(PeerId, streamId);
+        await BroadcastToRoomAsync(room, MessageType.StreamEnded, authoritative, excludePeer: PeerId)
+            .ConfigureAwait(false);
+    }
+
     private SfuPeer GetOrAttachSfuPeer(SfuSession sfu)
     {
         var peer = sfu.GetOrCreatePeer(PeerId);
@@ -432,11 +492,27 @@ public sealed class WsSession
         if (roomId is null) return;
         _currentRoomId = null;
 
+        // Capture the stream id BEFORE RemovePeer so we can still fan out a
+        // StreamEnded for the crash/disconnect case — otherwise viewers would
+        // keep displaying the last decoded frame until the PeerLeft message
+        // arrives, and even then they would need to reconstruct the link
+        // between "that peer was the streamer" and "clear my tile."
+        var wasStreaming = _currentStreamId is not null;
+        var endedStreamId = _currentStreamId;
+        _currentStreamId = null;
+
         var outcome = _rooms.RemovePeer(roomId, PeerId);
         if (!outcome.Found) return;
 
         var room = _rooms.FindRoom(roomId);
         if (room is null || outcome.PeerCountAfter == 0) return;
+
+        if (wasStreaming)
+        {
+            var streamEnded = new StreamEnded(PeerId, endedStreamId ?? string.Empty);
+            await BroadcastToRoomAsync(room, MessageType.StreamEnded, streamEnded, excludePeer: null)
+                .ConfigureAwait(false);
+        }
 
         var message = new PeerLeft(PeerId, outcome.WasHost ? outcome.NewHostPeerId : null);
         await BroadcastToRoomAsync(room, MessageType.PeerLeft, message, excludePeer: null)

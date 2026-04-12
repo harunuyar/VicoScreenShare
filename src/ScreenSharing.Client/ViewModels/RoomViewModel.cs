@@ -33,6 +33,23 @@ public sealed partial class RoomViewModel : ViewModelBase
     private CaptureStreamer? _captureStreamer;
     private bool _negotiationStarted;
 
+    // Track the peer whose video is currently filling the remote tile so we
+    // know whose StreamEnded / PeerLeft should clear it. Phase 3 only supports
+    // a single active streamer; when Phase 4 adds the grid this becomes a map.
+    private Guid? _currentlyStreamingPeerId;
+
+    // Sender side: we generate a fresh stream id on Share so StreamStarted and
+    // StreamEnded sent by this client can be paired by observers that care.
+    private string? _localStreamId;
+
+    // Viewer-side stale-frame watchdog. If the remote renderer stops producing
+    // frames for StaleFrameTimeout, clear the tile even without an explicit
+    // StreamEnded or PeerLeft — covers the "publisher's process crashed,
+    // network dropped, server not yet detected the disconnect" case.
+    private static readonly TimeSpan StaleFrameTimeout = TimeSpan.FromSeconds(2);
+    private DispatcherTimer? _staleFrameTimer;
+    private DateTime _lastRemoteFrameUtc = DateTime.MinValue;
+
     public RoomViewModel(
         SignalingClient signaling,
         NavigationService navigation,
@@ -68,6 +85,8 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.PeerLeft += OnPeerLeft;
         _signaling.ServerError += OnServerError;
         _signaling.ConnectionLost += OnConnectionLost;
+        _signaling.StreamStartedReceived += OnStreamStartedReceived;
+        _signaling.StreamEndedReceived += OnStreamEndedReceived;
 
         // Kick off the peer connection handshake in the background so the room is
         // ready to both send (when the user hits Share) and receive (whenever any
@@ -177,6 +196,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void OnRemoteFrameRendered()
     {
         if (_remoteRenderer is null) return;
+        _lastRemoteFrameUtc = DateTime.UtcNow;
         var next = _remoteRenderer.CurrentBitmap;
         if (Dispatcher.UIThread.CheckAccess())
         {
@@ -239,6 +259,22 @@ public sealed partial class RoomViewModel : ViewModelBase
             await source.StartAsync().ConfigureAwait(true);
             IsSharing = true;
             StatusMessage = null;
+
+            // Announce the stream so viewers know who is publishing. If this
+            // send fails (e.g. signaling socket raced a disconnect), we still
+            // consider the local share started — the server will broadcast
+            // StreamEnded on its own when we drop off the session.
+            var streamId = Guid.NewGuid().ToString("N");
+            _localStreamId = streamId;
+            try
+            {
+                await _signaling.SendStreamStartedAsync(streamId, StreamKind.Screen, hasAudio: false)
+                    .ConfigureAwait(true);
+            }
+            catch
+            {
+                // Signaling failure doesn't roll back the share; see comment above.
+            }
         }
         catch (Exception ex)
         {
@@ -290,6 +326,20 @@ public sealed partial class RoomViewModel : ViewModelBase
         IsSharing = false;
         LocalStreamLabel = null;
         LocalPreview = null;
+
+        // Announce the stream end exactly once per share. Swallow transport
+        // failures — the server already broadcasts StreamEnded for us if we
+        // disconnect before this runs, so viewers clear either way.
+        var streamId = _localStreamId;
+        _localStreamId = null;
+        if (streamId is not null && _signaling.IsConnected)
+        {
+            try
+            {
+                await _signaling.SendStreamEndedAsync(streamId).ConfigureAwait(true);
+            }
+            catch { }
+        }
     }
 
     private void OnLocalCaptureClosed()
@@ -336,6 +386,16 @@ public sealed partial class RoomViewModel : ViewModelBase
             {
                 Peers.Remove(existing);
             }
+
+            // If the peer whose video we're rendering just left the room, the
+            // server broadcasts StreamEnded before PeerLeft in the graceful
+            // path, so this is a double-cover belt-and-braces for the case
+            // where ordering is disturbed or StreamEnded is missed.
+            if (_currentlyStreamingPeerId == peerId)
+            {
+                ClearRemoteStream("Stream ended");
+            }
+
             if (newHostPeerId.HasValue)
             {
                 HostPeerId = newHostPeerId;
@@ -350,6 +410,66 @@ public sealed partial class RoomViewModel : ViewModelBase
                 }
             }
         });
+    }
+
+    private void OnStreamStartedReceived(StreamStarted message)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            // Ignore our own echo if the server ever delivers it (currently it
+            // excludes the sender, but we guard anyway).
+            if (message.PeerId == YourPeerId) return;
+
+            _currentlyStreamingPeerId = message.PeerId;
+            _lastRemoteFrameUtc = DateTime.UtcNow;
+            MediaStatus = "Waiting for first frame...";
+            StartStaleFrameTimer();
+        });
+    }
+
+    private void OnStreamEndedReceived(StreamEnded message)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_currentlyStreamingPeerId != message.PeerId) return;
+            ClearRemoteStream("Stream ended");
+        });
+    }
+
+    private void ClearRemoteStream(string statusMessage)
+    {
+        _currentlyStreamingPeerId = null;
+        _remoteRenderer?.Clear();
+        RemoteStream = null;
+        MediaStatus = statusMessage;
+        StopStaleFrameTimer();
+    }
+
+    private void StartStaleFrameTimer()
+    {
+        if (_staleFrameTimer is not null) return;
+        _staleFrameTimer = new DispatcherTimer(
+            TimeSpan.FromMilliseconds(500),
+            DispatcherPriority.Background,
+            OnStaleFrameTick);
+        _staleFrameTimer.Start();
+    }
+
+    private void StopStaleFrameTimer()
+    {
+        _staleFrameTimer?.Stop();
+        _staleFrameTimer = null;
+    }
+
+    private void OnStaleFrameTick(object? sender, EventArgs e)
+    {
+        if (_currentlyStreamingPeerId is null) return;
+        if (RemoteStream is null) return;
+        if (DateTime.UtcNow - _lastRemoteFrameUtc < StaleFrameTimeout) return;
+
+        // Publisher went dark without a clean StreamEnded — wipe the tile so
+        // the viewer doesn't sit on the last decoded frame forever.
+        ClearRemoteStream("Stream stalled");
     }
 
     private void OnServerError(ErrorCode code, string message)
@@ -374,6 +494,9 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.PeerLeft -= OnPeerLeft;
         _signaling.ServerError -= OnServerError;
         _signaling.ConnectionLost -= OnConnectionLost;
+        _signaling.StreamStartedReceived -= OnStreamStartedReceived;
+        _signaling.StreamEndedReceived -= OnStreamEndedReceived;
+        StopStaleFrameTimer();
 
         await StopSharingInternalAsync().ConfigureAwait(true);
 

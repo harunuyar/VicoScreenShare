@@ -37,6 +37,20 @@ public sealed class WriteableBitmapRenderer : IDisposable
 
     public WriteableBitmap? CurrentBitmap => _current;
 
+    /// <summary>
+    /// Drops the reference to the last rendered frame so a subsequent read of
+    /// <see cref="CurrentBitmap"/> returns null. Pooled bitmaps stay alive for
+    /// reuse on the next incoming frame; this only clears the published handle
+    /// so the view binding can go back to showing nothing.
+    /// </summary>
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _current = null;
+        }
+    }
+
     public void Attach(ICaptureSource source)
     {
         source.FrameArrived += OnFrameArrived;

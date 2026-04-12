@@ -50,6 +50,8 @@ public sealed class SignalingClient : IAsyncDisposable
     public event Action<string>? SdpOfferReceived;
     public event Action<string>? SdpAnswerReceived;
     public event Action<string>? IceCandidateReceived;
+    public event Action<StreamStarted>? StreamStartedReceived;
+    public event Action<StreamEnded>? StreamEndedReceived;
 
     public bool IsConnected =>
         Volatile.Read(ref _state) == StateConnected && _socket?.State == WebSocketState.Open;
@@ -116,6 +118,17 @@ public sealed class SignalingClient : IAsyncDisposable
 
     public Task SendIceCandidateAsync(string candidateJson, CancellationToken ct = default) =>
         SendAsync(MessageType.IceCandidate, new IceCandidate(candidateJson, null, null), ct);
+
+    /// <summary>
+    /// Announce that this client has started a media stream. Server rewrites the
+    /// PeerId to the session's authoritative id before broadcasting, so passing
+    /// <see cref="Guid.Empty"/> here is fine — any value would be ignored.
+    /// </summary>
+    public Task SendStreamStartedAsync(string streamId, StreamKind kind, bool hasAudio, CancellationToken ct = default) =>
+        SendAsync(MessageType.StreamStarted, new StreamStarted(Guid.Empty, streamId, kind, hasAudio), ct);
+
+    public Task SendStreamEndedAsync(string streamId, CancellationToken ct = default) =>
+        SendAsync(MessageType.StreamEnded, new StreamEnded(Guid.Empty, streamId), ct);
 
     public async Task SendAsync<T>(string type, T payload, CancellationToken ct = default)
     {
@@ -252,6 +265,16 @@ public sealed class SignalingClient : IAsyncDisposable
             case MessageType.IceCandidate:
                 var ice = envelope.Payload.Deserialize<IceCandidate>(ProtocolJson.Options);
                 if (ice is not null) IceCandidateReceived?.Invoke(ice.Candidate);
+                break;
+
+            case MessageType.StreamStarted:
+                var started = envelope.Payload.Deserialize<StreamStarted>(ProtocolJson.Options);
+                if (started is not null) StreamStartedReceived?.Invoke(started);
+                break;
+
+            case MessageType.StreamEnded:
+                var ended = envelope.Payload.Deserialize<StreamEnded>(ProtocolJson.Options);
+                if (ended is not null) StreamEndedReceived?.Invoke(ended);
                 break;
         }
     }

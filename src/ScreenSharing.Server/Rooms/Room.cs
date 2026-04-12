@@ -65,6 +65,24 @@ public sealed class Room
         }
     }
 
+    /// <summary>
+    /// Flip a peer's streaming flag under the room lock. Returns true when the
+    /// flag was mutated (i.e. the peer exists and the value actually changed),
+    /// so the caller can decide whether to broadcast a StreamStarted/StreamEnded
+    /// fan-out without racing a duplicate toggle from a second message.
+    /// </summary>
+    public bool TrySetPeerStreaming(Guid peerId, bool isStreaming)
+    {
+        lock (_lock)
+        {
+            var peer = _peers.FirstOrDefault(p => p.PeerId == peerId);
+            if (peer is null) return false;
+            if (peer.IsStreaming == isStreaming) return false;
+            peer.IsStreaming = isStreaming;
+            return true;
+        }
+    }
+
     public RemovePeerResult RemovePeer(Guid peerId)
     {
         lock (_lock)

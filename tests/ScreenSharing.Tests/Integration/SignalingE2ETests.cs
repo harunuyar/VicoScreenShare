@@ -160,6 +160,94 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         await CleanCloseAsync(host);
     }
 
+    [Fact]
+    public async Task StreamStarted_and_StreamEnded_are_broadcast_to_other_peers()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        var streamer = await ConnectAsync("Alice", cts.Token);
+        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        var roomId = (await ExpectAsync(streamer, MessageType.RoomCreated, cts.Token))
+            .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
+        var streamerJoin = (await ExpectAsync(streamer, MessageType.RoomJoined, cts.Token))
+            .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
+
+        var viewer = await ConnectAsync("Bob", cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token);
+        await ExpectAsync(streamer, MessageType.PeerJoined, cts.Token);
+
+        // Alice announces a stream with PeerId = Guid.Empty on the wire so we
+        // can verify the server overrides it with her authoritative session id.
+        await SendAsync(
+            streamer,
+            MessageType.StreamStarted,
+            new StreamStarted(Guid.Empty, "stream-xyz", StreamKind.Screen, HasAudio: false),
+            cts.Token);
+
+        var started = await ExpectAsync(viewer, MessageType.StreamStarted, cts.Token);
+        var startedPayload = started.Payload.Deserialize<StreamStarted>(ProtocolJson.Options)!;
+        startedPayload.PeerId.Should().Be(streamerJoin.YourPeerId);
+        startedPayload.StreamId.Should().Be("stream-xyz");
+        startedPayload.Kind.Should().Be(StreamKind.Screen);
+
+        // Explicit StreamEnded fans out to other peers.
+        await SendAsync(
+            streamer,
+            MessageType.StreamEnded,
+            new StreamEnded(Guid.Empty, "stream-xyz"),
+            cts.Token);
+
+        var ended = await ExpectAsync(viewer, MessageType.StreamEnded, cts.Token);
+        var endedPayload = ended.Payload.Deserialize<StreamEnded>(ProtocolJson.Options)!;
+        endedPayload.PeerId.Should().Be(streamerJoin.YourPeerId);
+        endedPayload.StreamId.Should().Be("stream-xyz");
+
+        await CleanCloseAsync(streamer);
+        await CleanCloseAsync(viewer);
+    }
+
+    [Fact]
+    public async Task Disconnecting_while_streaming_broadcasts_StreamEnded_before_PeerLeft()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        var streamer = await ConnectAsync("Alice", cts.Token);
+        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        var roomId = (await ExpectAsync(streamer, MessageType.RoomCreated, cts.Token))
+            .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
+        var streamerJoin = (await ExpectAsync(streamer, MessageType.RoomJoined, cts.Token))
+            .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
+
+        var viewer = await ConnectAsync("Bob", cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token);
+        await ExpectAsync(streamer, MessageType.PeerJoined, cts.Token);
+
+        await SendAsync(
+            streamer,
+            MessageType.StreamStarted,
+            new StreamStarted(Guid.Empty, "stream-crash", StreamKind.Screen, HasAudio: false),
+            cts.Token);
+        await ExpectAsync(viewer, MessageType.StreamStarted, cts.Token);
+
+        // Streamer vanishes without sending StreamEnded. The server should fan
+        // out a synthetic StreamEnded before the PeerLeft so the viewer can
+        // clear the tile immediately.
+        await CleanCloseAsync(streamer);
+
+        var ended = await ExpectAsync(viewer, MessageType.StreamEnded, cts.Token);
+        var endedPayload = ended.Payload.Deserialize<StreamEnded>(ProtocolJson.Options)!;
+        endedPayload.PeerId.Should().Be(streamerJoin.YourPeerId);
+        endedPayload.StreamId.Should().Be("stream-crash");
+
+        var left = await ExpectAsync(viewer, MessageType.PeerLeft, cts.Token);
+        var leftPayload = left.Payload.Deserialize<PeerLeft>(ProtocolJson.Options)!;
+        leftPayload.PeerId.Should().Be(streamerJoin.YourPeerId);
+
+        await CleanCloseAsync(viewer);
+    }
+
     // --- helpers ---
 
     private async Task<WebSocket> ConnectAsync(string displayName, CancellationToken ct)
