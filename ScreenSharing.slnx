@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ScreenSharing.Client.Windows/ScreenSharing.Client.Windows.csproj" />
+    <Project Path="src/ScreenSharing.Client/ScreenSharing.Client.csproj" />
+    <Project Path="src/ScreenSharing.Protocol/ScreenSharing.Protocol.csproj" />
+    <Project Path="src/ScreenSharing.Server/ScreenSharing.Server.csproj" />
+  </Folder>
+</Solution>

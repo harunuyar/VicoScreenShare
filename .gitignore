@@ -1,0 +1,62 @@
+# .NET build artifacts
+bin/
+obj/
+out/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+*.user
+*.suo
+*.cache
+
+# Visual Studio / Rider
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+.nuget/
+
+# Test results / coverage
+TestResults/
+*.coverage
+*.coveragexml
+coverage/
+
+# Publish output
+publish/
+app.publish/
+
+# Secrets & certs (never commit these)
+*.pfx
+*.p12
+*.key
+*.crt
+appsettings.Development.json
+appsettings.Local.json
+secrets.json
+coturn-secret.txt
+
+# External reference clones (we reference SimpleRecorder, never import)
+reference/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Claude Code session data
+.claude/
