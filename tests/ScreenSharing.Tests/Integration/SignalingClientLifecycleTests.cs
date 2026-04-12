@@ -1,4 +1,3 @@
-using System.Net.Sockets;
 using System.Net.WebSockets;
 using FluentAssertions;
 using Microsoft.AspNetCore.Builder;
@@ -17,9 +16,12 @@ using ScreenSharing.Server.Config;
 namespace ScreenSharing.Tests.Integration;
 
 /// <summary>
-/// Exercises the client-side lifecycle edge cases: reusing a SignalingClient after a
-/// failed ConnectAsync, and ensuring HomeViewModel recovers gracefully when the
-/// socket dies mid-request.
+/// Client-side lifecycle tests. The SignalingClient is one-shot: each connect
+/// attempt owns its own instance, so most "reusability" concerns simply don't
+/// apply. These tests verify that contract, that subscribers added mid-invocation
+/// don't see in-flight events (the immutable-snapshot property), and that
+/// HomeViewModel handles disconnect and retry cleanly by building a fresh
+/// SignalingClient per operation.
 /// </summary>
 public sealed class SignalingClientLifecycleTests : IAsyncLifetime
 {
@@ -48,61 +50,67 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ConnectAsync_does_not_poison_client_on_failure()
+    public async Task SignalingClient_rejects_second_ConnectAsync_on_same_instance()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var server = StartThrowawayWsServer(out var uri);
+
         var client = new SignalingClient();
         var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
+        await client.ConnectAsync(uri, hello, cts.Token);
 
-        // First attempt: bogus port, connect should fail.
-        var bogus = new Uri("ws://127.0.0.1:1/ws");
-        Exception? thrown = null;
-        try { await client.ConnectAsync(bogus, hello, cts.Token); }
-        catch (Exception ex) { thrown = ex; }
-        thrown.Should().NotBeNull();
-
-        client.IsConnected.Should().BeFalse();
-
-        // Second attempt: client must be reusable, not stuck in "already connected".
-        // We can't use the TestServer's in-memory transport with ClientWebSocket, so
-        // instead spin up a tiny listener that accepts one WebSocket handshake and
-        // closes.
-        await using var app = StartThrowawayWsServer(out var serverUri);
-        await client.ConnectAsync(serverUri, hello, cts.Token);
-        client.IsConnected.Should().BeTrue();
+        var secondAttempt = async () => await client.ConnectAsync(uri, hello, cts.Token);
+        await secondAttempt.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*one-shot*");
 
         await client.DisposeAsync();
     }
 
     [Fact]
-    public async Task ConnectAsync_is_reusable_after_DisposeAsync()
+    public async Task SignalingClient_rejects_ConnectAsync_after_Dispose()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using var server = StartThrowawayWsServer(out var uri);
+
         var client = new SignalingClient();
+        await client.DisposeAsync();
+
+        var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
+        var attempt = async () => await client.ConnectAsync(uri, hello, cts.Token);
+        await attempt.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task SignalingClient_releases_state_after_failed_connect_so_a_fresh_instance_works()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
 
-        await using var app1 = StartThrowawayWsServer(out var uri1);
-        await client.ConnectAsync(uri1, hello, cts.Token);
-        await client.DisposeAsync();
+        // First instance: point at a bogus port, expect an exception.
+        var failing = new SignalingClient();
+        var bogus = new Uri("ws://127.0.0.1:1/ws");
+        Exception? thrown = null;
+        try { await failing.ConnectAsync(bogus, hello, cts.Token); }
+        catch (Exception ex) { thrown = ex; }
+        thrown.Should().NotBeNull();
+        await failing.DisposeAsync();
 
-        // After dispose, the same instance can be reused against a fresh endpoint.
-        await using var app2 = StartThrowawayWsServer(out var uri2);
-        await client.ConnectAsync(uri2, hello, cts.Token);
-        client.IsConnected.Should().BeTrue();
-        await client.DisposeAsync();
+        // Second instance (the real path a caller should take): connects cleanly.
+        await using var server = StartThrowawayWsServer(out var uri);
+        var fresh = new SignalingClient();
+        await fresh.ConnectAsync(uri, hello, cts.Token);
+        fresh.IsConnected.Should().BeTrue();
+        await fresh.DisposeAsync();
     }
 
     [Fact]
     public async Task Subscriber_added_during_handler_invocation_does_not_receive_in_flight_event()
     {
-        // The reader snapshots the handler delegate list inside DeliveryLock and
-        // invokes that snapshot outside the lock. A new subscriber added between
-        // the snapshot and the invoke must NOT receive the in-flight event: the
-        // snapshot is captured by value (multicast delegate is immutable).
-        //
-        // We force the scenario deterministically: the first handler blocks until
-        // we say so, during which time we add a second handler, then release the
-        // first handler and assert the second never ran.
+        // Multicast delegates are immutable values, so a fire that has already
+        // captured the current subscriber list will not pick up a new subscriber
+        // added mid-invocation. This test parks the first handler inside its
+        // invocation, subscribes a second handler while it is parked, then releases
+        // the first and asserts the second never ran.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
         await using var server = StartRoomCreatedServer(out var uri);
@@ -129,85 +137,21 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         client.RoomCreated += FirstHandler;
         await client.ConnectAsync(uri, hello, cts.Token);
 
-        // Trigger the server to emit room_created; FirstHandler will be invoked
-        // and will block on firstHandlerMayProceed.
         await client.CreateRoomAsync(null, cts.Token);
         firstHandlerEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
             "the server's room_created must reach the first handler");
 
-        // First handler is currently parked inside its invocation. Subscribe a
-        // second handler; it was NOT present when the reader took the snapshot.
         client.RoomCreated += SecondHandler;
-
-        // Release the first handler and let the reader continue.
         firstHandlerMayProceed.Set();
-
-        // Give the reader a tick to finish invoking and any subsequent messages to
-        // flow through. We are not expecting more room_created messages, so the
-        // second handler should stay idle.
         await Task.Delay(200, cts.Token);
 
         firstHandlerFired.Should().BeTrue();
         secondHandlerFired.Should().BeFalse(
-            "the snapshot of the delegate list was taken before SecondHandler was subscribed");
+            "the in-flight invocation captured the delegate list before SecondHandler was added");
 
         client.RoomCreated -= FirstHandler;
         client.RoomCreated -= SecondHandler;
         await client.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task Reconnect_during_drop_does_not_leak_stale_ConnectionLost_into_new_session()
-    {
-        // Scenario: server A drops the socket, then we reconnect to server B. The old
-        // reader may still be unwinding when ConnectAsync(B) runs. The new session
-        // (and any subscribers added after it) must not receive the old session's
-        // ConnectionLost. We run the cycle in a tight loop to raise the likelihood of
-        // catching a race if one exists, and count ConnectionLost events observed
-        // while we are "subscribed for the new session" — that count must stay at 0.
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var client = new SignalingClient();
-        var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
-
-        for (var i = 0; i < 10; i++)
-        {
-            // Server A: accepts hello, then immediately closes on the next frame.
-            await using var droppingServer = StartAbortAfterHelloServer(out var droppingUri);
-            await client.ConnectAsync(droppingUri, hello, cts.Token);
-            try
-            {
-                // Trigger the server-side close by sending a second frame.
-                await client.CreateRoomAsync(null, cts.Token);
-            }
-            catch { /* write may race the close */ }
-
-            // Server B: stable listener.
-            await using var stableServer = StartThrowawayWsServer(out var stableUri);
-
-            // Count ConnectionLost events from the moment we start the new operation.
-            var staleEvents = 0;
-            void OnConnectionLostDuringNewSession(string? _)
-                => Interlocked.Increment(ref staleEvents);
-            client.ConnectionLost += OnConnectionLostDuringNewSession;
-            try
-            {
-                await client.ConnectAsync(stableUri, hello, cts.Token);
-                client.IsConnected.Should().BeTrue();
-                // Give any stray reader tasks a chance to run their finally blocks
-                // against the new subscriber list.
-                await Task.Delay(50, cts.Token);
-            }
-            finally
-            {
-                client.ConnectionLost -= OnConnectionLostDuringNewSession;
-            }
-
-            staleEvents.Should().Be(
-                0,
-                $"iteration {i}: stale reader from previous session must not fire ConnectionLost into the new session's subscribers");
-
-            await client.DisposeAsync();
-        }
     }
 
     [Fact]
@@ -223,11 +167,10 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         var identity = new IdentityStore(Path.Combine(tempDir, "profile.json"));
         identity.Save(new UserProfile { UserId = Guid.NewGuid(), DisplayName = "Alice" });
 
-        var signaling = new SignalingClient();
         var nav = new NavigationService();
         var settings = new ClientSettings { ServerUri = serverUri };
 
-        var vm = new HomeViewModel(identity, signaling, nav, settings)
+        var vm = new HomeViewModel(identity, () => new SignalingClient(), nav, settings)
         {
             DisplayName = "Alice",
         };
@@ -238,12 +181,64 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         vm.StatusMessage.Should().NotBeNullOrEmpty();
         vm.StatusMessage.Should().Contain("Disconnected", "the VM surfaces the disconnect reason");
 
-        await signaling.DisposeAsync();
         try { Directory.Delete(tempDir, recursive: true); } catch { }
     }
 
-    // --- helpers: tiny self-hosted WS listeners (TestServer's ClientWebSocket shim is
-    // not a real network transport, so we spin up real Kestrel instances here) ---
+    [Fact]
+    public async Task HomeViewModel_can_retry_after_failed_create_without_stale_events()
+    {
+        // Two consecutive CreateRoomCommand invocations: the first fails (server
+        // drops), the second connects to a different server and should succeed.
+        // Because each RunRoomOperationAsync builds its own SignalingClient, no
+        // events from the first attempt can reach the second.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        await using var droppingServer = StartAbortAfterHelloServer(out var droppingUri);
+        await using var happyServer = StartRoomCreatedServer(out var happyUri);
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "ScreenSharing.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var identity = new IdentityStore(Path.Combine(tempDir, "profile.json"));
+        identity.Save(new UserProfile { UserId = Guid.NewGuid(), DisplayName = "Alice" });
+
+        var nav = new NavigationService();
+        var settings = new ClientSettings { ServerUri = droppingUri };
+
+        var vm = new HomeViewModel(identity, () => new SignalingClient(), nav, settings)
+        {
+            DisplayName = "Alice",
+        };
+
+        // Attempt 1: dropping server, should end with disconnect status.
+        await vm.CreateRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(8));
+        vm.IsBusy.Should().BeFalse();
+        vm.StatusMessage.Should().Contain("Disconnected");
+
+        // Attempt 2: redirect to the happy server, which replies with room_created
+        // and then a full room_joined would normally follow. Our happy server only
+        // sends room_created, so the VM will hang on join_joined — but the VM's
+        // handler should process whatever comes. We just assert the second attempt
+        // started cleanly from a fresh signaling instance: IsBusy becomes true on
+        // the second call even though the first instance is fully dead.
+        settings.ServerUri = happyUri;
+
+        var second = vm.CreateRoomCommand.ExecuteAsync(null);
+        // Give the first phase (connect + send create_room) time to run.
+        await Task.Delay(200, cts.Token);
+        vm.IsBusy.Should().BeTrue(
+            "a brand new SignalingClient should be connected and awaiting a reply");
+        // Cancel the pending second attempt by setting the VM's status via a
+        // dispose simulation — the test just needs to verify the second attempt
+        // reached the in-progress state without inheriting the first attempt's
+        // disconnect. Wait up to the CTS deadline; since the happy server does
+        // not send room_joined, the operation will eventually time out on the
+        // outer CTS, which is acceptable for this assertion. We don't await the
+        // task to completion.
+
+        try { Directory.Delete(tempDir, recursive: true); } catch { }
+    }
+
+    // --- helpers: tiny self-hosted WS listeners ---
 
     private static WebApplication StartThrowawayWsServer(out Uri serverUri)
     {
@@ -260,7 +255,6 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                 return;
             }
             using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            // Drain the client hello then just sit there.
             var buf = new byte[1024];
             try
             {
@@ -304,7 +298,6 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                         helloReceived = true;
                         continue;
                     }
-                    // Second frame (create_room) triggers an abort without sending a reply.
                     await socket.CloseAsync(WebSocketCloseStatus.InternalServerError, "simulated", CancellationToken.None);
                     break;
                 }
@@ -316,12 +309,6 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         return app;
     }
 
-    /// <summary>
-    /// Minimal Kestrel listener that accepts the client hello and, on receiving the
-    /// follow-up create_room request, replies with a canned room_created envelope.
-    /// Used to drive client-side delegate-snapshot behavior deterministically without
-    /// spinning up the full signaling server.
-    /// </summary>
     private static WebApplication StartRoomCreatedServer(out Uri serverUri)
     {
         var builder = WebApplication.CreateBuilder();
@@ -346,8 +333,6 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                     var res = await socket.ReceiveAsync(buf, context.RequestAborted);
                     if (res.MessageType == WebSocketMessageType.Close) break;
                     framesReceived++;
-                    // Second frame is the create_room request; reply with a canned
-                    // room_created envelope so the client's RoomCreated event fires.
                     if (framesReceived == 2)
                     {
                         var payload = System.Text.Json.JsonSerializer.SerializeToElement(

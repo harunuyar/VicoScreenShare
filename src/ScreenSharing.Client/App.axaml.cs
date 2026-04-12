@@ -18,13 +18,10 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var identity = new IdentityStore();
-            var signaling = new SignalingClient();
             var navigation = new NavigationService();
             var settings = new ClientSettings();
 
-            AppServices.Initialize(identity, signaling, navigation, settings);
-
-            var home = new HomeViewModel(identity, signaling, navigation, settings);
+            var home = new HomeViewModel(identity, () => new SignalingClient(), navigation, settings);
             navigation.NavigateTo(home);
 
             desktop.MainWindow = new MainWindow

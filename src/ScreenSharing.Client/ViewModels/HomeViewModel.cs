@@ -11,7 +11,7 @@ namespace ScreenSharing.Client.ViewModels;
 public sealed partial class HomeViewModel : ViewModelBase
 {
     private readonly IdentityStore _identity;
-    private readonly SignalingClient _signaling;
+    private readonly Func<SignalingClient> _signalingFactory;
     private readonly NavigationService _navigation;
     private readonly ClientSettings _settings;
 
@@ -19,12 +19,12 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     public HomeViewModel(
         IdentityStore identity,
-        SignalingClient signaling,
+        Func<SignalingClient> signalingFactory,
         NavigationService navigation,
         ClientSettings settings)
     {
         _identity = identity;
-        _signaling = signaling;
+        _signalingFactory = signalingFactory;
         _navigation = navigation;
         _settings = settings;
 
@@ -57,7 +57,7 @@ public sealed partial class HomeViewModel : ViewModelBase
         if (!ValidateDisplayName()) return Task.CompletedTask;
         SaveDisplayName();
         var password = string.IsNullOrWhiteSpace(CreatePassword) ? null : CreatePassword;
-        return RunRoomOperationAsync(() => _signaling.CreateRoomAsync(password));
+        return RunRoomOperationAsync(signaling => signaling.CreateRoomAsync(password));
     }
 
     [RelayCommand]
@@ -72,20 +72,23 @@ public sealed partial class HomeViewModel : ViewModelBase
         SaveDisplayName();
         var password = string.IsNullOrWhiteSpace(JoinPassword) ? null : JoinPassword;
         var roomId = JoinRoomId.Trim().ToUpperInvariant();
-        return RunRoomOperationAsync(() => _signaling.JoinRoomAsync(roomId, password));
+        return RunRoomOperationAsync(signaling => signaling.JoinRoomAsync(roomId, password));
     }
 
     /// <summary>
-    /// Unified create/join lifecycle. Subscribes to <see cref="SignalingClient"/> events
-    /// for the lifetime of this operation, completes on RoomJoined / ServerError /
-    /// ConnectionLost (whichever comes first), and guarantees <see cref="IsBusy"/>
-    /// returns to false via a try/finally. Subscriptions are always cleared in finally
-    /// so a retry after failure starts from a clean slate.
+    /// Unified create/join lifecycle. Builds a fresh <see cref="SignalingClient"/>
+    /// per operation via the injected factory so there is no cross-operation event
+    /// surface. On successful room join, ownership of the signaling instance is
+    /// transferred to the new <see cref="RoomViewModel"/>; on any other exit path
+    /// the instance is disposed. <see cref="IsBusy"/> is guaranteed to return to
+    /// <c>false</c> via the try/finally regardless of outcome.
     /// </summary>
-    private async Task RunRoomOperationAsync(Func<Task> sendRequest)
+    private async Task RunRoomOperationAsync(Func<SignalingClient, Task> sendRequest)
     {
         IsBusy = true;
         StatusMessage = "Connecting...";
+
+        var signaling = _signalingFactory();
 
         var joinTcs = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
         var errorTcs = new TaskCompletionSource<ServerErrorInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -95,21 +98,37 @@ public sealed partial class HomeViewModel : ViewModelBase
         void OnServerError(ErrorCode c, string m) => errorTcs.TrySetResult(new ServerErrorInfo(c, m));
         void OnConnectionLost(string? reason) => disconnectTcs.TrySetResult(reason);
 
-        _signaling.RoomJoined += OnRoomJoined;
-        _signaling.ServerError += OnServerError;
-        _signaling.ConnectionLost += OnConnectionLost;
+        signaling.RoomJoined += OnRoomJoined;
+        signaling.ServerError += OnServerError;
+        signaling.ConnectionLost += OnConnectionLost;
 
+        var transferredOwnership = false;
         try
         {
-            await ConnectIfNeededAsync().ConfigureAwait(true);
-            await sendRequest().ConfigureAwait(true);
+            var hello = new ClientHello(_userId, DisplayName.Trim(), ProtocolVersion.Current);
+            await signaling.ConnectAsync(_settings.ServerUri, hello).ConfigureAwait(true);
+            await sendRequest(signaling).ConfigureAwait(true);
 
             var completed = await Task.WhenAny(joinTcs.Task, errorTcs.Task, disconnectTcs.Task)
                 .ConfigureAwait(true);
 
             if (completed == joinTcs.Task)
             {
-                NavigateToRoom(joinTcs.Task.Result);
+                // Hand the signaling instance to the RoomViewModel. Unsubscribe our
+                // own handlers first so the RoomViewModel starts from a clean slate.
+                signaling.RoomJoined -= OnRoomJoined;
+                signaling.ServerError -= OnServerError;
+                signaling.ConnectionLost -= OnConnectionLost;
+                transferredOwnership = true;
+
+                var roomVm = new RoomViewModel(
+                    signaling,
+                    _navigation,
+                    _identity,
+                    _signalingFactory,
+                    _settings,
+                    joinTcs.Task.Result);
+                _navigation.NavigateTo(roomVm);
                 return;
             }
             if (completed == errorTcs.Task)
@@ -117,7 +136,8 @@ public sealed partial class HomeViewModel : ViewModelBase
                 StatusMessage = ErrorFriendlyMessage(errorTcs.Task.Result);
                 return;
             }
-            // disconnectTcs
+
+            // disconnectTcs won
             var reason = disconnectTcs.Task.Result;
             StatusMessage = string.IsNullOrEmpty(reason)
                 ? "Disconnected from server. Please try again."
@@ -129,9 +149,13 @@ public sealed partial class HomeViewModel : ViewModelBase
         }
         finally
         {
-            _signaling.RoomJoined -= OnRoomJoined;
-            _signaling.ServerError -= OnServerError;
-            _signaling.ConnectionLost -= OnConnectionLost;
+            if (!transferredOwnership)
+            {
+                signaling.RoomJoined -= OnRoomJoined;
+                signaling.ServerError -= OnServerError;
+                signaling.ConnectionLost -= OnConnectionLost;
+                await signaling.DisposeAsync().ConfigureAwait(true);
+            }
             IsBusy = false;
         }
     }
@@ -149,19 +173,6 @@ public sealed partial class HomeViewModel : ViewModelBase
     private void SaveDisplayName()
     {
         _identity.Save(new UserProfile { UserId = _userId, DisplayName = DisplayName.Trim() });
-    }
-
-    private async Task ConnectIfNeededAsync()
-    {
-        if (_signaling.IsConnected) return;
-        var hello = new ClientHello(_userId, DisplayName.Trim(), ProtocolVersion.Current);
-        await _signaling.ConnectAsync(_settings.ServerUri, hello).ConfigureAwait(true);
-    }
-
-    private void NavigateToRoom(RoomJoined joined)
-    {
-        var roomVm = new RoomViewModel(_signaling, _navigation, joined);
-        _navigation.NavigateTo(roomVm);
     }
 
     private static string ErrorFriendlyMessage(ServerErrorInfo err) => err.Code switch

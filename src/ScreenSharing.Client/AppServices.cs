@@ -1,45 +1,14 @@
-using ScreenSharing.Client.Services;
+using System;
 
 namespace ScreenSharing.Client;
 
 /// <summary>
-/// Simple service locator for Phase 1. Holds the single instances of long-lived
-/// services the view models depend on. Bootstrapped once from App.axaml.cs.
-/// Will migrate to Microsoft.Extensions.DependencyInjection if the graph gets
-/// larger, but a static is plenty for Home + Room.
+/// Configuration surface for the Avalonia app. Holds the small set of values that
+/// view models need but that aren't tied to any single operation. A
+/// <see cref="SignalingClient"/> factory lives here rather than a singleton because
+/// each create/join operation builds its own signaling instance — see
+/// <c>HomeViewModel.RunRoomOperationAsync</c> for the ownership rules.
 /// </summary>
-public static class AppServices
-{
-    private static IdentityStore? _identityStore;
-    private static SignalingClient? _signalingClient;
-    private static NavigationService? _navigation;
-    private static ClientSettings? _settings;
-
-    public static IdentityStore Identity =>
-        _identityStore ?? throw new InvalidOperationException("AppServices not initialized.");
-
-    public static SignalingClient Signaling =>
-        _signalingClient ?? throw new InvalidOperationException("AppServices not initialized.");
-
-    public static NavigationService Navigation =>
-        _navigation ?? throw new InvalidOperationException("AppServices not initialized.");
-
-    public static ClientSettings Settings =>
-        _settings ?? throw new InvalidOperationException("AppServices not initialized.");
-
-    public static void Initialize(
-        IdentityStore identityStore,
-        SignalingClient signalingClient,
-        NavigationService navigation,
-        ClientSettings settings)
-    {
-        _identityStore = identityStore;
-        _signalingClient = signalingClient;
-        _navigation = navigation;
-        _settings = settings;
-    }
-}
-
 public sealed class ClientSettings
 {
     /// <summary>

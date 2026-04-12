@@ -15,11 +15,23 @@ public sealed partial class RoomViewModel : ViewModelBase
 {
     private readonly SignalingClient _signaling;
     private readonly NavigationService _navigation;
+    private readonly IdentityStore _identity;
+    private readonly Func<SignalingClient> _signalingFactory;
+    private readonly ClientSettings _settings;
 
-    public RoomViewModel(SignalingClient signaling, NavigationService navigation, RoomJoined initial)
+    public RoomViewModel(
+        SignalingClient signaling,
+        NavigationService navigation,
+        IdentityStore identity,
+        Func<SignalingClient> signalingFactory,
+        ClientSettings settings,
+        RoomJoined initial)
     {
         _signaling = signaling;
         _navigation = navigation;
+        _identity = identity;
+        _signalingFactory = signalingFactory;
+        _settings = settings;
 
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
@@ -118,11 +130,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         await _signaling.DisposeAsync();
 
-        var home = new HomeViewModel(
-            AppServices.Identity,
-            new SignalingClient(),
-            _navigation,
-            AppServices.Settings);
+        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings);
         _navigation.NavigateTo(home);
     }
 }
