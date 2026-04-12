@@ -17,6 +17,9 @@ public sealed class WebRtcSession : IAsyncDisposable
     private readonly SignalingClient _signaling;
     private readonly WebRtcRole _role;
     private readonly RTCPeerConnection _pc;
+    private readonly object _candidateLock = new();
+    private readonly List<string> _pendingRemoteCandidates = new();
+    private bool _remoteDescriptionApplied;
     private bool _disposed;
 
     public WebRtcSession(SignalingClient signaling, WebRtcRole role)
@@ -92,10 +95,29 @@ public sealed class WebRtcSession : IAsyncDisposable
             {
                 throw new InvalidOperationException($"setRemoteDescription failed: {setResult}");
             }
+
+            FlushPendingRemoteCandidates();
         }
         finally
         {
             _signaling.SdpAnswerReceived -= OnAnswer;
+        }
+    }
+
+    private void FlushPendingRemoteCandidates()
+    {
+        List<string> toFlush;
+        lock (_candidateLock)
+        {
+            _remoteDescriptionApplied = true;
+            if (_pendingRemoteCandidates.Count == 0) return;
+            toFlush = new List<string>(_pendingRemoteCandidates);
+            _pendingRemoteCandidates.Clear();
+        }
+
+        foreach (var candidate in toFlush)
+        {
+            ApplyRemoteCandidateInternal(candidate);
         }
     }
 
@@ -113,6 +135,23 @@ public sealed class WebRtcSession : IAsyncDisposable
     private void OnRemoteIceCandidate(string candidateJson)
     {
         if (_disposed || string.IsNullOrWhiteSpace(candidateJson)) return;
+
+        lock (_candidateLock)
+        {
+            if (!_remoteDescriptionApplied)
+            {
+                // Trickled server candidate arrived before NegotiateAsync applied
+                // setRemoteDescription(answer); buffer and flush after.
+                _pendingRemoteCandidates.Add(candidateJson);
+                return;
+            }
+        }
+
+        ApplyRemoteCandidateInternal(candidateJson);
+    }
+
+    private void ApplyRemoteCandidateInternal(string candidateJson)
+    {
         try
         {
             var init = JsonSerializer.Deserialize<RTCIceCandidateInit>(candidateJson);
@@ -122,6 +161,12 @@ public sealed class WebRtcSession : IAsyncDisposable
             }
         }
         catch { /* ignore malformed candidates */ }
+    }
+
+    /// <summary>Exposed for tests so they can assert the buffer drained as expected.</summary>
+    internal int PendingRemoteCandidateCount
+    {
+        get { lock (_candidateLock) return _pendingRemoteCandidates.Count; }
     }
 
     private void OnPcStateChanged(RTCPeerConnectionState state)

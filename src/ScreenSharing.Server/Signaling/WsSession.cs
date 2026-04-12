@@ -388,17 +388,16 @@ public sealed class WsSession
         }
 
         var sfu = _rooms.GetSfuSession(_currentRoomId);
-        var peer = sfu?.Find(PeerId);
-        if (peer is null)
+        if (sfu is null)
         {
-            // An ICE candidate can arrive before the SFU peer exists if the client
-            // trickles candidates before the offer round-trip completes. In Phase 3.1
-            // the server always creates the peer from an offer, so this path should
-            // be rare — log and drop.
-            _logger.LogDebug("Session {PeerId} ICE candidate dropped: no SFU peer", PeerId);
+            await SendErrorAsync(ErrorCode.InternalError, "No SFU session for room", envelope.CorrelationId).ConfigureAwait(false);
             return;
         }
 
+        // Trickle ICE can race the SDP offer on fast connections. Always go through
+        // GetOrAttachSfuPeer so an early candidate creates the SfuPeer and is
+        // buffered until HandleRemoteOfferAsync applies the remote description.
+        var peer = GetOrAttachSfuPeer(sfu);
         var ice = WsMessageCodec.DecodePayload<IceCandidate>(envelope.Payload);
         peer.AddRemoteIceCandidate(ice.Candidate);
     }

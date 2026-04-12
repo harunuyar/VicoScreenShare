@@ -18,6 +18,9 @@ public sealed class SfuPeer : IAsyncDisposable
 {
     private readonly RTCPeerConnection _pc;
     private readonly ILogger<SfuPeer>? _logger;
+    private readonly object _candidateLock = new();
+    private readonly List<string> _pendingRemoteCandidates = new();
+    private bool _remoteDescriptionApplied;
     private bool _disposed;
 
     public SfuPeer(Guid peerId, ILogger<SfuPeer>? logger = null)
@@ -83,7 +86,9 @@ public sealed class SfuPeer : IAsyncDisposable
     }
 
     /// <summary>
-    /// Consume a remote offer and return the server's answer SDP.
+    /// Consume a remote offer and return the server's answer SDP. Any ICE
+    /// candidates that arrived before the offer are flushed once the remote
+    /// description has been applied.
     /// </summary>
     public async Task<string> HandleRemoteOfferAsync(string offerSdp)
     {
@@ -101,6 +106,8 @@ public sealed class SfuPeer : IAsyncDisposable
 
         var answer = _pc.createAnswer(null);
         await _pc.setLocalDescription(answer).ConfigureAwait(false);
+
+        FlushPendingRemoteCandidates();
         return answer.sdp;
     }
 
@@ -122,10 +129,51 @@ public sealed class SfuPeer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Apply a remote ICE candidate if the peer connection's remote description has
+    /// already been set, or buffer it for later replay otherwise. Trickle ICE
+    /// candidates on a fast connection routinely race ahead of the SDP round-trip,
+    /// and SIPSorcery's <c>addIceCandidate</c> silently drops them if the remote
+    /// description has not yet been applied.
+    /// </summary>
     public void AddRemoteIceCandidate(string candidateJson)
     {
         if (string.IsNullOrWhiteSpace(candidateJson)) return;
 
+        lock (_candidateLock)
+        {
+            if (!_remoteDescriptionApplied)
+            {
+                _pendingRemoteCandidates.Add(candidateJson);
+                return;
+            }
+        }
+
+        ApplyRemoteCandidateInternal(candidateJson);
+    }
+
+    private void FlushPendingRemoteCandidates()
+    {
+        List<string> toFlush;
+        lock (_candidateLock)
+        {
+            _remoteDescriptionApplied = true;
+            if (_pendingRemoteCandidates.Count == 0)
+            {
+                return;
+            }
+            toFlush = new List<string>(_pendingRemoteCandidates);
+            _pendingRemoteCandidates.Clear();
+        }
+
+        foreach (var candidate in toFlush)
+        {
+            ApplyRemoteCandidateInternal(candidate);
+        }
+    }
+
+    private void ApplyRemoteCandidateInternal(string candidateJson)
+    {
         try
         {
             var init = JsonSerializer.Deserialize<RTCIceCandidateInit>(candidateJson);
@@ -138,6 +186,12 @@ public sealed class SfuPeer : IAsyncDisposable
         {
             _logger?.LogDebug(ex, "SfuPeer {PeerId} failed to add remote ICE candidate", PeerId);
         }
+    }
+
+    /// <summary>Exposed for tests so they can assert the buffer drained as expected.</summary>
+    internal int PendingRemoteCandidateCount
+    {
+        get { lock (_candidateLock) return _pendingRemoteCandidates.Count; }
     }
 
     public ValueTask DisposeAsync()

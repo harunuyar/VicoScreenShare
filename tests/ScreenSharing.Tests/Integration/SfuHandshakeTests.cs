@@ -46,6 +46,56 @@ public sealed class SfuHandshakeTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Server_buffers_ice_candidate_that_arrives_before_the_offer()
+    {
+        // Send an ICE candidate frame BEFORE the SDP offer and verify the handshake
+        // still completes. Without buffering, WsSession would have looked the peer
+        // up via Find(PeerId), found nothing, and silently dropped the candidate.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var socket = await ConnectAndJoinAsync("Alice", cts.Token);
+
+        // Build a canned RTCIceCandidateInit JSON that SIPSorcery will accept.
+        // The content doesn't need to be routable — it just needs to be a well
+        // formed candidate line. We use a 127.0.0.1 host candidate so the
+        // server-side addIceCandidate does not reject it on shape alone.
+        var cannedCandidate = "{" +
+            "\"candidate\":\"candidate:1 1 UDP 2122252543 127.0.0.1 50000 typ host\"," +
+            "\"sdpMid\":\"0\"," +
+            "\"sdpMLineIndex\":0," +
+            "\"usernameFragment\":null}";
+        await SendAsync(
+            socket,
+            MessageType.IceCandidate,
+            new IceCandidate(cannedCandidate, null, null),
+            cts.Token);
+
+        // Now send the offer. If the candidate was dropped, this still succeeds
+        // (handshake-only), which is why Phase 3.1 happy-path tests could not catch
+        // the drop. The server-side assertion lives inside HandleIceCandidateAsync:
+        // GetOrCreatePeer has to be used so the candidate lands on a real buffer
+        // that the subsequent offer handler will flush.
+        var clientPc = new RTCPeerConnection(null);
+        var videoFormat = new VideoFormat(VideoCodecsEnum.VP8, 96);
+        var videoTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.video,
+            isRemote: false,
+            capabilities: new List<SDPAudioVideoMediaFormat> { new(videoFormat) },
+            streamStatus: MediaStreamStatusEnum.RecvOnly);
+        clientPc.addTrack(videoTrack);
+        var offer = clientPc.createOffer(null);
+        await clientPc.setLocalDescription(offer);
+        await SendAsync(socket, MessageType.SdpOffer, new SdpOffer(offer.sdp), cts.Token);
+
+        var envelope = await ExpectAsync(socket, MessageType.SdpAnswer, cts.Token);
+        var answer = envelope.Payload.Deserialize<SdpAnswer>(ProtocolJson.Options)!;
+        answer.Sdp.Should().NotBeNullOrEmpty();
+
+        clientPc.close();
+        await CleanCloseAsync(socket);
+    }
+
+    [Fact]
     public async Task Server_answers_an_sdp_offer_with_a_recvonly_video_track()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
