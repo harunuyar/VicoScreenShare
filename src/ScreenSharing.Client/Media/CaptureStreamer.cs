@@ -7,27 +7,36 @@ using SIPSorceryMedia.Encoders;
 namespace ScreenSharing.Client.Media;
 
 /// <summary>
-/// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery-style send path
-/// by handing BGRA frames directly to <see cref="VpxVideoEncoder.EncodeVideo"/>
-/// — SIPSorcery's built-in PixelConverter takes care of BGRA -> I420 using the
-/// same YUV coefficients its VP8 pipeline decodes with, so a hand-rolled
-/// conversion on our side cannot drift from the codec's expectations.
+/// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery-style send path.
 ///
-/// The streamer is single-threaded on the capture thread: frames are encoded
-/// synchronously inside <see cref="OnFrameArrived"/>. VP8 encoding a 1080p
-/// frame on CPU is ~2-4 ms which stays well under a 16 ms budget at 60fps.
+/// Each frame: crop to even dimensions, compact into a packed BGRA buffer, convert
+/// to I420 via our own <see cref="BgraToI420"/> (SIPSorcery's EncodeVideo(Bgra...)
+/// path mislabels channels — verified by a VP8 round-trip unit test), feed the
+/// I420 bytes to a VP8 encoder, emit the encoded payload through a callback.
+/// Production wiring passes <c>RTCPeerConnection.SendVideo</c> as the callback;
+/// tests can pass a lambda.
+///
+/// The encoder is rebuilt whenever the captured frame dimensions change because
+/// libvpx only configures itself on construction and silently produces garbage
+/// (striped, misaligned preview) when fed a differently-sized frame later.
+///
 /// <see cref="Dispose"/> and <see cref="OnFrameArrived"/> are serialized by a
 /// mutex so a stop-streaming cannot race with a mid-flight frame inside the
-/// native libvpx encoder (that race crashes the CLR with
-/// <c>ExecutionEngineException</c> the moment the encoder frees its state).
+/// native libvpx encoder — that race crashes the CLR with
+/// <c>ExecutionEngineException</c> the moment the encoder frees its state.
 /// </summary>
 public sealed class CaptureStreamer : IDisposable
 {
     private readonly ICaptureSource _source;
     private readonly Action<uint, byte[]> _onEncoded;
-    private readonly VpxVideoEncoder _encoder;
     private readonly object _encodeLock = new();
+
+    private VpxVideoEncoder _encoder;
+    private int _encoderWidth;
+    private int _encoderHeight;
+
     private byte[] _bgraBuffer = Array.Empty<byte>();
+    private byte[] _i420Buffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
     private bool _attached;
     private bool _disposed;
@@ -63,33 +72,31 @@ public sealed class CaptureStreamer : IDisposable
     {
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
-        // Copy out of the source-owned span into our own buffer first so we can
-        // drop out of the span scope and take the encode lock (you cannot hold a
-        // ref struct across a lock block). The buffer is reused across frames to
-        // avoid GC pressure at 60fps.
-        var byteCount = frame.Height * frame.Width * 4;
+        // libvpx's VP8 encoder wants even dimensions (I420 uses 2x2 chroma
+        // subsampling blocks). Round down each axis to the nearest even value;
+        // worst case we drop a single row or column off a window edge.
+        var width = frame.Width & ~1;
+        var height = frame.Height & ~1;
+        if (width <= 0 || height <= 0) return;
+
+        var byteCount = height * width * 4;
         if (_bgraBuffer.Length < byteCount)
         {
             _bgraBuffer = new byte[byteCount];
         }
-        if (frame.StrideBytes == frame.Width * 4)
+
+        // Compact the cropped rectangle from the source-owned span (which may
+        // have arbitrary stride padding) into a packed width*4 buffer. Doing
+        // this outside the lock lets us drop out of the ref-struct span scope
+        // before we try to acquire _encodeLock.
+        for (var y = 0; y < height; y++)
         {
-            frame.Pixels.Slice(0, byteCount).CopyTo(_bgraBuffer);
-        }
-        else
-        {
-            for (var y = 0; y < frame.Height; y++)
-            {
-                frame.Pixels
-                    .Slice(y * frame.StrideBytes, frame.Width * 4)
-                    .CopyTo(_bgraBuffer.AsSpan(y * frame.Width * 4, frame.Width * 4));
-            }
+            frame.Pixels
+                .Slice(y * frame.StrideBytes, width * 4)
+                .CopyTo(_bgraBuffer.AsSpan(y * width * 4, width * 4));
         }
 
-        var width = frame.Width;
-        var height = frame.Height;
         var timestamp = frame.Timestamp;
-
         EncodeAndEmit(width, height, byteCount, timestamp);
     }
 
@@ -102,13 +109,37 @@ public sealed class CaptureStreamer : IDisposable
 
             FrameCount++;
 
+            // Rebuild the encoder if the stream dimensions changed. libvpx
+            // initializes its encoder state from the first frame's dimensions
+            // and cannot retarget on the fly. Feeding it a differently-sized
+            // buffer after init produces a striped / shifted output frame.
+            if (width != _encoderWidth || height != _encoderHeight)
+            {
+                try { _encoder.Dispose(); } catch { }
+                _encoder = new VpxVideoEncoder();
+                _encoderWidth = width;
+                _encoderHeight = height;
+            }
+
+            var i420Required = BgraToI420.RequiredOutputSize(width, height);
+            if (_i420Buffer.Length < i420Required)
+            {
+                _i420Buffer = new byte[i420Required];
+            }
+            BgraToI420.Convert(
+                _bgraBuffer.AsSpan(0, byteCount),
+                width,
+                height,
+                bgraStrideBytes: width * 4,
+                _i420Buffer);
+
             try
             {
                 encoded = _encoder.EncodeVideo(
                     width,
                     height,
-                    _bgraBuffer,
-                    VideoPixelFormatsEnum.Bgra,
+                    _i420Buffer,
+                    VideoPixelFormatsEnum.I420,
                     VideoCodecsEnum.VP8);
             }
             catch (Exception)
