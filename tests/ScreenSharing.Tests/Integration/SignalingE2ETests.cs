@@ -248,6 +248,44 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         await CleanCloseAsync(viewer);
     }
 
+    [Fact]
+    public async Task Late_joiner_sees_IsStreaming_true_for_active_publisher_in_RoomJoined_snapshot()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        var streamer = await ConnectAsync("Alice", cts.Token);
+        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        var roomId = (await ExpectAsync(streamer, MessageType.RoomCreated, cts.Token))
+            .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
+        var streamerJoin = (await ExpectAsync(streamer, MessageType.RoomJoined, cts.Token))
+            .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
+
+        await SendAsync(
+            streamer,
+            MessageType.StreamStarted,
+            new StreamStarted(Guid.Empty, "live-stream", StreamKind.Screen, HasAudio: false),
+            cts.Token);
+
+        // Bob joins AFTER Alice is already streaming. His RoomJoined snapshot
+        // must reflect IsStreaming=true on Alice so the client can prime its
+        // clear-on-stop tracking; otherwise Alice's StreamEnded would be
+        // ignored and Bob's tile would freeze on the last frame.
+        var lateJoiner = await ConnectAsync("Bob", cts.Token);
+        await SendAsync(lateJoiner, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+
+        var joined = await ExpectAsync(lateJoiner, MessageType.RoomJoined, cts.Token);
+        var payload = joined.Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
+
+        var alice = payload.Peers.Single(p => p.PeerId == streamerJoin.YourPeerId);
+        alice.IsStreaming.Should().BeTrue(
+            "Alice was streaming when Bob joined, so the snapshot should reflect it");
+        var bob = payload.Peers.Single(p => p.PeerId == payload.YourPeerId);
+        bob.IsStreaming.Should().BeFalse("fresh joiner has not started a stream");
+
+        await CleanCloseAsync(streamer);
+        await CleanCloseAsync(lateJoiner);
+    }
+
     // --- helpers ---
 
     private async Task<WebSocket> ConnectAsync(string displayName, CancellationToken ct)

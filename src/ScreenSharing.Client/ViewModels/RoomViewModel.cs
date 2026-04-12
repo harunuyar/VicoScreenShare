@@ -88,6 +88,22 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.StreamStartedReceived += OnStreamStartedReceived;
         _signaling.StreamEndedReceived += OnStreamEndedReceived;
 
+        // Join-mid-stream case: the server ships PeerInfo.IsStreaming in the
+        // RoomJoined snapshot so a late joiner can pick up the already-active
+        // publisher. Without this, StreamEnded / PeerLeft would be ignored
+        // later because _currentlyStreamingPeerId was never primed, and the
+        // viewer's tile would stay frozen on the last decoded frame until the
+        // whole room tears down.
+        var existingStreamer = initial.Peers.FirstOrDefault(
+            p => p.IsStreaming && p.PeerId != initial.YourPeerId);
+        if (existingStreamer is not null)
+        {
+            _currentlyStreamingPeerId = existingStreamer.PeerId;
+            _lastRemoteFrameUtc = DateTime.UtcNow;
+            MediaStatus = "Joining mid-stream...";
+            StartStaleFrameTimer();
+        }
+
         // Kick off the peer connection handshake in the background so the room is
         // ready to both send (when the user hits Share) and receive (whenever any
         // other peer's RTP flows through the SFU).
