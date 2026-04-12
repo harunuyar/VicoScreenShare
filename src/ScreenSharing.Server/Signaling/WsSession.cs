@@ -8,6 +8,7 @@ using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
 using ScreenSharing.Server.Config;
 using ScreenSharing.Server.Rooms;
+using ScreenSharing.Server.Sfu;
 
 namespace ScreenSharing.Server.Signaling;
 
@@ -42,6 +43,7 @@ public sealed class WsSession
     private bool _helloReceived;
     private string? _currentRoomId;
     private long _lastPongTicks = DateTime.UtcNow.Ticks;
+    private bool _sfuPeerBound;
 
     public WsSession(
         WebSocket socket,
@@ -151,6 +153,18 @@ public sealed class WsSession
 
             case MessageType.JoinRoom:
                 await HandleJoinRoomAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.SdpOffer:
+                await HandleSdpOfferAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.SdpAnswer:
+                await HandleSdpAnswerAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.IceCandidate:
+                await HandleIceCandidateAsync(envelope).ConfigureAwait(false);
                 break;
 
             default:
@@ -302,6 +316,115 @@ public sealed class WsSession
                 _logger.LogDebug(ex, "Failed to forward {Type} to peer {PeerId}", type, peer.PeerId);
             }
         }
+    }
+
+    private async Task HandleSdpOfferAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null)
+        {
+            await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before sending SDP", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        if (sfu is null)
+        {
+            await SendErrorAsync(ErrorCode.InternalError, "No SFU session for room", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var offer = WsMessageCodec.DecodePayload<SdpOffer>(envelope.Payload);
+        var peer = GetOrAttachSfuPeer(sfu);
+
+        try
+        {
+            var answerSdp = await peer.HandleRemoteOfferAsync(offer.Sdp).ConfigureAwait(false);
+            await SendAsync(MessageType.SdpAnswer, new SdpAnswer(answerSdp), envelope.CorrelationId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Session {PeerId} SDP offer handling failed", PeerId);
+            await SendErrorAsync(ErrorCode.InternalError, $"SDP offer handling failed: {ex.Message}", envelope.CorrelationId).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleSdpAnswerAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null)
+        {
+            await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before sending SDP", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        var peer = sfu?.Find(PeerId);
+        if (peer is null)
+        {
+            await SendErrorAsync(ErrorCode.BadRequest, "No pending SFU peer for this session", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var answer = WsMessageCodec.DecodePayload<SdpAnswer>(envelope.Payload);
+        try
+        {
+            peer.HandleRemoteAnswer(answer.Sdp);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Session {PeerId} SDP answer handling failed", PeerId);
+            await SendErrorAsync(ErrorCode.InternalError, $"SDP answer handling failed: {ex.Message}", envelope.CorrelationId).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleIceCandidateAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null)
+        {
+            await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before sending ICE", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        var peer = sfu?.Find(PeerId);
+        if (peer is null)
+        {
+            // An ICE candidate can arrive before the SFU peer exists if the client
+            // trickles candidates before the offer round-trip completes. In Phase 3.1
+            // the server always creates the peer from an offer, so this path should
+            // be rare — log and drop.
+            _logger.LogDebug("Session {PeerId} ICE candidate dropped: no SFU peer", PeerId);
+            return;
+        }
+
+        var ice = WsMessageCodec.DecodePayload<IceCandidate>(envelope.Payload);
+        peer.AddRemoteIceCandidate(ice.Candidate);
+    }
+
+    private SfuPeer GetOrAttachSfuPeer(SfuSession sfu)
+    {
+        var peer = sfu.GetOrCreatePeer(PeerId);
+        // Subscribe to the server-side peer's local ICE candidates so we can forward
+        // them to the client. Only subscribe once — SfuPeer.GetOrCreatePeer returns
+        // the same instance on subsequent calls, so track a flag.
+        if (!_sfuPeerBound)
+        {
+            _sfuPeerBound = true;
+            peer.LocalIceCandidateReady += OnServerIceCandidateReady;
+        }
+        return peer;
+    }
+
+    private void OnServerIceCandidateReady(string candidateJson)
+    {
+        try
+        {
+            // Fire-and-forget: the write goes through our outbound channel.
+            _ = SendAsync(MessageType.IceCandidate, new IceCandidate(candidateJson, null, null));
+        }
+        catch { /* session tearing down */ }
     }
 
     private async Task LeaveCurrentRoomAsync()

@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ScreenSharing.Server.Auth;
 using ScreenSharing.Server.Config;
+using ScreenSharing.Server.Sfu;
 
 namespace ScreenSharing.Server.Rooms;
 
@@ -15,16 +17,25 @@ public sealed class RoomManager
     private const int CreateCollisionRetries = 10;
 
     private readonly ConcurrentDictionary<string, Room> _rooms = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SfuSession> _sfuSessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly PasswordHasher _hasher;
     private readonly IOptionsMonitor<RoomServerOptions> _options;
+    private readonly ILoggerFactory? _loggerFactory;
 
-    public RoomManager(PasswordHasher hasher, IOptionsMonitor<RoomServerOptions> options)
+    public RoomManager(
+        PasswordHasher hasher,
+        IOptionsMonitor<RoomServerOptions> options,
+        ILoggerFactory? loggerFactory = null)
     {
         _hasher = hasher;
         _options = options;
+        _loggerFactory = loggerFactory;
     }
 
     public int RoomCount => _rooms.Count;
+
+    public SfuSession? GetSfuSession(string roomId) =>
+        _sfuSessions.TryGetValue(roomId, out var sfu) ? sfu : null;
 
     public CreateRoomResult CreateRoom(string? password)
     {
@@ -42,6 +53,7 @@ public sealed class RoomManager
             var room = new Room(id, hash);
             if (_rooms.TryAdd(id, room))
             {
+                _sfuSessions[id] = new SfuSession(_loggerFactory);
                 return CreateRoomResult.Success(room);
             }
         }
@@ -86,9 +98,20 @@ public sealed class RoomManager
         }
         var result = room.RemovePeer(peerId);
         var roomDeleted = false;
+
+        // Tear down the peer's SFU state whether or not the room is deleted.
+        if (_sfuSessions.TryGetValue(roomId, out var sfu))
+        {
+            _ = sfu.RemovePeerAsync(peerId).AsTask();
+        }
+
         if (result.PeerCountAfter == 0)
         {
             _rooms.TryRemove(roomId, out _);
+            if (_sfuSessions.TryRemove(roomId, out var deadSession))
+            {
+                _ = deadSession.DisposeAsync().AsTask();
+            }
             roomDeleted = true;
         }
         return new RemovePeerOutcome(
