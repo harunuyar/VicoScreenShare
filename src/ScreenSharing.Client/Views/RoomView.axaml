@@ -9,7 +9,7 @@
 
     <Grid Margin="24" RowDefinitions="Auto,*,Auto,Auto">
 
-        <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto">
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto">
             <StackPanel Grid.Column="0" Spacing="4">
                 <TextBlock Text="Room" Opacity="0.6" FontSize="12" />
                 <TextBlock Text="{Binding RoomId}" FontSize="28" FontWeight="Bold" />
@@ -28,6 +28,11 @@
                     VerticalAlignment="Center"
                     Margin="0,0,8,0" />
             <Button Grid.Column="2"
+                    Content="Settings"
+                    Command="{Binding ShowSettingsCommand}"
+                    VerticalAlignment="Center"
+                    Margin="0,0,8,0" />
+            <Button Grid.Column="3"
                     Content="Leave room"
                     Command="{Binding LeaveRoomCommand}"
                     VerticalAlignment="Center" />

@@ -286,6 +286,22 @@ public sealed partial class RoomViewModel : ViewModelBase
     [RelayCommand]
     private Task StopSharingAsync() => StopSharingInternalAsync();
 
+    [RelayCommand]
+    private void ShowSettings()
+    {
+        // Back-factory returns THIS live RoomViewModel instead of rebuilding
+        // one — that keeps the active WebRTC session, capture source, and
+        // renderer alive while the user is on the settings page. Tweaks to
+        // resolution/fps apply to the NEXT CaptureStreamer built by
+        // ShareScreenAsync; an in-flight share keeps its existing encoder.
+        var settingsVm = new SettingsViewModel(
+            _settings,
+            _settingsStore,
+            _navigation,
+            () => this);
+        _navigation.NavigateTo(settingsVm);
+    }
+
     private async Task StopSharingInternalAsync()
     {
         var streamer = _captureStreamer;
