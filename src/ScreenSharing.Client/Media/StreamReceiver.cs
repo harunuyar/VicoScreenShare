@@ -132,17 +132,16 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             var height = (int)sample.Height;
             if (width <= 0 || height <= 0) continue;
 
-            // Convert I420 -> BGR (24-bit) via SIPSorcery's converter, so encoder
-            // and decoder share identical coefficients and there is no range or
-            // chroma drift between sides. The overload with the `out stride`
-            // parameter handles padding for uneven widths. Then expand BGR ->
-            // BGRA for Avalonia's Bgra8888 bitmap format by inserting 0xFF alpha
-            // on every pixel.
-            byte[] bgrConverted;
-            int bgrStride;
+            // Run the decoded I420 through SIPSorcery's converter. NOTE:
+            // PixelConverter.I420toBGR is misnamed — it actually lays bytes out
+            // as R, G, B (verified with a VP8 round-trip unit test). We read
+            // those bytes in RGB order here and write them out to BGRA for
+            // Avalonia's Bgra8888 bitmap format, inserting 0xFF alpha per pixel.
+            byte[] rgb;
+            int stride;
             try
             {
-                bgrConverted = PixelConverter.I420toBGR(sample.Sample, width, height, out bgrStride);
+                rgb = PixelConverter.I420toBGR(sample.Sample, width, height, out stride);
             }
             catch
             {
@@ -154,15 +153,15 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
             for (var y = 0; y < height; y++)
             {
-                var srcRowStart = y * bgrStride;
+                var srcRowStart = y * stride;
                 var dstRowStart = y * width * 4;
                 for (var x = 0; x < width; x++)
                 {
                     var src = srcRowStart + x * 3;
                     var dst = dstRowStart + x * 4;
-                    _bgraBuffer[dst + 0] = bgrConverted[src + 0];
-                    _bgraBuffer[dst + 1] = bgrConverted[src + 1];
-                    _bgraBuffer[dst + 2] = bgrConverted[src + 2];
+                    _bgraBuffer[dst + 0] = rgb[src + 2]; // B <- RGB[2]
+                    _bgraBuffer[dst + 1] = rgb[src + 1]; // G <- RGB[1]
+                    _bgraBuffer[dst + 2] = rgb[src + 0]; // R <- RGB[0]
                     _bgraBuffer[dst + 3] = 0xFF;
                 }
             }

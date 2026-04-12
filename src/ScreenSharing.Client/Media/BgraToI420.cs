@@ -21,6 +21,14 @@ public static class BgraToI420
         return width * height + 2 * chromaWidth * chromaHeight;
     }
 
+    /// <summary>Convenience overload that allocates the I420 buffer for you.</summary>
+    public static byte[] ConvertToArray(ReadOnlySpan<byte> bgraSource, int width, int height, int bgraStrideBytes)
+    {
+        var result = new byte[RequiredOutputSize(width, height)];
+        Convert(bgraSource, width, height, bgraStrideBytes, result);
+        return result;
+    }
+
     /// <summary>
     /// Converts a BGRA8 source buffer into I420. The destination must be at least
     /// <see cref="RequiredOutputSize"/> bytes. Chroma is subsampled by averaging
