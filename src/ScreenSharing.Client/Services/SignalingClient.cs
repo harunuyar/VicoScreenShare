@@ -71,8 +71,12 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         catch
         {
+            // One-shot contract: a failed connect kills this instance. Transition
+            // to Disposed (not back to NotConnected) so a second ConnectAsync call
+            // on the same instance throws cleanly. Callers must create a new
+            // SignalingClient for each attempt.
             socket.Dispose();
-            Volatile.Write(ref _state, StateNotConnected);
+            Volatile.Write(ref _state, StateDisposed);
             throw;
         }
 

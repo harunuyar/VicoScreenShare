@@ -81,6 +81,26 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SignalingClient_rejects_second_ConnectAsync_after_failed_connect()
+    {
+        // One-shot contract: even if the first ConnectAsync threw, the same instance
+        // cannot be retried. Callers must create a fresh SignalingClient.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var client = new SignalingClient();
+        var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
+
+        var bogus = new Uri("ws://127.0.0.1:1/ws");
+        Exception? firstFailure = null;
+        try { await client.ConnectAsync(bogus, hello, cts.Token); }
+        catch (Exception ex) { firstFailure = ex; }
+        firstFailure.Should().NotBeNull();
+
+        await using var server = StartThrowawayWsServer(out var uri);
+        var secondAttempt = async () => await client.ConnectAsync(uri, hello, cts.Token);
+        await secondAttempt.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
     public async Task SignalingClient_releases_state_after_failed_connect_so_a_fresh_instance_works()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -185,16 +205,17 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task HomeViewModel_can_retry_after_failed_create_without_stale_events()
+    public async Task HomeViewModel_can_retry_after_failed_create_and_navigates_on_success()
     {
-        // Two consecutive CreateRoomCommand invocations: the first fails (server
-        // drops), the second connects to a different server and should succeed.
-        // Because each RunRoomOperationAsync builds its own SignalingClient, no
-        // events from the first attempt can reach the second.
+        // Attempt 1: a server that drops mid-create, so the VM surfaces a
+        // "Disconnected" status and stays on HomeViewModel.
+        // Attempt 2: a server that replies with room_created + room_joined, so
+        // the VM completes successfully and navigates to RoomViewModel.
+        // The factory is counted to prove each attempt built a fresh client.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
         await using var droppingServer = StartAbortAfterHelloServer(out var droppingUri);
-        await using var happyServer = StartRoomCreatedServer(out var happyUri);
+        await using var happyServer = StartRoomJoinedServer(out var happyUri);
 
         var tempDir = Path.Combine(Path.GetTempPath(), "ScreenSharing.Tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
@@ -204,36 +225,42 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         var nav = new NavigationService();
         var settings = new ClientSettings { ServerUri = droppingUri };
 
-        var vm = new HomeViewModel(identity, () => new SignalingClient(), nav, settings)
+        var factoryCallCount = 0;
+        SignalingClient Factory()
+        {
+            Interlocked.Increment(ref factoryCallCount);
+            return new SignalingClient();
+        }
+
+        var vm = new HomeViewModel(identity, Factory, nav, settings)
         {
             DisplayName = "Alice",
         };
 
-        // Attempt 1: dropping server, should end with disconnect status.
+        // Attempt 1.
         await vm.CreateRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(8));
         vm.IsBusy.Should().BeFalse();
-        vm.StatusMessage.Should().Contain("Disconnected");
+        vm.StatusMessage.Should().NotBeNull();
+        vm.StatusMessage!.Should().Contain("Disconnected");
+        nav.CurrentViewModel.Should().BeNull(
+            "the first attempt failed so we should still be on the home screen");
+        factoryCallCount.Should().Be(1);
 
-        // Attempt 2: redirect to the happy server, which replies with room_created
-        // and then a full room_joined would normally follow. Our happy server only
-        // sends room_created, so the VM will hang on join_joined — but the VM's
-        // handler should process whatever comes. We just assert the second attempt
-        // started cleanly from a fresh signaling instance: IsBusy becomes true on
-        // the second call even though the first instance is fully dead.
+        // Attempt 2.
         settings.ServerUri = happyUri;
+        await vm.CreateRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(8));
 
-        var second = vm.CreateRoomCommand.ExecuteAsync(null);
-        // Give the first phase (connect + send create_room) time to run.
-        await Task.Delay(200, cts.Token);
-        vm.IsBusy.Should().BeTrue(
-            "a brand new SignalingClient should be connected and awaiting a reply");
-        // Cancel the pending second attempt by setting the VM's status via a
-        // dispose simulation — the test just needs to verify the second attempt
-        // reached the in-progress state without inheriting the first attempt's
-        // disconnect. Wait up to the CTS deadline; since the happy server does
-        // not send room_joined, the operation will eventually time out on the
-        // outer CTS, which is acceptable for this assertion. We don't await the
-        // task to completion.
+        factoryCallCount.Should().Be(2,
+            "each attempt must build a brand-new SignalingClient via the factory");
+        vm.IsBusy.Should().BeFalse();
+
+        var roomVm = nav.CurrentViewModel.Should().BeOfType<RoomViewModel>(
+            "the second attempt succeeded and the VM navigated to the room view").Subject;
+        roomVm.RoomId.Should().Be("TEST01");
+
+        // Tear down the navigated RoomViewModel so the background signaling task
+        // does not outlive the test.
+        await roomVm.LeaveRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(5));
 
         try { Directory.Delete(tempDir, recursive: true); } catch { }
     }
@@ -307,6 +334,85 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         app.StartAsync().GetAwaiter().GetResult();
         serverUri = ResolveWsUri(app);
         return app;
+    }
+
+    /// <summary>
+    /// Kestrel listener that on receiving a create_room request replies with a
+    /// canned room_created envelope followed by a room_joined envelope with a
+    /// single peer (the caller, marked as host). Enough to drive the client's
+    /// HomeViewModel through its full successful-join path.
+    /// </summary>
+    private static WebApplication StartRoomJoinedServer(out Uri serverUri)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Logging.ClearProviders();
+        var app = builder.Build();
+        app.UseWebSockets();
+        app.Map("/ws", async context =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = 400;
+                return;
+            }
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            var buf = new byte[8192];
+            var framesReceived = 0;
+            try
+            {
+                while (socket.State == WebSocketState.Open)
+                {
+                    var res = await socket.ReceiveAsync(buf, context.RequestAborted);
+                    if (res.MessageType == WebSocketMessageType.Close) break;
+                    framesReceived++;
+                    if (framesReceived == 2)
+                    {
+                        const string roomId = "TEST01";
+                        var peerId = Guid.NewGuid();
+
+                        await SendEnvelopeAsync(
+                            socket,
+                            ScreenSharing.Protocol.MessageType.RoomCreated,
+                            new ScreenSharing.Protocol.Messages.RoomCreated(roomId),
+                            context.RequestAborted);
+
+                        var joined = new ScreenSharing.Protocol.Messages.RoomJoined(
+                            RoomId: roomId,
+                            YourPeerId: peerId,
+                            Peers: new[]
+                            {
+                                new ScreenSharing.Protocol.PeerInfo(peerId, "Alice", IsHost: true, IsStreaming: false),
+                            },
+                            IceServers: Array.Empty<ScreenSharing.Protocol.Messages.IceServerConfig>());
+                        await SendEnvelopeAsync(
+                            socket,
+                            ScreenSharing.Protocol.MessageType.RoomJoined,
+                            joined,
+                            context.RequestAborted);
+                    }
+                }
+            }
+            catch { }
+        });
+        app.StartAsync().GetAwaiter().GetResult();
+        serverUri = ResolveWsUri(app);
+        return app;
+    }
+
+    private static async Task SendEnvelopeAsync<T>(
+        WebSocket socket,
+        string type,
+        T payload,
+        CancellationToken ct)
+    {
+        var element = System.Text.Json.JsonSerializer.SerializeToElement(
+            payload, ScreenSharing.Protocol.ProtocolJson.Options);
+        var envelope = new ScreenSharing.Protocol.MessageEnvelope(type, null, element);
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            envelope, ScreenSharing.Protocol.ProtocolJson.Options);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        await socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
     }
 
     private static WebApplication StartRoomCreatedServer(out Uri serverUri)
