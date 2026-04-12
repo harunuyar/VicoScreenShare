@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using ScreenSharing.Client.Media.Codecs;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
@@ -23,6 +24,11 @@ public sealed class WebRtcSession : IAsyncDisposable
     private bool _disposed;
 
     public WebRtcSession(SignalingClient signaling, WebRtcRole role)
+        : this(signaling, role, VideoCodec.Vp8)
+    {
+    }
+
+    public WebRtcSession(SignalingClient signaling, WebRtcRole role, VideoCodec codec)
     {
         _signaling = signaling;
         _role = role;
@@ -35,7 +41,7 @@ public sealed class WebRtcSession : IAsyncDisposable
             },
         });
 
-        var videoFormat = new VideoFormat(VideoCodecsEnum.VP8, 96);
+        var videoFormat = new VideoFormat(MapCodec(codec), 96);
         var direction = role switch
         {
             WebRtcRole.Sender => MediaStreamStatusEnum.SendOnly,
@@ -177,6 +183,18 @@ public sealed class WebRtcSession : IAsyncDisposable
     {
         ConnectionStateChanged?.Invoke(state);
     }
+
+    private static VideoCodecsEnum MapCodec(VideoCodec codec) => codec switch
+    {
+        VideoCodec.Vp8 => VideoCodecsEnum.VP8,
+        VideoCodec.H264 => VideoCodecsEnum.H264,
+        // AV1 is not in SIPSorcery's enum as of 10.0.3 — fall back to H.264 at
+        // the SDP layer even if the user picked AV1, so we never end up with
+        // no negotiated codec at all. The factory layer will show AV1 as
+        // unavailable on machines without support anyway.
+        VideoCodec.Av1 => VideoCodecsEnum.H264,
+        _ => VideoCodecsEnum.VP8,
+    };
 
     public ValueTask DisposeAsync()
     {

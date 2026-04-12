@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using ScreenSharing.Client.Diagnostics;
+using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
 using ScreenSharing.Client.ViewModels;
@@ -18,6 +19,14 @@ public partial class App : Application
     /// <see cref="ICaptureProvider"/> wired to that window.
     /// </summary>
     public static Func<Func<IntPtr>, ICaptureProvider>? CaptureProviderFactory { get; set; }
+
+    /// <summary>
+    /// Set by the platform-specific desktop host before Avalonia starts. The
+    /// Windows host registers VP8 (always) and H.264 (when FFmpeg is found);
+    /// if unset, <see cref="RoomViewModel"/> falls back to a fresh VP8-only
+    /// catalog so the app still works in test and headless scenarios.
+    /// </summary>
+    public static VideoCodecCatalog? VideoCodecCatalog { get; set; }
 
     public override void Initialize()
     {

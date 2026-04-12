@@ -7,6 +7,7 @@ using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ScreenSharing.Client.Media;
+using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Rendering;
 using ScreenSharing.Client.Services;
@@ -32,6 +33,14 @@ public sealed partial class RoomViewModel : ViewModelBase
     private ICaptureSource? _localCaptureSource;
     private CaptureStreamer? _captureStreamer;
     private bool _negotiationStarted;
+
+    // The codec picked when this room was joined. Locked for the lifetime of
+    // the session — changes to ClientSettings.Video.Codec only take effect
+    // the next time the user joins a room, because SDP negotiation and the
+    // encoder/decoder factory bindings all happen in the ctor.
+    private readonly VideoCodec _sessionCodec;
+    private readonly IVideoEncoderFactory _encoderFactory;
+    private readonly IVideoDecoderFactory _decoderFactory;
 
     // Track the peer whose video is currently filling the remote tile so we
     // know whose StreamEnded / PeerLeft should clear it. Phase 3 only supports
@@ -67,6 +76,17 @@ public sealed partial class RoomViewModel : ViewModelBase
         _settings = settings;
         _settingsStore = settingsStore;
         _captureProvider = captureProvider;
+
+        // Resolve codec + factories from the host-registered catalog, falling
+        // back to VP8 if the preferred codec is unavailable (e.g. user picked
+        // H.264 but FFmpeg isn't installed). We keep the resolved codec for
+        // the lifetime of the session so the encoder, decoder, and SDP all
+        // stay consistent.
+        var catalog = App.VideoCodecCatalog ?? new VideoCodecCatalog();
+        var resolved = catalog.ResolveOrFallback(settings.Video.Codec);
+        _sessionCodec = resolved.selected;
+        _encoderFactory = resolved.encoderFactory;
+        _decoderFactory = resolved.decoderFactory;
 
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
@@ -161,12 +181,12 @@ public sealed partial class RoomViewModel : ViewModelBase
         StreamReceiver? receiver = null;
         try
         {
-            session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional);
+            session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional, _sessionCodec);
 
             renderer = new WriteableBitmapRenderer();
             renderer.FrameRendered += OnRemoteFrameRendered;
 
-            receiver = new StreamReceiver(session.PeerConnection, displayName: "Remote peer");
+            receiver = new StreamReceiver(session.PeerConnection, _decoderFactory, displayName: "Remote peer");
             renderer.Attach(receiver);
             await receiver.StartAsync().ConfigureAwait(true);
 
@@ -268,7 +288,8 @@ public sealed partial class RoomViewModel : ViewModelBase
             var streamer = new CaptureStreamer(
                 source,
                 (duration, payload) => session.PeerConnection.SendVideo(duration, payload),
-                _settings.Video);
+                _settings.Video,
+                _encoderFactory);
             _captureStreamer = streamer;
             streamer.Start();
 

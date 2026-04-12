@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ScreenSharing.Client.Media;
+using ScreenSharing.Client.Media.Codecs;
 
 namespace ScreenSharing.Client.Services;
 
@@ -97,6 +98,7 @@ public sealed class SettingsStore
         public int MaxEncoderWidth { get; set; } = 1280;
         public int MaxEncoderHeight { get; set; } = 720;
         public int TargetFrameRate { get; set; } = 30;
+        public VideoCodec Codec { get; set; } = VideoCodec.Vp8;
 
         public static PersistedSettings From(ClientSettings source) => new()
         {
@@ -104,6 +106,7 @@ public sealed class SettingsStore
             MaxEncoderWidth = source.Video.MaxEncoderWidth,
             MaxEncoderHeight = source.Video.MaxEncoderHeight,
             TargetFrameRate = source.Video.TargetFrameRate,
+            Codec = source.Video.Codec,
         };
 
         public ClientSettings ToClientSettings()
@@ -115,6 +118,7 @@ public sealed class SettingsStore
                     MaxEncoderWidth = MaxEncoderWidth,
                     MaxEncoderHeight = MaxEncoderHeight,
                     TargetFrameRate = TargetFrameRate,
+                    Codec = Codec,
                 },
             };
             if (!string.IsNullOrWhiteSpace(ServerUri) && Uri.TryCreate(ServerUri, UriKind.Absolute, out var uri))

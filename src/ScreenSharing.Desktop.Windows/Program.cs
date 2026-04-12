@@ -1,7 +1,9 @@
 using System;
 using Avalonia;
 using ScreenSharing.Client;
+using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Windows.Capture;
+using ScreenSharing.Client.Windows.Media.Codecs;
 
 namespace ScreenSharing.Desktop.Windows;
 
@@ -18,6 +20,17 @@ internal static class Program
         // that returns the current main window HWND and builds a
         // WindowsCaptureProvider parented to it.
         App.CaptureProviderFactory = hwndProvider => new WindowsCaptureProvider(hwndProvider);
+
+        // Build the codec catalog. VP8 is baked into VideoCodecCatalog's
+        // constructor; H.264 registration is conditional on FFmpeg loading
+        // successfully so the factory IsAvailable gates the settings UI.
+        var catalog = new VideoCodecCatalog();
+        FFmpegRuntime.EnsureInitialized();
+        if (FFmpegRuntime.IsAvailable)
+        {
+            catalog.Register(new FFmpegH264EncoderFactory(), new FFmpegH264DecoderFactory());
+        }
+        App.VideoCodecCatalog = catalog;
 
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
