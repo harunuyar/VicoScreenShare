@@ -1,6 +1,12 @@
 namespace ScreenSharing.Client.Media;
 
 /// <summary>
+/// One entry in the resolution cap dropdown. The display name is what the UI
+/// shows; width/height are the actual pixel cap the encoder uses.
+/// </summary>
+public sealed record ResolutionPreset(string DisplayName, int Width, int Height);
+
+/// <summary>
 /// User-configurable video pipeline settings. Drives the
 /// <see cref="CaptureStreamer"/> resolution cap, the frame-rate throttle, and
 /// (future) the encoder bitrate target. Persisted to disk through

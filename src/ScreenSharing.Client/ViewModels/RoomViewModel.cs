@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
@@ -71,6 +72,26 @@ public sealed partial class RoomViewModel : ViewModelBase
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
 
+        // Quality controls live right above the Share button so the user can
+        // set resolution/fps at the moment of decision. Changes mutate the
+        // shared ClientSettings instance in place and persist to disk so the
+        // next CaptureStreamer picks them up and the values survive restart.
+        ResolutionPresets = new[]
+        {
+            new ResolutionPreset("480p  (854 x 480)", 854, 480),
+            new ResolutionPreset("720p  (1280 x 720)", 1280, 720),
+            new ResolutionPreset("1080p (1920 x 1080)", 1920, 1080),
+            new ResolutionPreset("1440p (2560 x 1440)", 2560, 1440),
+        };
+        FrameRatePresets = new[] { 15, 24, 30, 60 };
+
+        _selectedResolution = ResolutionPresets.FirstOrDefault(p =>
+            p.Width == _settings.Video.MaxEncoderWidth &&
+            p.Height == _settings.Video.MaxEncoderHeight) ?? ResolutionPresets[1];
+        _selectedFrameRate = FrameRatePresets.Contains(_settings.Video.TargetFrameRate)
+            ? _settings.Video.TargetFrameRate
+            : 30;
+
         Peers = new ObservableCollection<PeerViewModel>(
             initial.Peers.Select(p => new PeerViewModel(
                 p.PeerId,
@@ -125,6 +146,35 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     [ObservableProperty]
     private string? _localStreamLabel;
+
+    public IReadOnlyList<ResolutionPreset> ResolutionPresets { get; }
+
+    public IReadOnlyList<int> FrameRatePresets { get; }
+
+    [ObservableProperty]
+    private ResolutionPreset _selectedResolution;
+
+    [ObservableProperty]
+    private int _selectedFrameRate;
+
+    partial void OnSelectedResolutionChanged(ResolutionPreset value)
+    {
+        _settings.Video.MaxEncoderWidth = value.Width;
+        _settings.Video.MaxEncoderHeight = value.Height;
+        TrySaveSettings();
+    }
+
+    partial void OnSelectedFrameRateChanged(int value)
+    {
+        _settings.Video.TargetFrameRate = value;
+        TrySaveSettings();
+    }
+
+    private void TrySaveSettings()
+    {
+        try { _settingsStore.Save(_settings); }
+        catch { /* persistence failure should not block the session */ }
+    }
 
     public bool CanShareScreen => _captureProvider is not null;
 

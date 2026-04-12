@@ -15,9 +15,6 @@
         <DataTemplate DataType="vm:PreviewViewModel">
             <views:PreviewView />
         </DataTemplate>
-        <DataTemplate DataType="vm:SettingsViewModel">
-            <views:SettingsView />
-        </DataTemplate>
     </Application.DataTemplates>
 
     <Application.Styles>
