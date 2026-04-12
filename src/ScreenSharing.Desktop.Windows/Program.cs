@@ -22,22 +22,21 @@ internal static class Program
         App.CaptureProviderFactory = hwndProvider => new WindowsCaptureProvider(hwndProvider);
 
         // Codec catalog wiring. VP8 is baked into VideoCodecCatalog's ctor so
-        // the app always has at least one working codec even before Avalonia
-        // starts up. H.264 registration happens later, inside
-        // App.OnFrameworkInitializationCompleted, so the DebugLog.Reset in
-        // that path does not wipe our "[ffmpeg] initialized from ..." lines.
+        // the app always has a working codec even before Avalonia starts.
+        // H.264 via Media Foundation is registered later, after Avalonia
+        // resets the debug log, so any probe diagnostics survive in the log.
         App.VideoCodecCatalog = new VideoCodecCatalog();
-        App.RegisterAdditionalCodecs = RegisterFFmpegCodecsIfAvailable;
+        App.RegisterAdditionalCodecs = RegisterHardwareCodecs;
 
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
-    private static void RegisterFFmpegCodecsIfAvailable(VideoCodecCatalog catalog)
+    private static void RegisterHardwareCodecs(VideoCodecCatalog catalog)
     {
-        FFmpegRuntime.EnsureInitialized();
-        if (FFmpegRuntime.IsAvailable)
+        MediaFoundationRuntime.EnsureInitialized();
+        if (MediaFoundationRuntime.IsAvailable)
         {
-            catalog.Register(new FFmpegH264EncoderFactory(), new FFmpegH264DecoderFactory());
+            catalog.Register(new MediaFoundationH264EncoderFactory(), new MediaFoundationH264DecoderFactory());
         }
     }
 

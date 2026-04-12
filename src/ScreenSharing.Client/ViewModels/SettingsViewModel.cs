@@ -59,7 +59,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         CodecOptions = new[]
         {
             BuildCodecOption(VideoCodec.Vp8, "VP8 (software, universal)", available),
-            BuildCodecOption(VideoCodec.H264, "H.264 (hardware via FFmpeg)", available),
+            BuildCodecOption(VideoCodec.H264, "H.264 (hardware via Media Foundation)", available),
             BuildCodecOption(VideoCodec.Av1, "AV1 (hardware, coming soon)", available),
         };
 

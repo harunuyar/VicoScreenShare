@@ -70,7 +70,7 @@
                             </DataTemplate>
                         </ComboBox.ItemTemplate>
                     </ComboBox>
-                    <TextBlock Text="Changes take effect the next time you join a room. Install FFmpeg 7.x to unlock H.264 hardware encode."
+                    <TextBlock Text="H.264 uses your GPU's Media Foundation hardware encoder when available."
                                Opacity="0.5" FontSize="11" TextWrapping="Wrap" />
                 </StackPanel>
             </StackPanel>
