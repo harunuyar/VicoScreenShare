@@ -122,13 +122,25 @@ public sealed class WindowsCaptureSource : ICaptureSource
         var height = frame.ContentSize.Height;
         if (width <= 0 || height <= 0) return;
 
-        // Resize the staging texture on the fly when the source size changes, but
-        // always copy the current frame through instead of skipping it. We avoid
-        // recreating the framepool entirely in Phase 2 — it would need cooperation
-        // with the session/item and gives us no wins at this stage.
+        // On content resize: rebuild both the staging texture AND the framepool.
+        // Per Microsoft's Windows Graphics Capture guidance, the framepool must
+        // be Recreate'd when the frame buffer size changes — skipping it keeps
+        // the pool clipped to its original size so larger content gets cropped
+        // and smaller content leaves undefined data. We still process the current
+        // frame: the IDirect3DSurface we already retrieved holds its own COM ref
+        // so Recreate-ing the pool does not invalidate it.
         if (width != _stagingWidth || height != _stagingHeight)
         {
             RecreateStagingTexture(width, height);
+            try
+            {
+                sender.Recreate(
+                    _devices.WinRTDevice,
+                    DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                    numberOfBuffers: 2,
+                    size: new SizeInt32 { Width = width, Height = height });
+            }
+            catch (ObjectDisposedException) { /* raced with Dispose */ }
         }
 
         var texPtr = Direct3D11Interop.GetD3D11Texture2DFromSurface(frame.Surface);

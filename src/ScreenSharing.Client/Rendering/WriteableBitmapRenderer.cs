@@ -73,51 +73,63 @@ public sealed class WriteableBitmapRenderer : IDisposable
 
     private void PushStagedFrame()
     {
-        byte[]? pixels;
-        int width, height, stride;
+        WriteableBitmap? rendered;
+
+        // Everything below runs under the same lock the capture thread uses to
+        // write _staged so a second FrameArrived cannot overwrite our source
+        // buffer mid-copy. The critical section is a single pooled memcpy (tens
+        // of microseconds to ~1 ms for 1080p) — short enough to block the
+        // capture thread only imperceptibly, and the correctness is worth the
+        // trivial contention.
         lock (_lock)
         {
             _pendingFrame = false;
             if (_staged is null) return;
-            pixels = _staged;
-            width = _stagedWidth;
-            height = _stagedHeight;
-            stride = _stagedStride;
-        }
 
-        var slot = _nextSlot;
-        _nextSlot = 1 - _nextSlot;
+            var width = _stagedWidth;
+            var height = _stagedHeight;
+            var stride = _stagedStride;
+            var pixels = _staged;
 
-        var target = _pool[slot];
-        if (target is null ||
-            target.PixelSize.Width != width ||
-            target.PixelSize.Height != height)
-        {
-            target?.Dispose();
-            target = new WriteableBitmap(
-                new PixelSize(width, height),
-                new Vector(96, 96),
-                PixelFormat.Bgra8888,
-                AlphaFormat.Premul);
-            _pool[slot] = target;
-        }
+            var slot = _nextSlot;
+            _nextSlot = 1 - _nextSlot;
 
-        using (var fb = target.Lock())
-        {
-            unsafe
+            var target = _pool[slot];
+            if (target is null ||
+                target.PixelSize.Width != width ||
+                target.PixelSize.Height != height)
             {
-                var rowBytes = width * 4;
-                for (var y = 0; y < height; y++)
+                target?.Dispose();
+                target = new WriteableBitmap(
+                    new PixelSize(width, height),
+                    new Vector(96, 96),
+                    PixelFormat.Bgra8888,
+                    AlphaFormat.Premul);
+                _pool[slot] = target;
+            }
+
+            using (var fb = target.Lock())
+            {
+                unsafe
                 {
-                    var src = new ReadOnlySpan<byte>(pixels, y * stride, rowBytes);
-                    var dst = new Span<byte>((byte*)fb.Address + (long)y * fb.RowBytes, rowBytes);
-                    src.CopyTo(dst);
+                    var rowBytes = width * 4;
+                    for (var y = 0; y < height; y++)
+                    {
+                        var src = new ReadOnlySpan<byte>(pixels, y * stride, rowBytes);
+                        var dst = new Span<byte>((byte*)fb.Address + (long)y * fb.RowBytes, rowBytes);
+                        src.CopyTo(dst);
+                    }
                 }
             }
+
+            _current = target;
+            rendered = target;
         }
 
-        _current = target;
-        FrameRendered?.Invoke();
+        if (rendered is not null)
+        {
+            FrameRendered?.Invoke();
+        }
     }
 
     public void Dispose()
