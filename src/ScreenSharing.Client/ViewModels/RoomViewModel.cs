@@ -113,26 +113,61 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_negotiationStarted) return;
         _negotiationStarted = true;
 
+        // Build the entire media graph in local variables first. Only publish
+        // to the class fields after NegotiateAsync has succeeded, so a mid-
+        // setup failure leaves _webRtc / _streamReceiver / _remoteRenderer at
+        // null and the user cannot accidentally start sharing against a half-
+        // initialized peer connection that never completed its handshake.
+        WebRtcSession? session = null;
+        WriteableBitmapRenderer? renderer = null;
+        StreamReceiver? receiver = null;
         try
         {
-            var session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional);
-            _webRtc = session;
+            session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional);
 
-            var renderer = new WriteableBitmapRenderer();
+            renderer = new WriteableBitmapRenderer();
             renderer.FrameRendered += OnRemoteFrameRendered;
-            _remoteRenderer = renderer;
 
-            var receiver = new StreamReceiver(session.PeerConnection, displayName: "Remote peer");
+            receiver = new StreamReceiver(session.PeerConnection, displayName: "Remote peer");
             renderer.Attach(receiver);
-            _streamReceiver = receiver;
             await receiver.StartAsync().ConfigureAwait(true);
 
             await session.NegotiateAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
+
+            _webRtc = session;
+            _remoteRenderer = renderer;
+            _streamReceiver = receiver;
             MediaStatus = "Waiting for a streamer...";
         }
         catch (Exception ex)
         {
             MediaStatus = $"Media setup failed: {ex.Message}";
+
+            // Tear down the partial graph so nothing lingers. Order matters:
+            // detach the receiver from the renderer first, then stop/dispose
+            // the receiver, then dispose the renderer, then the session.
+            if (renderer is not null && receiver is not null)
+            {
+                renderer.Detach(receiver);
+            }
+            if (renderer is not null)
+            {
+                renderer.FrameRendered -= OnRemoteFrameRendered;
+                renderer.Dispose();
+            }
+            if (receiver is not null)
+            {
+                try { await receiver.DisposeAsync().ConfigureAwait(true); } catch { }
+            }
+            if (session is not null)
+            {
+                try { await session.DisposeAsync().ConfigureAwait(true); } catch { }
+            }
+
+            // Allow a later retry (e.g. if the user leaves and comes back) to
+            // call StartWebRtcAsync again rather than be stuck at the failed
+            // attempt forever.
+            _negotiationStarted = false;
         }
     }
 
@@ -175,6 +210,12 @@ public sealed partial class RoomViewModel : ViewModelBase
 
             LocalStreamLabel = source.DisplayName;
             _localCaptureSource = source;
+
+            // Wire the source's Closed event so "shared window closed", "user
+            // revoked capture", or "monitor disconnected" unwinds the share
+            // state the same way the Stop button does, instead of leaving the
+            // UI stuck in IsSharing forever.
+            source.Closed += OnLocalCaptureClosed;
 
             // Local preview: attach a second renderer to the same capture source
             // so the streamer sees their own feed while the CaptureStreamer
@@ -237,6 +278,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         if (source is not null)
         {
+            source.Closed -= OnLocalCaptureClosed;
             try { await source.StopAsync().ConfigureAwait(true); } catch { }
             try { await source.DisposeAsync().ConfigureAwait(true); } catch { }
         }
@@ -244,6 +286,18 @@ public sealed partial class RoomViewModel : ViewModelBase
         IsSharing = false;
         LocalStreamLabel = null;
         LocalPreview = null;
+    }
+
+    private void OnLocalCaptureClosed()
+    {
+        // The capture source may raise Closed on a background thread (the
+        // Windows.Graphics.Capture session fires on its dispatcher). Marshal
+        // to the UI thread and run the same teardown the Stop button does.
+        Dispatcher.UIThread.Post(async () =>
+        {
+            StatusMessage = "Capture source closed.";
+            await StopSharingInternalAsync().ConfigureAwait(true);
+        });
     }
 
     private void OnLocalFrameRendered()
