@@ -28,6 +28,15 @@ public partial class App : Application
     /// </summary>
     public static VideoCodecCatalog? VideoCodecCatalog { get; set; }
 
+    /// <summary>
+    /// Hook for the desktop host to register additional codec factories AFTER
+    /// the debug log has been reset. Without this indirection, any log line
+    /// written during FFmpeg native-library probing in <c>Program.Main</c>
+    /// gets wiped by <see cref="DebugLog.Reset"/> below, and we lose the
+    /// exact error that would tell us why a codec failed to load.
+    /// </summary>
+    public static Action<VideoCodecCatalog>? RegisterAdditionalCodecs { get; set; }
+
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
@@ -38,9 +47,20 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             // Start each run with a fresh debug log so users can find only the
-            // current session's diagnostic data at DebugLog.FilePath.
+            // current session's diagnostic data at DebugLog.FilePath. This
+            // MUST happen before any component writes to the log, otherwise
+            // the first Reset wipes whatever we already logged — which is
+            // how we lost the FFmpeg init diagnostics at one point.
             DebugLog.Reset();
             DebugLog.Write($"== ScreenSharing client start @ {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==");
+
+            // Platform host gets a chance to populate the catalog with
+            // additional codec factories now that the log is ready to
+            // receive diagnostic output from FFmpeg / MediaFoundation probes.
+            if (VideoCodecCatalog is not null)
+            {
+                RegisterAdditionalCodecs?.Invoke(VideoCodecCatalog);
+            }
 
             var identity = new IdentityStore();
             var navigation = new NavigationService();
