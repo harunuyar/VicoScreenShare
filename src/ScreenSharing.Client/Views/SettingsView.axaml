@@ -59,6 +59,11 @@
                     <ComboBox ItemsSource="{Binding CodecOptions}"
                               SelectedItem="{Binding SelectedCodec}"
                               HorizontalAlignment="Stretch">
+                        <ComboBox.Styles>
+                            <Style Selector="ComboBoxItem" x:DataType="vm:CodecOption">
+                                <Setter Property="IsEnabled" Value="{Binding IsAvailable}" />
+                            </Style>
+                        </ComboBox.Styles>
                         <ComboBox.ItemTemplate>
                             <DataTemplate DataType="vm:CodecOption">
                                 <TextBlock Text="{Binding DisplayName}" />

@@ -26,17 +26,20 @@ public sealed partial class SettingsViewModel : ViewModelBase
     private readonly SettingsStore _store;
     private readonly NavigationService _navigation;
     private readonly Func<ViewModelBase> _backFactory;
+    private readonly Action? _onSaved;
 
     public SettingsViewModel(
         ClientSettings settings,
         SettingsStore store,
         NavigationService navigation,
-        Func<ViewModelBase> backFactory)
+        Func<ViewModelBase> backFactory,
+        Action? onSaved = null)
     {
         _settings = settings;
         _store = store;
         _navigation = navigation;
         _backFactory = backFactory;
+        _onSaved = onSaved;
 
         ResolutionPresets = new[]
         {
@@ -91,6 +94,16 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [RelayCommand]
     private void Save()
     {
+        // Refuse to persist a codec the current host can't actually use.
+        // Without this guard, the ComboBox will happily write an unavailable
+        // codec into the settings file and the ctor filter on reload flips it
+        // back to VP8 silently — which reads as "my setting wasn't saved."
+        if (!SelectedCodec.IsAvailable)
+        {
+            StatusMessage = $"{SelectedCodec.DisplayName} cannot be used on this machine.";
+            return;
+        }
+
         _settings.Video.MaxEncoderWidth = SelectedResolution.Width;
         _settings.Video.MaxEncoderHeight = SelectedResolution.Height;
         _settings.Video.TargetFrameRate = SelectedFrameRate;
@@ -99,12 +112,19 @@ public sealed partial class SettingsViewModel : ViewModelBase
         try
         {
             _store.Save(_settings);
-            StatusMessage = "Saved. Codec changes take effect next time you join a room.";
+            StatusMessage = "Saved.";
         }
         catch (Exception ex)
         {
             StatusMessage = $"Could not save: {ex.Message}";
+            return;
         }
+
+        // If the caller (typically RoomViewModel.ShowSettings) registered a
+        // post-save hook, run it now so it can apply the change in place —
+        // e.g. rebuild the media graph with the newly-picked codec without
+        // forcing the user to leave and rejoin the room.
+        try { _onSaved?.Invoke(); } catch { /* hook failures shouldn't break save */ }
     }
 
     [RelayCommand]

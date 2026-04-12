@@ -34,13 +34,15 @@ public sealed partial class RoomViewModel : ViewModelBase
     private CaptureStreamer? _captureStreamer;
     private bool _negotiationStarted;
 
-    // The codec picked when this room was joined. Locked for the lifetime of
-    // the session — changes to ClientSettings.Video.Codec only take effect
-    // the next time the user joins a room, because SDP negotiation and the
-    // encoder/decoder factory bindings all happen in the ctor.
-    private readonly VideoCodec _sessionCodec;
-    private readonly IVideoEncoderFactory _encoderFactory;
-    private readonly IVideoDecoderFactory _decoderFactory;
+    // The codec used by the current media graph. Not readonly because a live
+    // codec switch (triggered from the settings page Save button) rebuilds
+    // the graph in place — tear down WebRtcSession + StreamReceiver, re-resolve
+    // from the catalog, call StartWebRtcAsync again. The signaling channel
+    // and the RoomViewModel itself stay alive so the user does not have to
+    // leave and rejoin the room.
+    private VideoCodec _sessionCodec;
+    private IVideoEncoderFactory _encoderFactory;
+    private IVideoDecoderFactory _decoderFactory;
 
     // Track the peer whose video is currently filling the remote tile so we
     // know whose StreamEnded / PeerLeft should clear it. Phase 3 only supports
@@ -328,15 +330,73 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         // Back-factory returns THIS live RoomViewModel instead of rebuilding
         // one — that keeps the active WebRTC session, capture source, and
-        // renderer alive while the user is on the settings page. Tweaks to
-        // resolution/fps apply to the NEXT CaptureStreamer built by
-        // ShareScreenAsync; an in-flight share keeps its existing encoder.
+        // renderer alive while the user is on the settings page. The
+        // onSaved hook fires after SettingsViewModel.Save persists the new
+        // values; we rebuild the media graph in place so a codec change
+        // applies immediately instead of waiting for the next room join.
         var settingsVm = new SettingsViewModel(
             _settings,
             _settingsStore,
             _navigation,
-            () => this);
+            () => this,
+            onSaved: () => _ = RebuildMediaGraphAsync());
         _navigation.NavigateTo(settingsVm);
+    }
+
+    /// <summary>
+    /// Tear down the media graph (WebRtcSession, StreamReceiver, remote
+    /// renderer, local capture if any) and re-create it from scratch with
+    /// the current <see cref="ClientSettings.Video"/> codec. The signaling
+    /// connection and the RoomViewModel stay alive so the user does not
+    /// have to leave the room to apply a codec change. The user has to
+    /// click Share again manually — we don't auto-resume because the
+    /// capture source selection is user-driven.
+    /// </summary>
+    public async Task RebuildMediaGraphAsync()
+    {
+        MediaStatus = "Switching codec...";
+
+        // Stop any in-flight share so the encoder stops feeding the (soon
+        // to be disposed) peer connection.
+        await StopSharingInternalAsync().ConfigureAwait(true);
+
+        // Tear down the remote receive path — renderer first, then the
+        // receiver, then the peer connection. Clearing the RemoteStream
+        // handle forces the view to go blank instead of holding the last
+        // decoded frame.
+        ClearRemoteStream("Switching codec...");
+        if (_remoteRenderer is not null && _streamReceiver is not null)
+        {
+            try { _remoteRenderer.Detach(_streamReceiver); } catch { }
+        }
+        if (_remoteRenderer is not null)
+        {
+            _remoteRenderer.FrameRendered -= OnRemoteFrameRendered;
+            try { _remoteRenderer.Dispose(); } catch { }
+            _remoteRenderer = null;
+        }
+        if (_streamReceiver is not null)
+        {
+            try { await _streamReceiver.DisposeAsync().ConfigureAwait(true); } catch { }
+            _streamReceiver = null;
+        }
+        if (_webRtc is not null)
+        {
+            try { await _webRtc.DisposeAsync().ConfigureAwait(true); } catch { }
+            _webRtc = null;
+        }
+
+        // Re-resolve the codec pair from the catalog against the freshly
+        // saved ClientSettings.Video.Codec. Falls back to VP8 if the chosen
+        // codec is unavailable — the same behaviour as a cold start.
+        var catalog = App.VideoCodecCatalog ?? new VideoCodecCatalog();
+        var resolved = catalog.ResolveOrFallback(_settings.Video.Codec);
+        _sessionCodec = resolved.selected;
+        _encoderFactory = resolved.encoderFactory;
+        _decoderFactory = resolved.decoderFactory;
+
+        _negotiationStarted = false;
+        _ = StartWebRtcAsync();
     }
 
     private async Task StopSharingInternalAsync()
