@@ -1,11 +1,13 @@
 using System;
-using System.Runtime.InteropServices;
 
 namespace ScreenSharing.Client.Windows.Capture;
 
 /// <summary>
-/// COM glue for handing a WinRT picker (like <c>GraphicsCapturePicker</c>) an HWND
-/// so it can parent its modal dialog correctly from a non-UWP desktop app.
+/// Parents a WinRT picker (like <c>GraphicsCapturePicker</c>) to a Win32 HWND. The
+/// canonical CsWinRT helper for this is <see cref="WinRT.Interop.InitializeWithWindow"/>
+/// — trying to cast a WinRT projected type to a hand-rolled <c>[ComImport]</c>
+/// <c>IInitializeWithWindow</c> throws <c>InvalidCastException</c> because CsWinRT
+/// projections and classic COM interop types live in separate worlds.
 /// </summary>
 internal static class CapturePickerInterop
 {
@@ -14,15 +16,6 @@ internal static class CapturePickerInterop
         if (picker is null) throw new ArgumentNullException(nameof(picker));
         if (hwnd == IntPtr.Zero) throw new ArgumentException("Window handle is zero.", nameof(hwnd));
 
-        var withWindow = (IInitializeWithWindow)picker;
-        withWindow.Initialize(hwnd);
-    }
-
-    [ComImport]
-    [Guid("3E68D4BD-7135-4D10-8018-9FB6D9F33FA1")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IInitializeWithWindow
-    {
-        void Initialize(IntPtr hwnd);
+        global::WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
     }
 }

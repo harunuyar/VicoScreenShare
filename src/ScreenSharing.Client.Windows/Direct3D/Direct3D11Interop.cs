@@ -1,14 +1,23 @@
 using System;
 using System.Runtime.InteropServices;
+using WinRT;
 using Windows.Graphics.DirectX.Direct3D11;
 
 namespace ScreenSharing.Client.Windows.Direct3D;
 
 /// <summary>
-/// P/Invoke + COM glue for crossing between the plain-Win32 D3D11 world (Vortice)
-/// and the WinRT <see cref="IDirect3DDevice"/> world that
-/// <c>Windows.Graphics.Capture</c> expects. Based on the pattern in
-/// robmikh/Win32CaptureSample.
+/// P/Invoke + CsWinRT glue for crossing between the plain-Win32 D3D11 world
+/// (Vortice) and the WinRT <see cref="IDirect3DDevice"/> / <see cref="IDirect3DSurface"/>
+/// world that <c>Windows.Graphics.Capture</c> expects.
+///
+/// Neither direction works with classic COM interop (<c>Marshal.GetObjectForIUnknown</c>
+/// returns a <c>System.__ComObject</c> that cannot be cast to a CsWinRT projected
+/// interface, and casting a CsWinRT projected type to a hand-rolled
+/// <c>[ComImport]</c> interface throws). Both directions have to go through CsWinRT's
+/// own marshaling helpers: <see cref="MarshalInspectable{T}.FromAbi"/> to promote a
+/// raw <c>IInspectable*</c> to a projected type, and
+/// <see cref="CastExtensions.As{T}(object)"/> to QI a projected type for a legacy
+/// <c>[ComImport]</c> interface such as <see cref="IDirect3DDxgiInterfaceAccess"/>.
 /// </summary>
 internal static class Direct3D11Interop
 {
@@ -21,32 +30,40 @@ internal static class Direct3D11Interop
     public static IDirect3DDevice CreateDirect3DDeviceFromDxgi(IntPtr dxgiDevice)
     {
         var hr = CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, out var inspectable);
-        if (hr != 0)
-        {
-            Marshal.ThrowExceptionForHR(hr);
-        }
+        Marshal.ThrowExceptionForHR(hr);
         try
         {
-            var managed = Marshal.GetObjectForIUnknown(inspectable);
-            return (IDirect3DDevice)managed;
+            // MarshalInspectable<T>.FromAbi takes a raw IInspectable* (adds a ref of
+            // its own to produce the projected wrapper) so the caller must still
+            // release the original ref from CreateDirect3D11DeviceFromDXGIDevice.
+            return MarshalInspectable<IDirect3DDevice>.FromAbi(inspectable);
         }
         finally
         {
-            Marshal.Release(inspectable);
+            if (inspectable != IntPtr.Zero)
+            {
+                Marshal.Release(inspectable);
+            }
         }
     }
 
     /// <summary>
-    /// Pull the underlying D3D11 texture out of a WinRT <see cref="IDirect3DSurface"/>.
+    /// Pulls the underlying D3D11 texture out of a WinRT <see cref="IDirect3DSurface"/>.
     /// Graphics.Capture frames arrive as <c>IDirect3DSurface</c>; we need the raw
-    /// texture to copy it into a staging buffer for CPU readback.
-    /// The returned pointer has a ref-count that the caller must release.
+    /// texture to copy it into a staging buffer for CPU readback. The returned
+    /// pointer has a ref-count that the caller must release when it's finished
+    /// (e.g. by wrapping it in a Vortice <c>ID3D11Texture2D</c>, which owns it).
     /// </summary>
     public static IntPtr GetDxgiInterfaceFromSurface(IDirect3DSurface surface, Guid iid)
     {
-        var access = (IDirect3DDxgiInterfaceAccess)(object)surface;
+        // CastExtensions.As<T> is the CsWinRT QI helper: it takes the projected
+        // surface, queries its underlying IUnknown for the legacy IID of
+        // IDirect3DDxgiInterfaceAccess, and returns a wrapper that forwards vtable
+        // calls through COM. Unlike a plain C# cast this does not go through
+        // __ComObject RCW lookup and therefore does not hit the CCW failure.
+        var access = surface.As<IDirect3DDxgiInterfaceAccess>();
         var guid = iid;
-        access.GetInterface(ref guid, out var result);
+        Marshal.ThrowExceptionForHR(access.GetInterface(ref guid, out var result));
         return result;
     }
 
@@ -61,6 +78,7 @@ internal static class Direct3D11Interop
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IDirect3DDxgiInterfaceAccess
     {
-        void GetInterface([In] ref Guid iid, out IntPtr ppv);
+        [PreserveSig]
+        int GetInterface([In] ref Guid iid, out IntPtr ppv);
     }
 }

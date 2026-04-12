@@ -57,7 +57,18 @@ public sealed class WindowsCaptureSource : ICaptureSource
         }
 
         var size = _item.Size;
-        _framePool = Direct3D11CaptureFramePool.Create(
+
+        // Pre-size the staging texture to the item's current size so the first
+        // FrameArrived goes straight through the copy path instead of being
+        // dropped on the size-change branch.
+        RecreateStagingTexture(size.Width, size.Height);
+
+        // Direct3D11CaptureFramePool.Create would require a WinRT DispatcherQueue
+        // on the calling thread, which a plain Avalonia UI thread does not have;
+        // in that mode only the first FrameArrived ever fires. CreateFreeThreaded
+        // dispatches frames on a thread-pool thread instead, which is the right
+        // choice for a non-XAML desktop app.
+        _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
             _devices.WinRTDevice,
             DirectXPixelFormat.B8G8R8A8UIntNormalized,
             numberOfBuffers: 2,
@@ -111,20 +122,13 @@ public sealed class WindowsCaptureSource : ICaptureSource
         var height = frame.ContentSize.Height;
         if (width <= 0 || height <= 0) return;
 
+        // Resize the staging texture on the fly when the source size changes, but
+        // always copy the current frame through instead of skipping it. We avoid
+        // recreating the framepool entirely in Phase 2 — it would need cooperation
+        // with the session/item and gives us no wins at this stage.
         if (width != _stagingWidth || height != _stagingHeight)
         {
             RecreateStagingTexture(width, height);
-            try
-            {
-                sender.Recreate(
-                    _devices.WinRTDevice,
-                    DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                    2,
-                    new SizeInt32 { Width = width, Height = height });
-            }
-            catch (ObjectDisposedException) { /* raced with Dispose */ }
-            // Skip this frame; the recreate invalidates downstream references.
-            return;
         }
 
         var texPtr = Direct3D11Interop.GetD3D11Texture2DFromSurface(frame.Surface);

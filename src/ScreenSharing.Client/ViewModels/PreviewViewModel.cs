@@ -132,11 +132,17 @@ public sealed partial class PreviewViewModel : ViewModelBase, IDisposable
     private void OnFrameRendered()
     {
         Interlocked.Increment(ref _framesSinceLastTick);
-        // The renderer created/refreshed its bitmap. Push the reference to the view
-        // if we haven't already.
-        if (!ReferenceEquals(PreviewImage, _renderer.CurrentBitmap))
+        // The renderer ping-pongs between two bitmaps so each frame produces a
+        // new Source reference — the binding fires PropertyChanged, which Avalonia
+        // treats as a real update and re-draws the Image control.
+        var next = _renderer.CurrentBitmap;
+        if (Dispatcher.UIThread.CheckAccess())
         {
-            Dispatcher.UIThread.Post(() => PreviewImage = _renderer.CurrentBitmap);
+            PreviewImage = next;
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(() => PreviewImage = next);
         }
     }
 

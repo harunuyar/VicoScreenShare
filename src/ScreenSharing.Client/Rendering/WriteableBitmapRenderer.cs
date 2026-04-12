@@ -9,15 +9,23 @@ namespace ScreenSharing.Client.Rendering;
 
 /// <summary>
 /// Bridges <see cref="CaptureFrameData"/> produced by an <see cref="ICaptureSource"/>
-/// into an Avalonia <see cref="WriteableBitmap"/> that a view can bind to. Frames
-/// arrive on the capture thread; this class marshals to the UI thread and writes
-/// pixel bytes into the bitmap using <see cref="WriteableBitmap.Lock"/>. Resizes
-/// the bitmap on the fly when the source resolution changes.
+/// into an Avalonia bitmap that a view can bind to. Frames arrive on the capture
+/// thread; this class marshals to the UI thread and writes pixel bytes via
+/// <see cref="WriteableBitmap.Lock"/>.
+///
+/// Ping-pongs two bitmaps because Avalonia's <see cref="Avalonia.Controls.Image"/>
+/// only re-renders when its <c>Source</c> property changes reference. Writing new
+/// pixels into the same <see cref="WriteableBitmap"/> produces a frozen preview;
+/// alternating between two bitmaps gives the binding a fresh reference every
+/// frame so <see cref="FrameRendered"/> consumers see real updates.
 /// </summary>
 public sealed class WriteableBitmapRenderer : IDisposable
 {
     private readonly object _lock = new();
-    private WriteableBitmap? _bitmap;
+    private readonly WriteableBitmap?[] _pool = new WriteableBitmap?[2];
+    private int _nextSlot;
+    private WriteableBitmap? _current;
+
     private byte[]? _staged;
     private int _stagedWidth;
     private int _stagedHeight;
@@ -27,12 +35,8 @@ public sealed class WriteableBitmapRenderer : IDisposable
 
     public event Action? FrameRendered;
 
-    public WriteableBitmap? CurrentBitmap => _bitmap;
+    public WriteableBitmap? CurrentBitmap => _current;
 
-    /// <summary>
-    /// Subscribe this renderer to a capture source. Call <see cref="Detach"/> or
-    /// dispose to stop receiving frames.
-    /// </summary>
     public void Attach(ICaptureSource source)
     {
         source.FrameArrived += OnFrameArrived;
@@ -48,8 +52,6 @@ public sealed class WriteableBitmapRenderer : IDisposable
         if (_disposed) return;
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
-        // Copy pixel bytes into our own buffer so we can hand off to the UI thread
-        // without keeping the source's rented buffer alive.
         lock (_lock)
         {
             var required = frame.Height * frame.StrideBytes;
@@ -83,19 +85,24 @@ public sealed class WriteableBitmapRenderer : IDisposable
             stride = _stagedStride;
         }
 
-        if (_bitmap is null ||
-            _bitmap.PixelSize.Width != width ||
-            _bitmap.PixelSize.Height != height)
+        var slot = _nextSlot;
+        _nextSlot = 1 - _nextSlot;
+
+        var target = _pool[slot];
+        if (target is null ||
+            target.PixelSize.Width != width ||
+            target.PixelSize.Height != height)
         {
-            _bitmap?.Dispose();
-            _bitmap = new WriteableBitmap(
+            target?.Dispose();
+            target = new WriteableBitmap(
                 new PixelSize(width, height),
                 new Vector(96, 96),
                 PixelFormat.Bgra8888,
                 AlphaFormat.Premul);
+            _pool[slot] = target;
         }
 
-        using (var fb = _bitmap.Lock())
+        using (var fb = target.Lock())
         {
             unsafe
             {
@@ -109,6 +116,7 @@ public sealed class WriteableBitmapRenderer : IDisposable
             }
         }
 
+        _current = target;
         FrameRendered?.Invoke();
     }
 
@@ -116,8 +124,11 @@ public sealed class WriteableBitmapRenderer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _bitmap?.Dispose();
-        _bitmap = null;
+        _pool[0]?.Dispose();
+        _pool[1]?.Dispose();
+        _pool[0] = null;
+        _pool[1] = null;
+        _current = null;
         _staged = null;
     }
 }
