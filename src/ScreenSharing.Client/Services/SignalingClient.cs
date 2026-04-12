@@ -18,22 +18,18 @@ namespace ScreenSharing.Client.Services;
 /// thread the reader loop is on; subscribers must marshal to the UI thread themselves
 /// (Avalonia's <c>Dispatcher.UIThread</c>).
 ///
-/// Instances are reusable: after a failed <see cref="ConnectAsync"/> or a lost
-/// connection the caller may call <see cref="ConnectAsync"/> again. The outbound
-/// channel and internal task handles are recreated per connect so a completed channel
-/// from a prior session never poisons the next attempt.
+/// Each <see cref="ConnectAsync"/> call creates a fresh <see cref="Session"/> holding
+/// that connection's socket, outbound channel, and cancellation source. The reader
+/// and writer tasks only touch their owning Session, so a stale reader unwinding
+/// concurrently with a new <see cref="ConnectAsync"/> cannot complete the new
+/// session's channel or fire <see cref="ConnectionLost"/> into a new operation.
 /// </summary>
 public sealed class SignalingClient : IAsyncDisposable
 {
     private const int MaxMessageBytes = 64 * 1024;
 
     private readonly object _stateLock = new();
-
-    private ClientWebSocket? _socket;
-    private CancellationTokenSource? _cts;
-    private Task? _readerTask;
-    private Task? _writerTask;
-    private Channel<string> _outbound = CreateOutboundChannel();
+    private Session? _current;
 
     public event Action<string>? RoomCreated;
     public event Action<RoomJoined>? RoomJoined;
@@ -42,29 +38,38 @@ public sealed class SignalingClient : IAsyncDisposable
     public event Action<ErrorCode, string>? ServerError;
     public event Action<string?>? ConnectionLost;
 
-    public bool IsConnected => _socket?.State == WebSocketState.Open;
+    public bool IsConnected
+    {
+        get
+        {
+            var current = _current;
+            return current is { IsRetired: false } && current.Socket.State == WebSocketState.Open;
+        }
+    }
 
     public async Task ConnectAsync(Uri serverUri, ClientHello hello, CancellationToken ct = default)
     {
+        Session? previous;
         lock (_stateLock)
         {
-            if (_socket is not null && _socket.State == WebSocketState.Open)
+            previous = _current;
+            if (previous is { IsRetired: false } && previous.Socket.State == WebSocketState.Open)
             {
                 throw new InvalidOperationException("SignalingClient is already connected.");
             }
-            // Reset per-connection state. A previously-completed channel or cancelled
-            // cts must not bleed into the new session.
-            _outbound.Writer.TryComplete();
-            _outbound = CreateOutboundChannel();
-            _cts?.Dispose();
-            _cts = null;
-            _readerTask = null;
-            _writerTask = null;
         }
 
-        // ClientWebSocket is the only resource that has to survive the connect attempt
-        // if it succeeds and must be disposed if it fails. Work on a local until the
-        // connect call returns, then publish to the field only on success.
+        // If there's an older session still unwinding (e.g. after a drop) or even
+        // mid-finally, retire it with suppression: the caller is explicitly
+        // reconnecting, so any pending ConnectionLost from the old reader must not
+        // leak into the new operation's subscribers. The suppression is atomic via
+        // Interlocked.CompareExchange on Session.NotifyClaimed, so the reader and
+        // the retirement path can never both fire.
+        if (previous is not null)
+        {
+            await RetireSessionAsync(previous, suppressConnectionLost: true).ConfigureAwait(false);
+        }
+
         var socket = new ClientWebSocket();
         try
         {
@@ -77,13 +82,16 @@ public sealed class SignalingClient : IAsyncDisposable
         }
 
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var channel = CreateOutboundChannel();
+        var session = new Session(socket, cts, channel);
+
         lock (_stateLock)
         {
-            _socket = socket;
-            _cts = cts;
-            _readerTask = Task.Run(() => RunReaderAsync(cts.Token));
-            _writerTask = Task.Run(() => RunWriterAsync(cts.Token));
+            _current = session;
         }
+
+        session.ReaderTask = Task.Run(() => RunReaderAsync(session));
+        session.WriterTask = Task.Run(() => RunWriterAsync(session));
 
         try
         {
@@ -91,9 +99,9 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         catch
         {
-            // Rolling back a partially-started session: dispose and rethrow so the
-            // caller can surface a fresh error and retry cleanly.
-            await DisposeInternalAsync(suppressConnectionLost: true).ConfigureAwait(false);
+            // Partial-start rollback: retire this new session silently and rethrow so
+            // the caller sees a clean error state.
+            await RetireSessionAsync(session, suppressConnectionLost: true).ConfigureAwait(false);
             throw;
         }
     }
@@ -106,42 +114,37 @@ public sealed class SignalingClient : IAsyncDisposable
 
     public async Task SendAsync<T>(string type, T payload, CancellationToken ct = default)
     {
+        var current = _current
+            ?? throw new InvalidOperationException("SignalingClient is not connected.");
         var element = JsonSerializer.SerializeToElement(payload, ProtocolJson.Options);
         var envelope = new MessageEnvelope(type, null, element);
         var json = JsonSerializer.Serialize(envelope, ProtocolJson.Options);
-        var outbound = _outbound;
-        await outbound.Writer.WriteAsync(json, ct).ConfigureAwait(false);
+        await current.Outbound.Writer.WriteAsync(json, ct).ConfigureAwait(false);
     }
 
-    private async Task RunWriterAsync(CancellationToken ct)
+    private async Task RunWriterAsync(Session session)
     {
-        var socket = _socket;
-        var channel = _outbound;
-        if (socket is null) return;
         try
         {
-            await foreach (var json in channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            await foreach (var json in session.Outbound.Reader.ReadAllAsync(session.Cts.Token).ConfigureAwait(false))
             {
-                if (socket.State != WebSocketState.Open) break;
+                if (session.Socket.State != WebSocketState.Open) break;
                 var bytes = Encoding.UTF8.GetBytes(json);
-                await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
+                await session.Socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, session.Cts.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception) { /* connection loss surfaces via reader */ }
     }
 
-    private async Task RunReaderAsync(CancellationToken ct)
+    private async Task RunReaderAsync(Session session)
     {
-        var socket = _socket;
-        if (socket is null) return;
-
         string? lostReason = null;
         try
         {
-            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
+            while (!session.Cts.Token.IsCancellationRequested && session.Socket.State == WebSocketState.Open)
             {
-                var json = await ReceiveTextAsync(socket, ct).ConfigureAwait(false);
+                var json = await ReceiveTextAsync(session.Socket, session.Cts.Token).ConfigureAwait(false);
                 if (json is null)
                 {
                     lostReason = "socket closed";
@@ -159,7 +162,7 @@ public sealed class SignalingClient : IAsyncDisposable
                     continue;
                 }
 
-                HandleEnvelope(envelope);
+                HandleEnvelope(session, envelope);
             }
         }
         catch (WebSocketException ex)
@@ -172,12 +175,22 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         finally
         {
-            _outbound.Writer.TryComplete();
-            ConnectionLost?.Invoke(lostReason);
+            // Always complete THIS session's own channel so the writer exits. The
+            // channel reference lives on the Session, so there is no chance of
+            // completing a newer session's channel here.
+            session.Outbound.Writer.TryComplete();
+
+            // Claim the one-shot notification slot for this session. If retirement
+            // has already claimed it (suppressing stale events during a reconnect),
+            // the CAS here fails and we stay silent. Otherwise we fire exactly once.
+            if (Interlocked.CompareExchange(ref session.NotifyClaimed, 1, 0) == 0)
+            {
+                ConnectionLost?.Invoke(lostReason);
+            }
         }
     }
 
-    private void HandleEnvelope(MessageEnvelope envelope)
+    private void HandleEnvelope(Session session, MessageEnvelope envelope)
     {
         switch (envelope.Type)
         {
@@ -185,12 +198,16 @@ public sealed class SignalingClient : IAsyncDisposable
                 var ping = envelope.Payload.Deserialize<Ping>(ProtocolJson.Options);
                 if (ping is not null)
                 {
-                    _ = SendAsync(MessageType.Pong, new Pong(ping.Timestamp));
+                    // Write directly to the session's channel — never through SendAsync,
+                    // which reads _current and could race with a newer reconnect.
+                    var element = JsonSerializer.SerializeToElement(new Pong(ping.Timestamp), ProtocolJson.Options);
+                    var pong = new MessageEnvelope(MessageType.Pong, null, element);
+                    var json = JsonSerializer.Serialize(pong, ProtocolJson.Options);
+                    session.Outbound.Writer.TryWrite(json);
                 }
                 break;
 
             case MessageType.Pong:
-                // Heartbeat reply; nothing to do on the client side in Phase 1.
                 break;
 
             case MessageType.RoomCreated:
@@ -261,60 +278,58 @@ public sealed class SignalingClient : IAsyncDisposable
         }
     }
 
-    public ValueTask DisposeAsync() => DisposeInternalAsync(suppressConnectionLost: false);
-
-    private async ValueTask DisposeInternalAsync(bool suppressConnectionLost)
+    public async ValueTask DisposeAsync()
     {
-        Action<string?>? restoredHandler = null;
-        if (suppressConnectionLost)
-        {
-            restoredHandler = ConnectionLost;
-            ConnectionLost = null;
-        }
-
-        ClientWebSocket? socket;
-        CancellationTokenSource? cts;
-        Task? readerTask;
-        Task? writerTask;
-        Channel<string> channel;
-
+        Session? session;
         lock (_stateLock)
         {
-            socket = _socket;
-            cts = _cts;
-            readerTask = _readerTask;
-            writerTask = _writerTask;
-            channel = _outbound;
+            session = _current;
+            _current = null;
+        }
+        if (session is not null)
+        {
+            await RetireSessionAsync(session, suppressConnectionLost: true).ConfigureAwait(false);
+        }
+    }
 
-            _socket = null;
-            _cts = null;
-            _readerTask = null;
-            _writerTask = null;
+    /// <summary>
+    /// Cancels the session, optionally suppresses any pending ConnectionLost event
+    /// from the reader, and waits for reader and writer to unwind before disposing
+    /// the socket and cts. Suppression is atomic: claiming
+    /// <see cref="Session.NotifyClaimed"/> before awaiting the reader guarantees that
+    /// if the reader has not yet fired its finally-block event, it will lose the CAS
+    /// and stay silent. If the reader has already fired, retirement is a no-op on
+    /// the slot and still awaits the task to completion.
+    /// </summary>
+    private static async Task RetireSessionAsync(Session session, bool suppressConnectionLost)
+    {
+        session.IsRetired = true;
+
+        if (suppressConnectionLost)
+        {
+            // Claim the notification slot atomically BEFORE the reader can run its
+            // CAS in its finally. If the reader already claimed it, no harm done.
+            Interlocked.Exchange(ref session.NotifyClaimed, 1);
         }
 
-        try { cts?.Cancel(); } catch (ObjectDisposedException) { }
-        channel.Writer.TryComplete();
+        try { session.Cts.Cancel(); } catch (ObjectDisposedException) { }
+        session.Outbound.Writer.TryComplete();
 
         try
         {
-            if (socket is { State: WebSocketState.Open })
+            if (session.Socket.State == WebSocketState.Open)
             {
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None)
+                await session.Socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None)
                     .ConfigureAwait(false);
             }
         }
         catch { }
 
-        try { if (readerTask is not null) await readerTask.ConfigureAwait(false); } catch { }
-        try { if (writerTask is not null) await writerTask.ConfigureAwait(false); } catch { }
+        try { await session.ReaderTask.ConfigureAwait(false); } catch { }
+        try { await session.WriterTask.ConfigureAwait(false); } catch { }
 
-        socket?.Dispose();
-        cts?.Dispose();
-
-        if (restoredHandler is not null)
-        {
-            ConnectionLost = restoredHandler;
-        }
+        session.Socket.Dispose();
+        session.Cts.Dispose();
     }
 
     private static Channel<string> CreateOutboundChannel() =>
@@ -324,4 +339,36 @@ public sealed class SignalingClient : IAsyncDisposable
             SingleReader = true,
             SingleWriter = false,
         });
+
+    /// <summary>
+    /// Per-connection state. Captured by the reader/writer tasks so they never touch
+    /// the client's fields. Two distinct flags:
+    /// <list type="bullet">
+    ///   <item><see cref="IsRetired"/> is a coarse "session has been asked to shut
+    ///   down" marker, set at the start of <see cref="RetireSessionAsync"/> so
+    ///   <see cref="IsConnected"/> and the "already connected" gate immediately stop
+    ///   reporting the session as live.</item>
+    ///   <item><see cref="NotifyClaimed"/> is a compare-exchange slot that gates the
+    ///   one-shot <see cref="ConnectionLost"/> invocation: either the reader's
+    ///   finally wins it, or the retirement path claims it first to suppress a
+    ///   stale event, but never both.</item>
+    /// </list>
+    /// </summary>
+    private sealed class Session
+    {
+        public Session(ClientWebSocket socket, CancellationTokenSource cts, Channel<string> outbound)
+        {
+            Socket = socket;
+            Cts = cts;
+            Outbound = outbound;
+        }
+
+        public ClientWebSocket Socket { get; }
+        public CancellationTokenSource Cts { get; }
+        public Channel<string> Outbound { get; }
+        public Task ReaderTask { get; set; } = Task.CompletedTask;
+        public Task WriterTask { get; set; } = Task.CompletedTask;
+        public volatile bool IsRetired;
+        public int NotifyClaimed;
+    }
 }

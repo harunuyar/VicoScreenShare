@@ -93,6 +93,60 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Reconnect_during_drop_does_not_leak_stale_ConnectionLost_into_new_session()
+    {
+        // Scenario: server A drops the socket, then we reconnect to server B. The old
+        // reader may still be unwinding when ConnectAsync(B) runs. The new session
+        // (and any subscribers added after it) must not receive the old session's
+        // ConnectionLost. We run the cycle in a tight loop to raise the likelihood of
+        // catching a race if one exists, and count ConnectionLost events observed
+        // while we are "subscribed for the new session" — that count must stay at 0.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var client = new SignalingClient();
+        var hello = new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current);
+
+        for (var i = 0; i < 10; i++)
+        {
+            // Server A: accepts hello, then immediately closes on the next frame.
+            await using var droppingServer = StartAbortAfterHelloServer(out var droppingUri);
+            await client.ConnectAsync(droppingUri, hello, cts.Token);
+            try
+            {
+                // Trigger the server-side close by sending a second frame.
+                await client.CreateRoomAsync(null, cts.Token);
+            }
+            catch { /* write may race the close */ }
+
+            // Server B: stable listener.
+            await using var stableServer = StartThrowawayWsServer(out var stableUri);
+
+            // Count ConnectionLost events from the moment we start the new operation.
+            var staleEvents = 0;
+            void OnConnectionLostDuringNewSession(string? _)
+                => Interlocked.Increment(ref staleEvents);
+            client.ConnectionLost += OnConnectionLostDuringNewSession;
+            try
+            {
+                await client.ConnectAsync(stableUri, hello, cts.Token);
+                client.IsConnected.Should().BeTrue();
+                // Give any stray reader tasks a chance to run their finally blocks
+                // against the new subscriber list.
+                await Task.Delay(50, cts.Token);
+            }
+            finally
+            {
+                client.ConnectionLost -= OnConnectionLostDuringNewSession;
+            }
+
+            staleEvents.Should().Be(
+                0,
+                $"iteration {i}: stale reader from previous session must not fire ConnectionLost into the new session's subscribers");
+
+            await client.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task HomeViewModel_recovers_when_connection_drops_mid_create()
     {
         // Stand up a server that accepts the hello and then yanks the socket when
