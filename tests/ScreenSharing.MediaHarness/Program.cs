@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Windows.Media.Codecs;
+using Vortice.Direct3D11;
+using Vortice.DXGI;
 
 namespace ScreenSharing.MediaHarness;
 
@@ -40,6 +42,7 @@ internal static class Program
             return scenario switch
             {
                 "bench-encode" => RunEncodeBenchmark(argMap),
+                "bench-encode-gpu" => RunGpuEncodeBenchmark(argMap),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -175,6 +178,165 @@ internal static class Program
         var meetingTarget = actualFps >= fps * 0.95;
         Console.WriteLine($"VERDICT: {(meetingTarget ? "PASS" : "FAIL")} (fps {actualFps:F1}/{fps})");
         return meetingTarget ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Bench scenario: feed NVENC pure D3D11 NV12 textures via the new
+    /// <see cref="MediaFoundationH264Encoder.EncodeTexture"/> path. No CPU
+    /// color conversion, no system-memory NV12 buffer, no per-frame
+    /// upload — the encoder reads from a GPU texture in place. This is
+    /// the upper bound on what NVENC alone can do on this machine.
+    /// </summary>
+    private static int RunGpuEncodeBenchmark(Dictionary<string, string> args)
+    {
+        var width = int.Parse(args.GetValueOrDefault("width", "1920"));
+        var height = int.Parse(args.GetValueOrDefault("height", "1080"));
+        var fps = int.Parse(args.GetValueOrDefault("fps", "60"));
+        var bitrateMbps = double.Parse(args.GetValueOrDefault("bitrate", "10"));
+        var bitrate = (int)(bitrateMbps * 1_000_000);
+        var duration = double.Parse(args.GetValueOrDefault("duration", "5"));
+        var throttle = args.GetValueOrDefault("throttle", "true") != "false";
+
+        Console.WriteLine($"# bench-encode-gpu codec=h264 {width}x{height}@{fps} bitrate={bitrateMbps}Mbps duration={duration}s throttle={throttle}");
+
+        MediaFoundationRuntime.EnsureInitialized();
+        if (!MediaFoundationRuntime.IsAvailable)
+        {
+            Console.Error.WriteLine("ERROR: Media Foundation could not initialize");
+            return 2;
+        }
+
+        var encoder = new MediaFoundationH264Encoder(width, height, fps, bitrate);
+        Console.WriteLine($"# encoder created codec={encoder.Codec}");
+
+        if (encoder.D3D11Device is null)
+        {
+            Console.Error.WriteLine("ERROR: encoder has no D3D11 device — GPU path requires hardware MFT");
+            encoder.Dispose();
+            return 2;
+        }
+
+        // Allocate an NV12 D3D11 texture on the encoder's device, fill it
+        // once with synthetic data, and reuse it every iteration. The
+        // encoder reads from GPU memory directly. Default usage (no CPU
+        // access) so NVENC gets the fast path.
+        var desc = new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.NV12,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.None,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.None,
+        };
+        using var nv12Texture = encoder.D3D11Device.CreateTexture2D(desc);
+
+        // Initial upload via UpdateSubresource — Default-usage textures
+        // can't be Mapped, so we have to use the device context.
+        var nv12Bytes = new byte[width * height * 3 / 2];
+        FillSyntheticNv12(nv12Bytes, width, height);
+        unsafe
+        {
+            fixed (byte* src = nv12Bytes)
+            {
+                using var ctx = encoder.D3D11Device.ImmediateContext;
+                ctx.UpdateSubresource(nv12Texture, 0, null, (nint)src, (uint)width, 0u);
+            }
+        }
+
+        Console.WriteLine($"# nv12 texture allocated and uploaded");
+
+        var frameCount = 0;
+        var totalBytes = 0L;
+        var encodeMsTotal = 0.0;
+        var encodeMsMax = 0.0;
+        var encodeMsMin = double.MaxValue;
+        var totalSw = Stopwatch.StartNew();
+        var endTicks = (long)(duration * Stopwatch.Frequency);
+        var frameInterval = Stopwatch.Frequency / fps;
+
+        // Warmup
+        for (var w = 0; w < 5; w++)
+        {
+            _ = encoder.EncodeTexture(nv12Texture);
+        }
+
+        var benchSw = Stopwatch.StartNew();
+        var startTicks = totalSw.ElapsedTicks;
+        var iteration = 0;
+
+        while (totalSw.ElapsedTicks - startTicks < endTicks)
+        {
+            var encStart = Stopwatch.GetTimestamp();
+            var encoded = encoder.EncodeTexture(nv12Texture);
+            var encEnd = Stopwatch.GetTimestamp();
+
+            var encodeMs = (encEnd - encStart) * 1000.0 / Stopwatch.Frequency;
+            encodeMsTotal += encodeMs;
+            if (encodeMs > encodeMsMax) encodeMsMax = encodeMs;
+            if (encodeMs < encodeMsMin) encodeMsMin = encodeMs;
+
+            if (encoded is { Length: > 0 })
+            {
+                frameCount++;
+                totalBytes += encoded.Length;
+            }
+
+            iteration++;
+
+            if (throttle)
+            {
+                var nextDeadline = startTicks + iteration * frameInterval;
+                while (totalSw.ElapsedTicks < nextDeadline) { }
+            }
+        }
+
+        var elapsedSeconds = benchSw.Elapsed.TotalSeconds;
+        encoder.Dispose();
+
+        var actualFps = frameCount / elapsedSeconds;
+        var bitrateOutMbps = (totalBytes * 8.0 / elapsedSeconds) / 1_000_000.0;
+        var avgEncodeMs = encodeMsTotal / Math.Max(1, iteration);
+
+        Console.WriteLine($"RESULT: iterations={iteration}");
+        Console.WriteLine($"RESULT: frames_encoded={frameCount}");
+        Console.WriteLine($"RESULT: elapsed_seconds={elapsedSeconds:F3}");
+        Console.WriteLine($"RESULT: fps_actual={actualFps:F2}");
+        Console.WriteLine($"RESULT: fps_target={fps}");
+        Console.WriteLine($"RESULT: bytes_total={totalBytes}");
+        Console.WriteLine($"RESULT: avg_frame_bytes={(frameCount > 0 ? totalBytes / frameCount : 0)}");
+        Console.WriteLine($"RESULT: bitrate_out_mbps={bitrateOutMbps:F2}");
+        Console.WriteLine($"RESULT: bitrate_target_mbps={bitrateMbps:F2}");
+        Console.WriteLine($"RESULT: avg_encode_call_ms={avgEncodeMs:F2}");
+        Console.WriteLine($"RESULT: max_encode_call_ms={encodeMsMax:F2}");
+        Console.WriteLine($"RESULT: min_encode_call_ms={(encodeMsMin == double.MaxValue ? 0 : encodeMsMin):F2}");
+
+        var meetingTarget = actualFps >= fps * 0.95;
+        Console.WriteLine($"VERDICT: {(meetingTarget ? "PASS" : "FAIL")} (fps {actualFps:F1}/{fps})");
+        return meetingTarget ? 0 : 3;
+    }
+
+    private static void FillSyntheticNv12(byte[] nv12, int width, int height)
+    {
+        // Y plane: a vertical gradient.
+        var ySize = width * height;
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                nv12[y * width + x] = (byte)((x + y) & 0xFF);
+            }
+        }
+        // UV plane: mid-gray-ish chroma so the result is visible if anyone
+        // ever decodes it.
+        for (var i = ySize; i < nv12.Length; i++)
+        {
+            nv12[i] = 128;
+        }
     }
 
     private static void FillGradient(byte[] bgra, int width, int height)

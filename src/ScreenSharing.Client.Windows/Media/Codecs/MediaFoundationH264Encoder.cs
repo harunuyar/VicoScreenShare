@@ -6,6 +6,8 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Media.Codecs;
+using Vortice.Direct3D;
+using Vortice.Direct3D11;
 using Vortice.MediaFoundation;
 using IVideoEncoder = ScreenSharing.Client.Media.Codecs.IVideoEncoder;
 
@@ -35,7 +37,7 @@ namespace ScreenSharing.Client.Windows.Media.Codecs;
 ///   2. hardware sync — older driver variants
 ///   3. software sync (MSFT MSH264EncoderMFT) — universal fallback
 /// </summary>
-internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
+public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 {
     private readonly int _width;
     private readonly int _height;
@@ -44,6 +46,8 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly IMFTransform _transform;
     private readonly bool _isAsync;
     private readonly IMFMediaEventGenerator? _events;
+    private readonly ID3D11Device? _d3dDevice;
+    private readonly IMFDXGIDeviceManager? _dxgiManager;
     private readonly Thread? _pumpThread;
     private readonly CancellationTokenSource _pumpCts = new();
     private readonly SemaphoreSlim _needInputSignal = new(0, int.MaxValue);
@@ -65,7 +69,15 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         _bitrate = Math.Max(500_000, bitrate);
         _nv12Buffer = new byte[width * height * 3 / 2];
 
-        (_transform, _isAsync, var pickedLabel) = CreateEncoder(width, height, _fps, _bitrate);
+        // Create a D3D11 device and DXGI device manager for the encoder MFT
+        // BEFORE we hand it any media types. NVENC's MFT routes its async
+        // event handling and (in Phase 4) its zero-copy texture ingest
+        // through this manager — even when we still feed system-memory NV12
+        // samples, attaching the manager is required to enable async mode
+        // on most modern hardware encoder builds.
+        (_d3dDevice, _dxgiManager) = TryCreateD3DManager();
+
+        (_transform, _isAsync, var pickedLabel) = CreateEncoder(width, height, _fps, _bitrate, _dxgiManager);
         DebugLog.Write($"[mf] H264 encoder initialized {width}x{height}@{_fps} {_bitrate} bps ({pickedLabel})");
 
         if (_isAsync)
@@ -98,6 +110,120 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     public int Width => _width;
 
     public int Height => _height;
+
+    /// <summary>
+    /// The internal D3D11 device, exposed so callers (like the test harness
+    /// or future zero-copy capture path) can allocate textures on the same
+    /// device the encoder is using. Null when no GPU manager is attached
+    /// (software encoder fallback).
+    /// </summary>
+    public ID3D11Device? D3D11Device => _d3dDevice;
+
+    /// <summary>
+    /// Encode a D3D11 texture directly. Wraps the texture in a DXGI
+    /// surface buffer + IMFSample with no system-memory copy, no color
+    /// conversion on the CPU. The texture must:
+    /// <list type="bullet">
+    ///   <item>be allocated on <see cref="D3D11Device"/></item>
+    ///   <item>have format NV12 (or whatever the encoder's input type was set to)</item>
+    ///   <item>have width/height matching this encoder's <see cref="Width"/>/<see cref="Height"/></item>
+    /// </list>
+    /// Returns encoded bytes (caller owns) or null if the encoder hasn't
+    /// produced output yet (async warmup, etc).
+    /// </summary>
+    public byte[]? EncodeTexture(ID3D11Texture2D texture)
+    {
+        if (_disposed) return null;
+        if (_d3dDevice is null)
+        {
+            DebugLog.Write("[mf] EncodeTexture called but encoder has no D3D device");
+            return null;
+        }
+
+        var sample = CreateD3DInputSample(texture);
+        try
+        {
+            if (_isAsync)
+            {
+                return EncodeAsyncSample(sample);
+            }
+            return EncodeSyncSample(sample);
+        }
+        finally
+        {
+            sample.Dispose();
+        }
+    }
+
+    private IMFSample CreateD3DInputSample(ID3D11Texture2D texture)
+    {
+        var iidTexture = typeof(ID3D11Texture2D).GUID;
+        // MFCreateDXGISurfaceBuffer wraps a D3D11 texture as an
+        // IMFMediaBuffer that the encoder can read directly from GPU
+        // memory. Subresource 0 = the only mip level we care about.
+        // bottomUpWhenLinear=false because BGRA/NV12 textures from
+        // capture sources are top-down.
+        var buffer = MediaFactory.MFCreateDXGISurfaceBuffer(iidTexture, texture, 0, false);
+
+        // Set the buffer's "current length" to the texture's actual size.
+        // Without this NVENC sometimes treats the buffer as empty and
+        // returns no output.
+        var nv12Size = _width * _height * 3 / 2;
+        buffer.CurrentLength = nv12Size;
+
+        var sample = MediaFactory.MFCreateSample();
+        sample.AddBuffer(buffer);
+
+        var duration = 10_000_000L / _fps;
+        sample.SampleTime = _frameIndex * duration;
+        sample.SampleDuration = duration;
+        _frameIndex++;
+
+        buffer.Dispose();
+        return sample;
+    }
+
+    private byte[]? EncodeAsyncSample(IMFSample sample)
+    {
+        if (!_needInputSignal.Wait(50))
+        {
+            return TryDequeueOutput();
+        }
+
+        lock (_processLock)
+        {
+            if (_disposed) return null;
+            try
+            {
+                _transform.ProcessInput(0, sample, 0);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[mf] async H264 EncodeTexture ProcessInput threw: {ex.Message}");
+                return null;
+            }
+        }
+
+        return TryDequeueOutput();
+    }
+
+    private byte[]? EncodeSyncSample(IMFSample sample)
+    {
+        lock (_processLock)
+        {
+            if (_disposed) return null;
+            try
+            {
+                _transform.ProcessInput(0, sample, 0);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[mf] sync H264 EncodeTexture ProcessInput threw: {ex.Message}");
+                return null;
+            }
+            return DrainOutputLocked();
+        }
+    }
 
     public byte[]? EncodeBgra(byte[] bgra, int stride)
     {
@@ -467,36 +593,86 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         _pumpThread?.Join(TimeSpan.FromMilliseconds(500));
         try { _events?.Dispose(); } catch { }
         try { _transform.Dispose(); } catch { }
+        try { _dxgiManager?.Dispose(); } catch { }
+        try { _d3dDevice?.Dispose(); } catch { }
         try { _pumpCts.Dispose(); } catch { }
         try { _needInputSignal.Dispose(); } catch { }
     }
 
     // --- Encoder enumeration + type negotiation ---
 
-    private static (IMFTransform transform, bool isAsync, string label) CreateEncoder(int width, int height, int fps, long bitrate)
+    private static (IMFTransform transform, bool isAsync, string label) CreateEncoder(int width, int height, int fps, long bitrate, IMFDXGIDeviceManager? dxgiManager)
     {
         // Try async hardware MFTs first — NVENC / QSV / VCE. Passing both
         // HARDWARE and ASYNCMFT flags returns async hardware encoders, which
         // we unlock individually before touching them.
         var async = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, tryAsync: true, tryHardware: true, label: "hardware async");
+            width, height, fps, bitrate, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager);
         if (async is not null) return (async, true, "hardware async");
 
         // Fall back to sync hardware MFTs — rare on modern drivers but they
         // exist (e.g. older Intel QSV builds).
         var sync = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, tryAsync: false, tryHardware: true, label: "hardware sync");
+            width, height, fps, bitrate, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager);
         if (sync is not null) return (sync, false, "hardware sync");
 
         // Last resort: Microsoft's software H.264 encoder. Always available.
+        // Software encoder doesn't need the D3D manager, pass null.
         var software = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, tryAsync: false, tryHardware: false, label: "software");
+            width, height, fps, bitrate, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null);
         if (software is not null) return (software, false, "software");
 
         throw new InvalidOperationException("Media Foundation has no usable H.264 encoder on this machine");
+    }
+
+    /// <summary>
+    /// Create a D3D11 device + IMFDXGIDeviceManager pair for the encoder
+    /// MFT. Returning null,null means we fall through to system-memory-only
+    /// mode — the encoder still works, it just won't get the GPU fast path
+    /// in Phase 2+. Failures are logged but not fatal.
+    /// </summary>
+    private static (ID3D11Device?, IMFDXGIDeviceManager?) TryCreateD3DManager()
+    {
+        try
+        {
+            var hr = D3D11.D3D11CreateDevice(
+                adapter: null,
+                DriverType.Hardware,
+                DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
+                new[]
+                {
+                    FeatureLevel.Level_11_1,
+                    FeatureLevel.Level_11_0,
+                },
+                out var device,
+                out _,
+                out _);
+            if (hr.Failure || device is null)
+            {
+                DebugLog.Write($"[mf] D3D11CreateDevice failed (HR=0x{(uint)hr.Code:X8}); falling back to system-memory encoder");
+                return (null, null);
+            }
+
+            // The MF runtime requires the device to be flagged as
+            // multithread-protected before being shared via the manager,
+            // because MFT events fire on a different thread than the one
+            // that fed the input sample.
+            using var multithread = device.QueryInterface<ID3D11Multithread>();
+            multithread.SetMultithreadProtected(true);
+
+            var manager = MediaFactory.MFCreateDXGIDeviceManager();
+            manager.ResetDevice(device);
+            DebugLog.Write("[mf] D3D11 device + DXGI device manager created for encoder");
+            return (device, manager);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] TryCreateD3DManager threw: {ex.Message}; falling back to system-memory encoder");
+            return (null, null);
+        }
     }
 
     private static IMFTransform? TryCreateEncoder(
@@ -507,7 +683,8 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         long bitrate,
         bool tryAsync,
         bool tryHardware,
-        string label)
+        string label,
+        IMFDXGIDeviceManager? dxgiManager)
     {
         var outputFilter = new RegisterTypeInfo
         {
@@ -547,6 +724,24 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                         DebugLog.Write($"[mf] probing {label} [{friendlyName}] — async unlock failed, skipping: {ex.Message}");
                         transform.Dispose();
                         continue;
+                    }
+                }
+
+                // Hand the MFT our DXGI device manager so it can either run
+                // its async event pump on the same D3D11 device (Phase 1) or
+                // ingest D3D11 textures directly (Phase 2+). Many hardware
+                // MFTs reject SET_D3D_MANAGER, which is fine — they fall
+                // back to system-memory mode automatically.
+                if (dxgiManager is not null && tryHardware)
+                {
+                    try
+                    {
+                        transform.ProcessMessage(TMessageType.MessageSetD3DManager, (nuint)(nint)dxgiManager.NativePointer);
+                        DebugLog.Write($"[mf] {label} [{friendlyName}] accepted SET_D3D_MANAGER");
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLog.Write($"[mf] {label} [{friendlyName}] rejected SET_D3D_MANAGER (continuing in system-memory mode): {ex.Message}");
                     }
                 }
 
