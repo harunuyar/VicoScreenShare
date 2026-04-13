@@ -25,6 +25,7 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly IMFTransform _transform;
     private readonly byte[] _nv12Buffer;
     private long _frameIndex;
+    private long _loggedEncodedFrames;
     private bool _disposed;
 
     public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate)
@@ -97,7 +98,13 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         }
 
         // Drain all available output samples for this input.
-        return DrainOutput();
+        var encoded = DrainOutput();
+        if (encoded is { Length: > 0 } && _loggedEncodedFrames < 3)
+        {
+            _loggedEncodedFrames++;
+            DebugLog.Write($"[mf] H264 encoder produced frame {_loggedEncodedFrames} ({encoded.Length} bytes)");
+        }
+        return encoded;
     }
 
     private byte[]? DrainOutput()
@@ -220,7 +227,7 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 }
                 catch (Exception ex)
                 {
-                    DebugLog.Write($"[mf] {label} H264 SetOutputType threw: {ex.Message}");
+                    DebugLog.Write($"[mf] probing {label} H264 MFT — SetOutputType rejected, skipping: {ex.Message}");
                     outputType.Dispose();
                     transform.Dispose();
                     continue;
@@ -241,7 +248,7 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 }
                 catch (Exception ex)
                 {
-                    DebugLog.Write($"[mf] {label} H264 SetInputType threw: {ex.Message}");
+                    DebugLog.Write($"[mf] probing {label} H264 MFT — SetInputType rejected, skipping: {ex.Message}");
                     inputType.Dispose();
                     transform.Dispose();
                     continue;

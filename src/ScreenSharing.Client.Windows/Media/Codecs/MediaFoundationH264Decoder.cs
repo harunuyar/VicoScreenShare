@@ -25,6 +25,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     private int _width;
     private int _height;
     private bool _outputTypeNegotiated;
+    private long _loggedDecodedFrames;
     private bool _disposed;
 
     public MediaFoundationH264Decoder()
@@ -165,6 +166,12 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
                 var bgra = ConvertNv12ToBgra(nv12, _width, _height);
                 (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height));
+
+                if (_loggedDecodedFrames < 3)
+                {
+                    _loggedDecodedFrames++;
+                    DebugLog.Write($"[mf] H264 decoder produced frame {_loggedDecodedFrames} ({_width}x{_height})");
+                }
             }
             finally
             {
