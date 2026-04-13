@@ -21,7 +21,6 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Room" Opacity="0.6" FontSize="12" />
@@ -31,21 +30,15 @@
                             Margin="8,0,0,0" VerticalAlignment="Center" Padding="12,4" />
                 </StackPanel>
             </StackPanel>
-            <Button Grid.Column="1" Content="Share screen"
+            <Button Grid.Column="1" Content="Share"
                     Command="{Binding ShareScreenCommand}"
-                    ToolTip="Share the primary monitor at full refresh rate (DDA)."
                     Visibility="{Binding IsSharing, Converter={StaticResource InvertBoolToVisibility}}"
                     Padding="16,6" />
-            <Button Grid.Column="2" Content="Share window"
-                    Command="{Binding ShareWindowCommand}"
-                    ToolTip="Pick a specific window to share (WGC)."
-                    Visibility="{Binding IsSharing, Converter={StaticResource InvertBoolToVisibility}}"
-                    Padding="16,6" Margin="8,0,0,0" />
-            <Button Grid.Column="3" Content="Stop sharing"
+            <Button Grid.Column="2" Content="Stop sharing"
                     Command="{Binding StopSharingCommand}"
                     Visibility="{Binding IsSharing, Converter={StaticResource BoolToVisibility}}"
                     Padding="16,6" Margin="8,0,0,0" />
-            <Button Grid.Column="4" Content="Leave"
+            <Button Grid.Column="3" Content="Leave"
                     Command="{Binding LeaveRoomCommand}"
                     Padding="16,6" Margin="8,0,0,0" />
         </Grid>

@@ -213,80 +213,51 @@ public sealed partial class RoomViewModel : ViewModelBase
     private async Task ShareScreenAsync()
     {
         if (IsSharing || _captureProvider is null || _webRtc is null) return;
-        try
-        {
-            // DDA path — bypasses DWM compose throttling so the capture rate
-            // matches the monitor's refresh rate even when the user's cursor
-            // is stationary. Correct backend for gaming.
-            var source = await _captureProvider.PickScreenAsync().ConfigureAwait(true);
-            if (source is null)
-            {
-                StatusMessage = "Share cancelled.";
-                return;
-            }
-            await StartSharingAsync(source).ConfigureAwait(true);
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"Share failed: {ex.Message}";
-            await StopSharingInternalAsync().ConfigureAwait(true);
-        }
-    }
 
-    [RelayCommand]
-    private async Task ShareWindowAsync()
-    {
-        if (IsSharing || _captureProvider is null || _webRtc is null) return;
+        ICaptureSource? source = null;
         try
         {
-            // WGC path via the system picker — still the only way to get
-            // per-window capture. Expect lower fps than the DDA path when
-            // the window is idle, because WGC rides on DWM's compose rate.
-            var source = await _captureProvider.PickSourceAsync().ConfigureAwait(true);
+            source = await _captureProvider.PickSourceAsync().ConfigureAwait(true);
             if (source is null)
             {
                 StatusMessage = "Picker cancelled.";
                 return;
             }
-            await StartSharingAsync(source).ConfigureAwait(true);
+
+            LocalStreamLabel = source.DisplayName;
+            _localCaptureSource = source;
+            source.Closed += OnLocalCaptureClosed;
+
+            var session = _webRtc;
+            var streamer = new CaptureStreamer(
+                source,
+                (duration, payload) => session.PeerConnection.SendVideo(duration, payload),
+                _settings.Video,
+                _encoderFactory);
+            _captureStreamer = streamer;
+            streamer.Start();
+
+            await source.StartAsync().ConfigureAwait(true);
+            IsSharing = true;
+            StatusMessage = null;
+
+            var streamId = Guid.NewGuid().ToString("N");
+            _localStreamId = streamId;
+            try
+            {
+                await _signaling.SendStreamStartedAsync(streamId, StreamKind.Screen, hasAudio: false)
+                    .ConfigureAwait(true);
+                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId})");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[room] SendStreamStartedAsync threw: {ex.Message}");
+            }
         }
         catch (Exception ex)
         {
             StatusMessage = $"Share failed: {ex.Message}";
             await StopSharingInternalAsync().ConfigureAwait(true);
-        }
-    }
-
-    private async Task StartSharingAsync(ICaptureSource source)
-    {
-        LocalStreamLabel = source.DisplayName;
-        _localCaptureSource = source;
-        source.Closed += OnLocalCaptureClosed;
-
-        var session = _webRtc!;
-        var streamer = new CaptureStreamer(
-            source,
-            (duration, payload) => session.PeerConnection.SendVideo(duration, payload),
-            _settings.Video,
-            _encoderFactory);
-        _captureStreamer = streamer;
-        streamer.Start();
-
-        await source.StartAsync().ConfigureAwait(true);
-        IsSharing = true;
-        StatusMessage = null;
-
-        var streamId = Guid.NewGuid().ToString("N");
-        _localStreamId = streamId;
-        try
-        {
-            await _signaling.SendStreamStartedAsync(streamId, StreamKind.Screen, hasAudio: false)
-                .ConfigureAwait(true);
-            DebugLog.Write($"[room] sent StreamStarted (streamId={streamId})");
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Write($"[room] SendStreamStartedAsync threw: {ex.Message}");
         }
     }
 
