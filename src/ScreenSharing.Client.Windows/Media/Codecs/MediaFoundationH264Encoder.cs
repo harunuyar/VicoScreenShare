@@ -66,7 +66,7 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
         if (_isAsync)
         {
-            _events = ComCast<IMFMediaEventGenerator>(_transform);
+            _events = _transform.QueryInterface<IMFMediaEventGenerator>();
             _pumpThread = new Thread(EventPumpLoop)
             {
                 IsBackground = true,
@@ -490,19 +490,12 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         return true;
     }
 
-    /// <summary>
-    /// COM QueryInterface helper — cast an <see cref="IMFTransform"/> to its
-    /// sibling <see cref="IMFMediaEventGenerator"/> interface on the same
-    /// underlying COM object, so the async MFT event pump can read events.
-    /// </summary>
-    private static T ComCast<T>(object source) where T : SharpGen.Runtime.ComObject
-    {
-        if (source is T direct) return direct;
-        var co = (SharpGen.Runtime.ComObject)source;
-        var ptr = co.NativePointer;
-        Marshal.AddRef(ptr);
-        return (T)Activator.CreateInstance(typeof(T), ptr)!;
-    }
+    // ComCast removed: use transform.QueryInterface<IMFMediaEventGenerator>()
+    // directly — SharpGen's base ComObject exposes the right COM QI call so
+    // the returned wrapper holds an interface-specific pointer, not the
+    // IMFTransform vtable reinterpreted through the wrong slots. Using the
+    // wrong vtable was crashing EventPumpLoop with ExecutionEngineException
+    // the moment we called GetEvent on it.
 
     /// <summary>
     /// I420 to NV12 conversion. Y plane copies straight across; U and V
