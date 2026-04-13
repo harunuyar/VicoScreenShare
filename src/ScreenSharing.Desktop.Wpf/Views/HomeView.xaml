@@ -1,0 +1,67 @@
+<UserControl x:Class="ScreenSharing.Desktop.Wpf.Views.HomeView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:ScreenSharing.Desktop.Wpf.ViewModels"
+             d:DataContext="{d:DesignInstance Type=vm:HomeViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+
+    <Grid Margin="48" MaxWidth="500" HorizontalAlignment="Center">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" HorizontalAlignment="Center">
+            <TextBlock Text="ScreenSharing" FontSize="28" FontWeight="Bold" />
+            <TextBlock Text="Self-hosted screen share" Opacity="0.6" HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Margin="0,32,0,0">
+            <StackPanel Margin="0,0,0,18">
+                <TextBlock Text="Display name" Opacity="0.7" FontSize="12" />
+                <TextBox Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                         Padding="8,4" Margin="0,4,0,0" />
+            </StackPanel>
+
+            <Border BorderThickness="1" BorderBrush="#40808080" CornerRadius="8" Padding="16" Margin="0,0,0,18">
+                <StackPanel>
+                    <TextBlock Text="Create a room" FontWeight="SemiBold" Margin="0,0,0,8" />
+                    <TextBox Text="{Binding CreatePassword, UpdateSourceTrigger=PropertyChanged}"
+                             Padding="8,4" Margin="0,0,0,10" />
+                    <Button Content="Create room"
+                            Command="{Binding CreateRoomCommand}"
+                            IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBool}}"
+                            HorizontalAlignment="Stretch" Padding="12,6" />
+                </StackPanel>
+            </Border>
+
+            <Border BorderThickness="1" BorderBrush="#40808080" CornerRadius="8" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="Join a room" FontWeight="SemiBold" Margin="0,0,0,8" />
+                    <TextBox Text="{Binding JoinRoomId, UpdateSourceTrigger=PropertyChanged}"
+                             Padding="8,4" Margin="0,0,0,6" />
+                    <TextBox Text="{Binding JoinPassword, UpdateSourceTrigger=PropertyChanged}"
+                             Padding="8,4" Margin="0,0,0,10" />
+                    <Button Content="Join room"
+                            Command="{Binding JoinRoomCommand}"
+                            IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBool}}"
+                            HorizontalAlignment="Stretch" Padding="12,6" />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="{Binding StatusMessage}"
+                       Foreground="#FFAA5555"
+                       Margin="0,12,0,0"
+                       Visibility="{Binding StatusMessage, Converter={StaticResource NullToCollapsed}}" />
+        </StackPanel>
+
+        <Button Grid.Row="2"
+                Content="Settings"
+                Command="{Binding ShowSettingsCommand}"
+                HorizontalAlignment="Right"
+                Margin="0,24,0,0" Padding="12,6" />
+    </Grid>
+</UserControl>

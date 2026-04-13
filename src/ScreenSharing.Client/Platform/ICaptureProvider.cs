@@ -17,4 +17,15 @@ public interface ICaptureProvider
     /// cancelled the picker.
     /// </summary>
     Task<ICaptureSource?> PickSourceAsync();
+
+    /// <summary>
+    /// Create a capture source for the primary screen without going through the
+    /// system picker. On Windows this is backed by DXGI Desktop Duplication —
+    /// which, unlike <c>Windows.Graphics.Capture</c>, bypasses DWM's idle-window
+    /// compose throttling and sustains the monitor's native refresh rate even
+    /// when the user's cursor is stationary. This is the preferred backend for
+    /// the "Share Screen" button; <see cref="PickSourceAsync"/> remains for
+    /// single-window sharing.
+    /// </summary>
+    Task<ICaptureSource?> PickScreenAsync();
 }

@@ -5,16 +5,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Platform-neutral UI shell. Only core Avalonia + fonts + theme, no
-         platform backend (that lives in ScreenSharing.Desktop.Windows or a
-         future ScreenSharing.Desktop.Linux). -->
-    <PackageReference Include="Avalonia" Version="12.0.0" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.0" />
-    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.0" />
+    <!-- Plain logic library: protocol, capture abstractions, media pipeline,
+         signaling, codec catalog, settings store. No UI framework. The WinUI
+         app shell lives in ScreenSharing.Client.WinUI / ScreenSharing.Desktop.WinUI. -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
     <PackageReference Include="SIPSorceryMedia.Encoders" Version="10.0.4" />
@@ -26,6 +22,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="ScreenSharing.Tests" />
+    <InternalsVisibleTo Include="ScreenSharing.Desktop.WinUI" />
   </ItemGroup>
 
 </Project>

@@ -66,6 +66,21 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
         return new WindowsCaptureSource(item, _devices);
     }
 
+    public Task<ICaptureSource?> PickScreenAsync()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(WindowsCaptureProvider));
+
+        // DDA wants the device up before IDXGIOutput1.DuplicateOutput is
+        // called — Initialize is idempotent so a second call from a later
+        // Share click is fine.
+        _devices.Initialize();
+
+        // Output 0 = primary monitor. Multi-monitor picker is a follow-up;
+        // the vast majority of use cases here are single-monitor gaming.
+        ICaptureSource source = new DxgiDesktopDuplicationSource(_devices, 0, "Primary Display");
+        return Task.FromResult<ICaptureSource?>(source);
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

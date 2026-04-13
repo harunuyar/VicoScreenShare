@@ -4,16 +4,17 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
+using ScreenSharing.Desktop.Wpf.Services;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
 
-namespace ScreenSharing.Client.ViewModels;
+namespace ScreenSharing.Desktop.Wpf.ViewModels;
 
 public sealed partial class HomeViewModel : ViewModelBase
 {
     private readonly IdentityStore _identity;
     private readonly Func<SignalingClient> _signalingFactory;
-    private readonly NavigationService _navigation;
+    private readonly INavigationHost _navigation;
     private readonly ClientSettings _settings;
     private readonly SettingsStore _settingsStore;
     private readonly ICaptureProvider? _captureProvider;
@@ -23,7 +24,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     public HomeViewModel(
         IdentityStore identity,
         Func<SignalingClient> signalingFactory,
-        NavigationService navigation,
+        INavigationHost navigation,
         ClientSettings settings,
         SettingsStore settingsStore,
         ICaptureProvider? captureProvider = null)
@@ -57,19 +58,6 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _isBusy;
-
-    public bool IsPreviewAvailable => _captureProvider is not null;
-
-    [RelayCommand]
-    private void ShowPreview()
-    {
-        if (_captureProvider is null) return;
-        var preview = new PreviewViewModel(
-            _captureProvider,
-            _navigation,
-            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider));
-        _navigation.NavigateTo(preview);
-    }
 
     [RelayCommand]
     private void ShowSettings()

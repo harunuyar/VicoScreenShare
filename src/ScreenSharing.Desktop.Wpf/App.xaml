@@ -1,0 +1,14 @@
+<Application x:Class="ScreenSharing.Desktop.Wpf.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:ScreenSharing.Desktop.Wpf"
+             xmlns:conv="clr-namespace:ScreenSharing.Desktop.Wpf.Converters"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <conv:InvertBoolConverter x:Key="InvertBool" />
+        <conv:NullToCollapsedConverter x:Key="NullToCollapsed" />
+        <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+        <conv:InvertBoolToVisibilityConverter x:Key="InvertBoolToVisibility" />
+        <conv:ViewModelToPageConverter x:Key="VmToPage" />
+    </Application.Resources>
+</Application>

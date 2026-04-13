@@ -1,6 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 
-namespace ScreenSharing.Client.ViewModels;
+namespace ScreenSharing.Desktop.Wpf.ViewModels;
 
 public abstract class ViewModelBase : ObservableObject
 {

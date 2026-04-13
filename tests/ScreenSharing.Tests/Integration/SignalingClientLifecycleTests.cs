@@ -8,7 +8,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ScreenSharing.Client;
 using ScreenSharing.Client.Services;
-using ScreenSharing.Client.ViewModels;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
 using ScreenSharing.Server.Config;
@@ -174,98 +173,12 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         await client.DisposeAsync();
     }
 
-    [Fact]
-    public async Task HomeViewModel_recovers_when_connection_drops_mid_create()
-    {
-        // Stand up a server that accepts the hello and then yanks the socket when
-        // create_room arrives, so the VM is waiting on a reply that never comes.
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await using var server = StartAbortAfterHelloServer(out var serverUri);
-
-        var tempDir = Path.Combine(Path.GetTempPath(), "ScreenSharing.Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
-        var identity = new IdentityStore(Path.Combine(tempDir, "profile.json"));
-        identity.Save(new UserProfile { UserId = Guid.NewGuid(), DisplayName = "Alice" });
-
-        var nav = new NavigationService();
-        var settings = new ClientSettings { ServerUri = serverUri };
-        var settingsStore = new SettingsStore(Path.Combine(tempDir, "settings.json"));
-
-        var vm = new HomeViewModel(identity, () => new SignalingClient(), nav, settings, settingsStore)
-        {
-            DisplayName = "Alice",
-        };
-
-        await vm.CreateRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(8));
-
-        vm.IsBusy.Should().BeFalse("the VM must clear its busy flag when the server drops mid-operation");
-        vm.StatusMessage.Should().NotBeNullOrEmpty();
-        vm.StatusMessage.Should().Contain("Disconnected", "the VM surfaces the disconnect reason");
-
-        try { Directory.Delete(tempDir, recursive: true); } catch { }
-    }
-
-    [Fact]
-    public async Task HomeViewModel_can_retry_after_failed_create_and_navigates_on_success()
-    {
-        // Attempt 1: a server that drops mid-create, so the VM surfaces a
-        // "Disconnected" status and stays on HomeViewModel.
-        // Attempt 2: a server that replies with room_created + room_joined, so
-        // the VM completes successfully and navigates to RoomViewModel.
-        // The factory is counted to prove each attempt built a fresh client.
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-
-        await using var droppingServer = StartAbortAfterHelloServer(out var droppingUri);
-        await using var happyServer = StartRoomJoinedServer(out var happyUri);
-
-        var tempDir = Path.Combine(Path.GetTempPath(), "ScreenSharing.Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDir);
-        var identity = new IdentityStore(Path.Combine(tempDir, "profile.json"));
-        identity.Save(new UserProfile { UserId = Guid.NewGuid(), DisplayName = "Alice" });
-
-        var nav = new NavigationService();
-        var settings = new ClientSettings { ServerUri = droppingUri };
-        var settingsStore = new SettingsStore(Path.Combine(tempDir, "settings.json"));
-
-        var factoryCallCount = 0;
-        SignalingClient Factory()
-        {
-            Interlocked.Increment(ref factoryCallCount);
-            return new SignalingClient();
-        }
-
-        var vm = new HomeViewModel(identity, Factory, nav, settings, settingsStore)
-        {
-            DisplayName = "Alice",
-        };
-
-        // Attempt 1.
-        await vm.CreateRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(8));
-        vm.IsBusy.Should().BeFalse();
-        vm.StatusMessage.Should().NotBeNull();
-        vm.StatusMessage!.Should().Contain("Disconnected");
-        nav.CurrentViewModel.Should().BeNull(
-            "the first attempt failed so we should still be on the home screen");
-        factoryCallCount.Should().Be(1);
-
-        // Attempt 2.
-        settings.ServerUri = happyUri;
-        await vm.CreateRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(8));
-
-        factoryCallCount.Should().Be(2,
-            "each attempt must build a brand-new SignalingClient via the factory");
-        vm.IsBusy.Should().BeFalse();
-
-        var roomVm = nav.CurrentViewModel.Should().BeOfType<RoomViewModel>(
-            "the second attempt succeeded and the VM navigated to the room view").Subject;
-        roomVm.RoomId.Should().Be("TEST01");
-
-        // Tear down the navigated RoomViewModel so the background signaling task
-        // does not outlive the test.
-        await roomVm.LeaveRoomCommand.ExecuteAsync(null).WaitAsync(TimeSpan.FromSeconds(5));
-
-        try { Directory.Delete(tempDir, recursive: true); } catch { }
-    }
+    // HomeViewModel_recovers_when_connection_drops_mid_create and
+    // HomeViewModel_can_retry_after_failed_create_and_navigates_on_success
+    // were removed here because the Avalonia HomeViewModel + NavigationService
+    // + RoomViewModel were deleted in the WinUI 3 rewrite. The VM lifecycle
+    // they exercised will be re-tested in the WinUI client project against
+    // the new view models once those land.
 
     // --- helpers: tiny self-hosted WS listeners ---
 

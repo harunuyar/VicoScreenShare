@@ -1,0 +1,17 @@
+<Window x:Class="ScreenSharing.Desktop.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:svc="clr-namespace:ScreenSharing.Desktop.Wpf.Services"
+        Title="ScreenSharing"
+        Width="1280" Height="800"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.DataContext>
+        <svc:NavigationService />
+    </Window.DataContext>
+
+    <!-- The navigation service exposes `Current` as the active view model;
+         the ViewModelToPageConverter maps it to the corresponding UserControl.
+         Simple alternative to Frame/Page when the app has three screens. -->
+    <ContentControl Content="{Binding Current, Converter={StaticResource VmToPage}}" />
+</Window>

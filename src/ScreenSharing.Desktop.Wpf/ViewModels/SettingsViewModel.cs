@@ -3,48 +3,29 @@ using System.Collections.Generic;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ScreenSharing.Client;
 using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Services;
+using ScreenSharing.Desktop.Wpf.Services;
 
-namespace ScreenSharing.Client.ViewModels;
+namespace ScreenSharing.Desktop.Wpf.ViewModels;
 
-/// <summary>
-/// Settings page bound to the same live <see cref="ClientSettings"/> instance
-/// every other view model holds — Save mutates those fields in place so the
-/// next <see cref="CaptureStreamer"/> built by <see cref="RoomViewModel"/>
-/// picks up the new values without a restart, and persists to disk via
-/// <see cref="SettingsStore"/>.
-///
-/// Resolution is a dropdown of target heights (width is derived from the
-/// source aspect ratio at runtime so output never distorts). Framerate,
-/// bitrate, GOP and scaler quality are raw sliders — the presets in
-/// <see cref="QualityPresets"/> just fill all four sliders at once and the
-/// user is free to tweak anything afterwards.
-///
-/// Bitrate is presented on a logarithmic scale (stored as 0.0-1.0 internally)
-/// so dragging from 2 Mbps to 50 Mbps feels linear to the user even though
-/// the underlying value is exponential. The slider value exposed to XAML is
-/// <see cref="BitrateSliderValue"/>; the real bps number is
-/// <see cref="Bitrate"/>.
-/// </summary>
 public sealed partial class SettingsViewModel : ViewModelBase
 {
-    // Bitrate log-scale range. 500 Kbps → 100 Mbps covers everything from
-    // "very bad line" to "way more than any reasonable setup needs".
     private const int MinBitrateBps = 500_000;
     private const int MaxBitrateBps = 100_000_000;
 
     private readonly ClientSettings _settings;
     private readonly SettingsStore _store;
-    private readonly NavigationService _navigation;
+    private readonly INavigationHost _navigation;
     private readonly Func<ViewModelBase> _backFactory;
     private readonly Action? _onSaved;
 
     public SettingsViewModel(
         ClientSettings settings,
         SettingsStore store,
-        NavigationService navigation,
+        INavigationHost navigation,
         Func<ViewModelBase> backFactory,
         Action? onSaved = null)
     {
@@ -83,14 +64,14 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
         QualityPresets = new[]
         {
-            new QualityPreset("Readable",  TargetHeight: 1080, FrameRate: 30,  Bitrate:  8_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bicubic),
-            new QualityPreset("Smooth",    TargetHeight: 1080, FrameRate: 60,  Bitrate: 12_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bilinear),
-            new QualityPreset("High FPS",  TargetHeight: 1440, FrameRate: 120, Bitrate: 25_000_000, KeyframeIntervalSeconds: 1.0, Scaler: ScalerQuality.Bilinear),
-            new QualityPreset("4K Cinema", TargetHeight: 2160, FrameRate: 30,  Bitrate: 40_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bicubic),
-            new QualityPreset("Potato",    TargetHeight: 720,  FrameRate: 30,  Bitrate:  3_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bilinear),
+            new QualityPreset("Readable",  1080, 30,  8_000_000,  2.0, ScalerQuality.Bicubic),
+            new QualityPreset("Smooth",    1080, 60,  12_000_000, 2.0, ScalerQuality.Bilinear),
+            new QualityPreset("High FPS",  1440, 120, 25_000_000, 1.0, ScalerQuality.Bilinear),
+            new QualityPreset("4K Cinema", 2160, 30,  40_000_000, 2.0, ScalerQuality.Bicubic),
+            new QualityPreset("Potato",    720,  30,  3_000_000,  2.0, ScalerQuality.Bilinear),
         };
 
-        var catalog = App.VideoCodecCatalog ?? new VideoCodecCatalog();
+        var catalog = ClientHost.VideoCodecCatalog ?? new VideoCodecCatalog();
         var available = new HashSet<VideoCodec>(catalog.AvailableCodecs);
         CodecOptions = new[]
         {
@@ -99,7 +80,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
             BuildCodecOption(VideoCodec.Av1, "AV1 (hardware, coming soon)", available),
         };
 
-        // Seed the UI fields from the persisted settings.
         _selectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == _settings.Video.TargetHeight)
             ?? TargetHeightOptions.First(o => o.Height == 1080);
         _frameRate = Math.Clamp(_settings.Video.TargetFrameRate, 10, 240);
@@ -113,11 +93,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
     }
 
     public IReadOnlyList<TargetHeightOption> TargetHeightOptions { get; }
-
     public IReadOnlyList<ScalerQualityOption> ScalerQualityOptions { get; }
-
     public IReadOnlyList<QualityPreset> QualityPresets { get; }
-
     public IReadOnlyList<CodecOption> CodecOptions { get; }
 
     [ObservableProperty]
@@ -126,15 +103,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private int _frameRate;
 
-    /// <summary>Real bitrate in bits per second. Derived from the log-scale
-    /// slider value in <see cref="BitrateSliderValue"/>.</summary>
     [ObservableProperty]
     private int _bitrate;
 
-    /// <summary>Slider position in [0.0, 1.0] mapped to [500 Kbps, 100 Mbps]
-    /// on a log scale. XAML binds to this; setter updates <see cref="Bitrate"/>
-    /// as a side effect so the display label and the persisted value stay in
-    /// sync.</summary>
     [ObservableProperty]
     private double _bitrateSliderValue;
 
@@ -150,8 +121,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private string? _statusMessage;
 
-    /// <summary>Human-readable form of <see cref="Bitrate"/> for the slider
-    /// label — e.g. "8.5 Mbps".</summary>
     public string BitrateDisplay => FormatBitrate(Bitrate);
 
     partial void OnBitrateSliderValueChanged(double value)
@@ -165,7 +134,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     }
 
     [RelayCommand]
-    private void ApplyPreset(QualityPreset preset)
+    private void ApplyPreset(QualityPreset? preset)
     {
         if (preset is null) return;
 
@@ -205,7 +174,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
             return;
         }
 
-        try { _onSaved?.Invoke(); } catch { /* hook failures shouldn't break save */ }
+        try { _onSaved?.Invoke(); } catch { }
     }
 
     [RelayCommand]
@@ -221,9 +190,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
         return new CodecOption(codec, display, isAvailable);
     }
 
-    // Log-scale mapping: slider 0.0 = MinBitrateBps, 1.0 = MaxBitrateBps, and
-    // each 0.1 step roughly doubles — so dragging feels linear regardless of
-    // where you are on the curve.
     private static double BpsToSliderValue(int bps)
     {
         var clamped = Math.Clamp(bps, MinBitrateBps, MaxBitrateBps);
@@ -238,25 +204,18 @@ public sealed partial class SettingsViewModel : ViewModelBase
         var lnMin = Math.Log(MinBitrateBps);
         var lnMax = Math.Log(MaxBitrateBps);
         var raw = Math.Exp(lnMin + t * (lnMax - lnMin));
-        // Round to the nearest 100 Kbps so the display doesn't wiggle by a
-        // few bps on each slider tick.
         return (int)(Math.Round(raw / 100_000) * 100_000);
     }
 
     private static string FormatBitrate(int bps)
     {
-        if (bps >= 1_000_000)
-        {
-            return $"{bps / 1_000_000.0:0.0} Mbps";
-        }
+        if (bps >= 1_000_000) return $"{bps / 1_000_000.0:0.0} Mbps";
         return $"{bps / 1_000.0:0} Kbps";
     }
 }
 
 public sealed record TargetHeightOption(string DisplayName, int Height);
-
 public sealed record ScalerQualityOption(string DisplayName, ScalerQuality Quality);
-
 public sealed record QualityPreset(
     string Name,
     int TargetHeight,
@@ -264,5 +223,4 @@ public sealed record QualityPreset(
     int Bitrate,
     double KeyframeIntervalSeconds,
     ScalerQuality Scaler);
-
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);

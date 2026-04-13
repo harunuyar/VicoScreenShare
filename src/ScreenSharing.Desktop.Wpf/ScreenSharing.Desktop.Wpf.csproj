@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <!-- Floor: Windows 10 1809 (the oldest .NET 10 supports). We compile
+         against the 26100 SDK reference assembly so newer WGC APIs
+         (MinUpdateInterval, IsBorderRequired) are available at compile
+         time and gated at runtime with ApiInformation. -->
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>ScreenSharing.Desktop.Wpf</RootNamespace>
+    <AssemblyName>ScreenSharing</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon></ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ScreenSharing.Client\ScreenSharing.Client.csproj" />
+    <ProjectReference Include="..\ScreenSharing.Client.Windows\ScreenSharing.Client.Windows.csproj" />
+    <ProjectReference Include="..\ScreenSharing.Protocol\ScreenSharing.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

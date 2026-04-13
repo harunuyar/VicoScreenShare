@@ -66,12 +66,17 @@ public sealed class D3D11VideoScaler : IDisposable
         _enumerator = _videoDevice.CreateVideoProcessorEnumerator(contentDesc);
         _processor = _videoDevice.CreateVideoProcessor(_enumerator, 0);
 
-        // One-time processor state: full-frame output rect, progressive,
-        // normal output rate. This is the minimum the driver needs to run
-        // a BGRA → BGRA bilinear scale via VideoProcessorBlt.
+        // One-time processor state. Target rect covers the full output;
+        // stream dest rect defaults to the full output too (the caller
+        // can override via Process(src, dst, destRect) to letterbox).
+        // Background color is black so letterbox bars render clean
+        // instead of leaking whatever was in the back buffer previously.
         _videoContext.VideoProcessorSetStreamFrameFormat(_processor, 0, VideoFrameFormat.Progressive);
         _videoContext.VideoProcessorSetOutputTargetRect(_processor, true, new RawRect(0, 0, destWidth, destHeight));
+        _videoContext.VideoProcessorSetOutputBackgroundColor(_processor, false,
+            new VideoColor { Rgba = new VideoColorRgba { R = 0, G = 0, B = 0, A = 1 } });
         _videoContext.VideoProcessorSetStreamOutputRate(_processor, 0, VideoProcessorOutputRate.Normal, true, null);
+        _videoContext.VideoProcessorSetStreamDestRect(_processor, 0, true, new RawRect(0, 0, destWidth, destHeight));
 
         DebugLog.Write($"[scaler] D3D11 video processor built {sourceWidth}x{sourceHeight} -> {destWidth}x{destHeight}");
     }
@@ -84,13 +89,21 @@ public sealed class D3D11VideoScaler : IDisposable
 
     public int DestHeight => _destHeight;
 
+    public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture)
+        => Process(sourceTexture, destTexture, null);
+
     /// <summary>
     /// Scale <paramref name="sourceTexture"/> into <paramref name="destTexture"/>.
     /// Both textures must live on the device this scaler was built against.
-    /// The destination texture is cached against its output view, so calling
-    /// this repeatedly with the same destination is cheap.
+    ///
+    /// <paramref name="destRect"/> is an optional letterbox rect inside
+    /// the destination. When non-null the stream is written into that
+    /// sub-rectangle; the rest of the destination fills with the
+    /// background color set in the ctor (black). Used by the WPF
+    /// receiver renderer to preserve source aspect ratio when the room
+    /// tile has a different aspect.
     /// </summary>
-    public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture)
+    public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture, RawRect? destRect)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(D3D11VideoScaler));
 
@@ -116,6 +129,14 @@ public sealed class D3D11VideoScaler : IDisposable
             };
             _cachedOutputView = _videoDevice.CreateVideoProcessorOutputView(destTexture, _enumerator, outputViewDesc);
             _cachedDestTexture = destTexture;
+        }
+
+        // Update the stream dest rect per-frame when letterboxing. When
+        // the WPF tile's aspect ratio changes (e.g. maximize) the renderer
+        // recomputes destRect and passes it in; we don't rebuild the scaler.
+        if (destRect is RawRect r)
+        {
+            _videoContext.VideoProcessorSetStreamDestRect(_processor, 0, true, r);
         }
 
         var stream = new VideoProcessorStream

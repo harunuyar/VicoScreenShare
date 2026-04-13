@@ -1,7 +1,7 @@
 using System;
 using CommunityToolkit.Mvvm.ComponentModel;
 
-namespace ScreenSharing.Client.ViewModels;
+namespace ScreenSharing.Desktop.Wpf.ViewModels;
 
 public sealed partial class PeerViewModel : ObservableObject
 {
@@ -14,7 +14,6 @@ public sealed partial class PeerViewModel : ObservableObject
     }
 
     public Guid PeerId { get; }
-
     public bool IsSelf { get; }
 
     [ObservableProperty]
