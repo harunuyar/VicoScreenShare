@@ -16,12 +16,25 @@ namespace ScreenSharing.Client.ViewModels;
 /// picks up the new values without a restart, and persists to disk via
 /// <see cref="SettingsStore"/>.
 ///
-/// Resolution and frame rate are exposed as dropdown presets rather than raw
-/// sliders so users can't land on odd values that libvpx or the downscaler
-/// would round anyway.
+/// Resolution is a dropdown of target heights (width is derived from the
+/// source aspect ratio at runtime so output never distorts). Framerate,
+/// bitrate, GOP and scaler quality are raw sliders — the presets in
+/// <see cref="QualityPresets"/> just fill all four sliders at once and the
+/// user is free to tweak anything afterwards.
+///
+/// Bitrate is presented on a logarithmic scale (stored as 0.0-1.0 internally)
+/// so dragging from 2 Mbps to 50 Mbps feels linear to the user even though
+/// the underlying value is exponential. The slider value exposed to XAML is
+/// <see cref="BitrateSliderValue"/>; the real bps number is
+/// <see cref="Bitrate"/>.
 /// </summary>
 public sealed partial class SettingsViewModel : ViewModelBase
 {
+    // Bitrate log-scale range. 500 Kbps → 100 Mbps covers everything from
+    // "very bad line" to "way more than any reasonable setup needs".
+    private const int MinBitrateBps = 500_000;
+    private const int MaxBitrateBps = 100_000_000;
+
     private readonly ClientSettings _settings;
     private readonly SettingsStore _store;
     private readonly NavigationService _navigation;
@@ -41,28 +54,42 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _backFactory = backFactory;
         _onSaved = onSaved;
 
-        ResolutionPresets = new[]
+        TargetHeightOptions = new[]
         {
-            new ResolutionPreset("480p  (854 x 480)", 854, 480),
-            new ResolutionPreset("720p  (1280 x 720)", 1280, 720),
-            new ResolutionPreset("1080p (1920 x 1080)", 1920, 1080),
-            new ResolutionPreset("1440p (2560 x 1440)", 2560, 1440),
-        };
-        FrameRatePresets = new[] { 15, 24, 30, 60 };
-        BitratePresets = new[]
-        {
-            new BitratePreset("2 Mbps (low)", 2_000_000),
-            new BitratePreset("5 Mbps (720p good)", 5_000_000),
-            new BitratePreset("10 Mbps (1080p good)", 10_000_000),
-            new BitratePreset("15 Mbps (1080p high)", 15_000_000),
-            new BitratePreset("25 Mbps (1440p good)", 25_000_000),
-            new BitratePreset("50 Mbps (1440p high)", 50_000_000),
+            new TargetHeightOption("Source (no downscale)", 0),
+            new TargetHeightOption("2160p (4K)", 2160),
+            new TargetHeightOption("1800p", 1800),
+            new TargetHeightOption("1600p", 1600),
+            new TargetHeightOption("1440p", 1440),
+            new TargetHeightOption("1200p", 1200),
+            new TargetHeightOption("1080p", 1080),
+            new TargetHeightOption("900p", 900),
+            new TargetHeightOption("864p", 864),
+            new TargetHeightOption("768p", 768),
+            new TargetHeightOption("720p", 720),
+            new TargetHeightOption("600p", 600),
+            new TargetHeightOption("540p", 540),
+            new TargetHeightOption("480p", 480),
+            new TargetHeightOption("360p", 360),
         };
 
-        // Build codec options from the host-registered catalog so entries the
-        // current machine can't support are clearly marked. Order matters —
-        // VP8 first (always available) then H.264 then AV1, so the user sees
-        // the universal fallback at the top of the list.
+        ScalerQualityOptions = new[]
+        {
+            new ScalerQualityOption("Nearest (fastest, shimmer)", ScalerQuality.Nearest),
+            new ScalerQualityOption("Bilinear (recommended)", ScalerQuality.Bilinear),
+            new ScalerQualityOption("Bicubic (sharper text)", ScalerQuality.Bicubic),
+            new ScalerQualityOption("Lanczos (sharpest)", ScalerQuality.Lanczos),
+        };
+
+        QualityPresets = new[]
+        {
+            new QualityPreset("Readable",  TargetHeight: 1080, FrameRate: 30,  Bitrate:  8_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bicubic),
+            new QualityPreset("Smooth",    TargetHeight: 1080, FrameRate: 60,  Bitrate: 12_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bilinear),
+            new QualityPreset("High FPS",  TargetHeight: 1440, FrameRate: 120, Bitrate: 25_000_000, KeyframeIntervalSeconds: 1.0, Scaler: ScalerQuality.Bilinear),
+            new QualityPreset("4K Cinema", TargetHeight: 2160, FrameRate: 30,  Bitrate: 40_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bicubic),
+            new QualityPreset("Potato",    TargetHeight: 720,  FrameRate: 30,  Bitrate:  3_000_000, KeyframeIntervalSeconds: 2.0, Scaler: ScalerQuality.Bilinear),
+        };
+
         var catalog = App.VideoCodecCatalog ?? new VideoCodecCatalog();
         var available = new HashSet<VideoCodec>(catalog.AvailableCodecs);
         CodecOptions = new[]
@@ -72,34 +99,50 @@ public sealed partial class SettingsViewModel : ViewModelBase
             BuildCodecOption(VideoCodec.Av1, "AV1 (hardware, coming soon)", available),
         };
 
-        _selectedResolution = ResolutionPresets.FirstOrDefault(
-            p => p.Width == _settings.Video.MaxEncoderWidth && p.Height == _settings.Video.MaxEncoderHeight)
-            ?? ResolutionPresets[1];
-        _selectedFrameRate = FrameRatePresets.Contains(_settings.Video.TargetFrameRate)
-            ? _settings.Video.TargetFrameRate
-            : 30;
-        _selectedBitrate = BitratePresets.FirstOrDefault(b => b.Bitrate == _settings.Video.TargetBitrate)
-            ?? BitratePresets[2];
+        // Seed the UI fields from the persisted settings.
+        _selectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == _settings.Video.TargetHeight)
+            ?? TargetHeightOptions.First(o => o.Height == 1080);
+        _frameRate = Math.Clamp(_settings.Video.TargetFrameRate, 10, 240);
+        _bitrate = Math.Clamp(_settings.Video.TargetBitrate, MinBitrateBps, MaxBitrateBps);
+        _bitrateSliderValue = BpsToSliderValue(_bitrate);
+        _keyframeIntervalSeconds = Math.Clamp(_settings.Video.KeyframeIntervalSeconds, 0.5, 10.0);
+        _selectedScalerQuality = ScalerQualityOptions.FirstOrDefault(o => o.Quality == _settings.Video.ScalerQuality)
+            ?? ScalerQualityOptions[1];
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
     }
 
-    public IReadOnlyList<ResolutionPreset> ResolutionPresets { get; }
+    public IReadOnlyList<TargetHeightOption> TargetHeightOptions { get; }
 
-    public IReadOnlyList<int> FrameRatePresets { get; }
+    public IReadOnlyList<ScalerQualityOption> ScalerQualityOptions { get; }
 
-    public IReadOnlyList<BitratePreset> BitratePresets { get; }
+    public IReadOnlyList<QualityPreset> QualityPresets { get; }
 
     public IReadOnlyList<CodecOption> CodecOptions { get; }
 
     [ObservableProperty]
-    private ResolutionPreset _selectedResolution;
+    private TargetHeightOption _selectedTargetHeight;
 
     [ObservableProperty]
-    private int _selectedFrameRate;
+    private int _frameRate;
+
+    /// <summary>Real bitrate in bits per second. Derived from the log-scale
+    /// slider value in <see cref="BitrateSliderValue"/>.</summary>
+    [ObservableProperty]
+    private int _bitrate;
+
+    /// <summary>Slider position in [0.0, 1.0] mapped to [500 Kbps, 100 Mbps]
+    /// on a log scale. XAML binds to this; setter updates <see cref="Bitrate"/>
+    /// as a side effect so the display label and the persisted value stay in
+    /// sync.</summary>
+    [ObservableProperty]
+    private double _bitrateSliderValue;
 
     [ObservableProperty]
-    private BitratePreset _selectedBitrate;
+    private double _keyframeIntervalSeconds;
+
+    [ObservableProperty]
+    private ScalerQualityOption _selectedScalerQuality;
 
     [ObservableProperty]
     private CodecOption _selectedCodec;
@@ -107,23 +150,48 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private string? _statusMessage;
 
+    /// <summary>Human-readable form of <see cref="Bitrate"/> for the slider
+    /// label — e.g. "8.5 Mbps".</summary>
+    public string BitrateDisplay => FormatBitrate(Bitrate);
+
+    partial void OnBitrateSliderValueChanged(double value)
+    {
+        Bitrate = SliderValueToBps(value);
+    }
+
+    partial void OnBitrateChanged(int value)
+    {
+        OnPropertyChanged(nameof(BitrateDisplay));
+    }
+
+    [RelayCommand]
+    private void ApplyPreset(QualityPreset preset)
+    {
+        if (preset is null) return;
+
+        SelectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == preset.TargetHeight)
+            ?? SelectedTargetHeight;
+        FrameRate = preset.FrameRate;
+        BitrateSliderValue = BpsToSliderValue(preset.Bitrate);
+        KeyframeIntervalSeconds = preset.KeyframeIntervalSeconds;
+        SelectedScalerQuality = ScalerQualityOptions.FirstOrDefault(o => o.Quality == preset.Scaler)
+            ?? SelectedScalerQuality;
+    }
+
     [RelayCommand]
     private void Save()
     {
-        // Refuse to persist a codec the current host can't actually use.
-        // Without this guard, the ComboBox will happily write an unavailable
-        // codec into the settings file and the ctor filter on reload flips it
-        // back to VP8 silently — which reads as "my setting wasn't saved."
         if (!SelectedCodec.IsAvailable)
         {
             StatusMessage = $"{SelectedCodec.DisplayName} cannot be used on this machine.";
             return;
         }
 
-        _settings.Video.MaxEncoderWidth = SelectedResolution.Width;
-        _settings.Video.MaxEncoderHeight = SelectedResolution.Height;
-        _settings.Video.TargetFrameRate = SelectedFrameRate;
-        _settings.Video.TargetBitrate = SelectedBitrate.Bitrate;
+        _settings.Video.TargetHeight = SelectedTargetHeight.Height;
+        _settings.Video.TargetFrameRate = FrameRate;
+        _settings.Video.TargetBitrate = Bitrate;
+        _settings.Video.KeyframeIntervalSeconds = KeyframeIntervalSeconds;
+        _settings.Video.ScalerQuality = SelectedScalerQuality.Quality;
         _settings.Video.Codec = SelectedCodec.Codec;
 
         try
@@ -137,10 +205,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
             return;
         }
 
-        // If the caller (typically RoomViewModel.ShowSettings) registered a
-        // post-save hook, run it now so it can apply the change in place —
-        // e.g. rebuild the media graph with the newly-picked codec without
-        // forcing the user to leave and rejoin the room.
         try { _onSaved?.Invoke(); } catch { /* hook failures shouldn't break save */ }
     }
 
@@ -156,10 +220,49 @@ public sealed partial class SettingsViewModel : ViewModelBase
         var display = isAvailable ? label : $"{label} — not available";
         return new CodecOption(codec, display, isAvailable);
     }
+
+    // Log-scale mapping: slider 0.0 = MinBitrateBps, 1.0 = MaxBitrateBps, and
+    // each 0.1 step roughly doubles — so dragging feels linear regardless of
+    // where you are on the curve.
+    private static double BpsToSliderValue(int bps)
+    {
+        var clamped = Math.Clamp(bps, MinBitrateBps, MaxBitrateBps);
+        var lnMin = Math.Log(MinBitrateBps);
+        var lnMax = Math.Log(MaxBitrateBps);
+        return (Math.Log(clamped) - lnMin) / (lnMax - lnMin);
+    }
+
+    private static int SliderValueToBps(double value)
+    {
+        var t = Math.Clamp(value, 0.0, 1.0);
+        var lnMin = Math.Log(MinBitrateBps);
+        var lnMax = Math.Log(MaxBitrateBps);
+        var raw = Math.Exp(lnMin + t * (lnMax - lnMin));
+        // Round to the nearest 100 Kbps so the display doesn't wiggle by a
+        // few bps on each slider tick.
+        return (int)(Math.Round(raw / 100_000) * 100_000);
+    }
+
+    private static string FormatBitrate(int bps)
+    {
+        if (bps >= 1_000_000)
+        {
+            return $"{bps / 1_000_000.0:0.0} Mbps";
+        }
+        return $"{bps / 1_000.0:0} Kbps";
+    }
 }
 
-public sealed record ResolutionPreset(string DisplayName, int Width, int Height);
+public sealed record TargetHeightOption(string DisplayName, int Height);
 
-public sealed record BitratePreset(string DisplayName, int Bitrate);
+public sealed record ScalerQualityOption(string DisplayName, ScalerQuality Quality);
+
+public sealed record QualityPreset(
+    string Name,
+    int TargetHeight,
+    int FrameRate,
+    int Bitrate,
+    double KeyframeIntervalSeconds,
+    ScalerQuality Scaler);
 
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);

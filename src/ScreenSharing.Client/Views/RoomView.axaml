@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:ScreenSharing.Client.ViewModels"
+             xmlns:rendering="using:ScreenSharing.Client.Rendering"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="700"
@@ -55,11 +56,10 @@
                         BorderBrush="#40808080"
                         Background="#10000000">
                     <Grid>
-                        <Image Source="{Binding RemoteStream}"
-                               Stretch="Uniform"
-                               IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                        <rendering:VideoFrameControl Renderer="{Binding RemoteRendererView}"
+                                                     IsVisible="{Binding HasRemoteStream}" />
                         <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="6"
-                                    IsVisible="{Binding RemoteStream, Converter={x:Static ObjectConverters.IsNull}}">
+                                    IsVisible="{Binding !HasRemoteStream}">
                             <TextBlock Text="No incoming stream"
                                        FontSize="14" Opacity="0.6" HorizontalAlignment="Center" />
                             <TextBlock Text="{Binding MediaStatus}"

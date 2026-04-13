@@ -26,6 +26,16 @@ public sealed class WindowsCaptureSource : ICaptureSource
     private readonly D3D11DeviceManager _devices;
     private readonly Stopwatch _timer = Stopwatch.StartNew();
 
+    // Preview CPU readback is throttled to this rate so the encoder (which
+    // runs through TextureArrived) doesn't get capped to the preview rate.
+    // 30 fps is more than enough for a self-view of what you're sharing;
+    // raising it past 60 starts eating into the framepool's delivery budget
+    // because the readback blocks the WGC callback thread.
+    private const int PreviewReadbackFps = 30;
+    private readonly long _previewReadbackGapTicks =
+        TimeSpan.FromSeconds(1.0 / PreviewReadbackFps).Ticks;
+    private long _lastPreviewReadbackTicks = long.MinValue;
+
     // Serializes the free-threaded framepool callback against StopAsync /
     // DisposeAsync. Without it, a frame callback can be running CopyResource +
     // Map on the D3D11 Context when the UI thread disposes the framepool and
@@ -53,6 +63,8 @@ public sealed class WindowsCaptureSource : ICaptureSource
 
     public event FrameArrivedHandler? FrameArrived;
 
+    public event TextureArrivedHandler? TextureArrived;
+
     public event Action? Closed;
 
     public Task StartAsync()
@@ -74,15 +86,62 @@ public sealed class WindowsCaptureSource : ICaptureSource
         // in that mode only the first FrameArrived ever fires. CreateFreeThreaded
         // dispatches frames on a thread-pool thread instead, which is the right
         // choice for a non-XAML desktop app.
+        // numberOfBuffers: more buffers = more headroom for callback jitter
+        // before WGC has to stall or drop a frame. 2 (the docs' minimum
+        // example) was capping us at ~48 fps even when the callback took
+        // <5 ms, because a single long callback (preview readback at 4K,
+        // encoder warmup, GC pause) is enough to fill both slots. 6 leaves
+        // room for ~40 ms of jitter at 144 Hz.
         _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
             _devices.WinRTDevice,
             DirectXPixelFormat.B8G8R8A8UIntNormalized,
-            numberOfBuffers: 2,
+            numberOfBuffers: 6,
             size: size);
         _framePool.FrameArrived += OnFrameArrived;
 
         _session = _framePool.CreateCaptureSession(_item);
         try { _session.IsCursorCaptureEnabled = true; } catch { }
+
+        // Hide the yellow capture border on Windows 11+. Not just
+        // cosmetic — the border adds a DWM pass on every frame which
+        // bounds our capture rate.
+        try
+        {
+            if (GraphicsCaptureSession.IsSupported() &&
+                global::Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
+                    "Windows.Graphics.Capture.GraphicsCaptureSession", "IsBorderRequired"))
+            {
+                _session.IsBorderRequired = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            ScreenSharing.Client.Diagnostics.DebugLog.Write($"[capture] IsBorderRequired set failed: {ex.Message}");
+        }
+
+        // MinUpdateInterval controls the capture rate ceiling. Default
+        // behavior on Windows 11 paces captured windows at a fraction of
+        // the display refresh rate (observed ~48 Hz on a 144 Hz display).
+        // Setting it to zero unlocks full-rate delivery. Requires Win11
+        // build 22621+ (GraphicsCaptureSession5 contract).
+        try
+        {
+            if (global::Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
+                    "Windows.Graphics.Capture.GraphicsCaptureSession", "MinUpdateInterval"))
+            {
+                _session.MinUpdateInterval = TimeSpan.Zero;
+                ScreenSharing.Client.Diagnostics.DebugLog.Write("[capture] MinUpdateInterval=0 (full-rate delivery)");
+            }
+            else
+            {
+                ScreenSharing.Client.Diagnostics.DebugLog.Write("[capture] MinUpdateInterval not available on this Windows build");
+            }
+        }
+        catch (Exception ex)
+        {
+            ScreenSharing.Client.Diagnostics.DebugLog.Write($"[capture] MinUpdateInterval set failed: {ex.Message}");
+        }
+
         _session.StartCapture();
 
         return Task.CompletedTask;
@@ -167,7 +226,7 @@ public sealed class WindowsCaptureSource : ICaptureSource
                 sender.Recreate(
                     _devices.WinRTDevice,
                     DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                    numberOfBuffers: 2,
+                    numberOfBuffers: 6,
                     size: new SizeInt32 { Width = width, Height = height });
             }
             catch (ObjectDisposedException) { /* raced with Dispose */ }
@@ -175,10 +234,59 @@ public sealed class WindowsCaptureSource : ICaptureSource
 
         var texPtr = Direct3D11Interop.GetD3D11Texture2DFromSurface(frame.Surface);
         if (texPtr == IntPtr.Zero) return;
-        using (var sourceTexture = new ID3D11Texture2D(texPtr))
+        using var sourceTexture = new ID3D11Texture2D(texPtr);
+
+        var timestamp = _timer.Elapsed;
+
+        // Fast path first: any subscriber that can consume a GPU texture
+        // (the hardware encoder via the shared device) gets it before we
+        // spend wall time on the CPU readback. The handler is expected to
+        // be synchronous — it must finish with the texture before we
+        // return, because the underlying IDirect3DSurface is released when
+        // `frame` is disposed at the end of this callback.
+        //
+        // Refcount contract: our `sourceTexture` wrapper owns one Release
+        // on scope exit (matching the +1 from GetD3D11Texture2DFromSurface).
+        // The handler wraps the pointer itself and disposes its own wrapper,
+        // which would drop the refcount to zero prematurely and break our
+        // Map/CopyResource below. We AddRef once before dispatch so the
+        // handler's Release balances out.
+        var textureHandler = TextureArrived;
+        if (textureHandler is not null)
         {
-            _devices.Context.CopyResource(_stagingTexture!, sourceTexture);
+            sourceTexture.AddRef();
+            try
+            {
+                textureHandler(texPtr, width, height, timestamp);
+            }
+            catch (Exception ex)
+            {
+                ScreenSharing.Client.Diagnostics.DebugLog.Write($"[capture] TextureArrived handler threw: {ex.Message}");
+            }
         }
+
+        // CPU readback for the local preview renderer. Two throttles:
+        //   1. Skip entirely when there's no CPU subscriber (encoder on
+        //      the texture path, no preview wired) — 5–8 ms per frame of
+        //      GPU→staging→Map→memcpy disappears.
+        //   2. When there IS a preview subscriber, rate-limit the readback
+        //      to PreviewReadbackFps so we don't cap the framepool's
+        //      delivery rate to the preview rate. The texture path fired
+        //      above is not affected and keeps running at full rate.
+        if (FrameArrived is null)
+        {
+            return;
+        }
+
+        var nowTicks = timestamp.Ticks;
+        if (_lastPreviewReadbackTicks != long.MinValue &&
+            nowTicks - _lastPreviewReadbackTicks < _previewReadbackGapTicks)
+        {
+            return;
+        }
+        _lastPreviewReadbackTicks = nowTicks;
+
+        _devices.Context.CopyResource(_stagingTexture!, sourceTexture);
 
         var mapped = _devices.Context.Map(_stagingTexture!, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         try
@@ -212,7 +320,7 @@ public sealed class WindowsCaptureSource : ICaptureSource
                 height,
                 rowBytes,
                 CaptureFramePixelFormat.Bgra8,
-                _timer.Elapsed);
+                timestamp);
             FrameArrived?.Invoke(in data);
         }
         finally

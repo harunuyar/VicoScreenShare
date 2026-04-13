@@ -6,8 +6,10 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Media.Codecs;
+using ScreenSharing.Client.Windows.Direct3D;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
+using Vortice.DXGI;
 using Vortice.MediaFoundation;
 using IVideoEncoder = ScreenSharing.Client.Media.Codecs.IVideoEncoder;
 
@@ -48,6 +50,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly IMFMediaEventGenerator? _events;
     private readonly ID3D11Device? _d3dDevice;
     private readonly IMFDXGIDeviceManager? _dxgiManager;
+    private readonly bool _ownsD3dDevice;
+    private D3D11VideoScaler? _textureScaler;
+    private ID3D11Texture2D? _encoderInputTexture;
+    private int _textureScalerSrcWidth;
+    private int _textureScalerSrcHeight;
     private readonly bool _inputIsBgra; // true = ARGB32, false = NV12
     private readonly int _inputBufferSize;
     private readonly Thread? _pumpThread;
@@ -64,19 +71,40 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private bool _disposed;
 
     public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate)
+        : this(width, height, fps, bitrate, externalDevice: null)
+    {
+    }
+
+    /// <summary>
+    /// Build the encoder on top of an externally-owned D3D11 device. Used by
+    /// the capture path so the framepool, the GPU scaler and the encoder all
+    /// live on one device — direct CopyResource and VideoProcessorBlt work,
+    /// no shared-handle dance. The caller retains ownership; Dispose leaves
+    /// the device alone in this mode.
+    /// </summary>
+    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, ID3D11Device? externalDevice)
     {
         _width = width;
         _height = height;
         _fps = Math.Max(1, fps);
         _bitrate = Math.Max(500_000, bitrate);
 
-        // Create a D3D11 device and DXGI device manager for the encoder MFT
-        // BEFORE we hand it any media types. NVENC's MFT routes its async
-        // event handling and (in Phase 4) its zero-copy texture ingest
-        // through this manager — even when we still feed system-memory NV12
-        // samples, attaching the manager is required to enable async mode
-        // on most modern hardware encoder builds.
-        (_d3dDevice, _dxgiManager) = TryCreateD3DManager();
+        // Create (or wrap) a D3D11 device and DXGI device manager for the
+        // encoder MFT BEFORE we hand it any media types. NVENC's MFT routes
+        // its async event handling and its zero-copy texture ingest through
+        // this manager — attaching the manager is required to enable async
+        // mode on most modern hardware encoder builds.
+        if (externalDevice is not null)
+        {
+            _d3dDevice = externalDevice;
+            _dxgiManager = TryWrapExternalDevice(externalDevice);
+            _ownsD3dDevice = false;
+        }
+        else
+        {
+            (_d3dDevice, _dxgiManager) = TryCreateD3DManager();
+            _ownsD3dDevice = true;
+        }
 
         var (transform, isAsync, pickedLabel, inputIsBgra) = CreateEncoder(width, height, _fps, _bitrate, _dxgiManager);
         _transform = transform;
@@ -118,12 +146,89 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     public int Height => _height;
 
     /// <summary>
+    /// True when the encoder was built on a hardware async MFT with a
+    /// D3D11 device attached AND negotiated BGRA input. In that mode the
+    /// <see cref="EncodeTexture(IntPtr,int,int)"/> path runs end-to-end on
+    /// the GPU: the D3D11 Video Processor scales the caller's texture onto
+    /// our internal input texture, and NVENC color-converts BGRA→NV12
+    /// internally. No CPU readback, no per-frame allocation.
+    /// </summary>
+    public bool SupportsTextureInput => _d3dDevice is not null && _inputIsBgra;
+
+    /// <summary>
     /// The internal D3D11 device, exposed so callers (like the test harness
     /// or future zero-copy capture path) can allocate textures on the same
     /// device the encoder is using. Null when no GPU manager is attached
     /// (software encoder fallback).
     /// </summary>
     public ID3D11Device? D3D11Device => _d3dDevice;
+
+    /// <summary>
+    /// Encode a caller-owned BGRA texture, scaling it on the GPU if the
+    /// source dimensions differ from this encoder's target dimensions.
+    /// The caller is expected to have bumped the refcount once before
+    /// invoking (the capture source does this inside its TextureArrived
+    /// dispatch); our local wrapper <c>using var</c> disposes it to balance.
+    /// </summary>
+    public byte[]? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight)
+    {
+        if (_disposed || _d3dDevice is null || !_inputIsBgra) return null;
+        if (nativeTexture == IntPtr.Zero) return null;
+
+        using var sourceTexture = new ID3D11Texture2D(nativeTexture);
+
+        try
+        {
+            EnsureTextureScaler(sourceWidth, sourceHeight);
+            _textureScaler!.Process(sourceTexture, _encoderInputTexture!);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] texture scaler threw: {ex.Message}");
+            return null;
+        }
+
+        return EncodeTexture(_encoderInputTexture!);
+    }
+
+    /// <summary>
+    /// Lazily build (or rebuild) the D3D11VideoScaler + encoder input
+    /// texture when the source dimensions change. On a stable stream
+    /// this runs exactly once for the lifetime of the encoder.
+    /// </summary>
+    private void EnsureTextureScaler(int srcWidth, int srcHeight)
+    {
+        if (_textureScaler is not null
+            && _textureScalerSrcWidth == srcWidth
+            && _textureScalerSrcHeight == srcHeight
+            && _encoderInputTexture is not null)
+        {
+            return;
+        }
+
+        _textureScaler?.Dispose();
+        _encoderInputTexture?.Dispose();
+
+        _textureScaler = new D3D11VideoScaler(_d3dDevice!, srcWidth, srcHeight, _width, _height);
+        _textureScalerSrcWidth = srcWidth;
+        _textureScalerSrcHeight = srcHeight;
+
+        var desc = new Texture2DDescription
+        {
+            Width = (uint)_width,
+            Height = (uint)_height,
+            ArraySize = 1,
+            MipLevels = 1,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.None,
+        };
+        _encoderInputTexture = _d3dDevice!.CreateTexture2D(desc);
+        DebugLog.Write($"[mf] texture pipeline built {srcWidth}x{srcHeight} -> {_width}x{_height}");
+    }
 
     /// <summary>
     /// Encode a D3D11 texture directly. Wraps the texture in a DXGI
@@ -631,8 +736,16 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         _pumpThread?.Join(TimeSpan.FromMilliseconds(500));
         try { _events?.Dispose(); } catch { }
         try { _transform.Dispose(); } catch { }
+        try { _textureScaler?.Dispose(); } catch { }
+        try { _encoderInputTexture?.Dispose(); } catch { }
         try { _dxgiManager?.Dispose(); } catch { }
-        try { _d3dDevice?.Dispose(); } catch { }
+        // Only dispose the D3D device when we created it ourselves. External
+        // devices are owned by the capture pipeline and must outlive this
+        // encoder.
+        if (_ownsD3dDevice)
+        {
+            try { _d3dDevice?.Dispose(); } catch { }
+        }
         try { _pumpCts.Dispose(); } catch { }
         try { _needInputSignal.Dispose(); } catch { }
     }
@@ -672,6 +785,32 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     /// mode — the encoder still works, it just won't get the GPU fast path
     /// in Phase 2+. Failures are logged but not fatal.
     /// </summary>
+    /// <summary>
+    /// Wrap a caller-owned D3D11 device in an IMFDXGIDeviceManager without
+    /// taking ownership. Used by the capture path so the WGC framepool, the
+    /// GPU scaler and the encoder all share one device.
+    /// </summary>
+    private static IMFDXGIDeviceManager? TryWrapExternalDevice(ID3D11Device device)
+    {
+        try
+        {
+            using (var multithread = device.QueryInterfaceOrNull<ID3D11Multithread>())
+            {
+                multithread?.SetMultithreadProtected(true);
+            }
+
+            var manager = MediaFactory.MFCreateDXGIDeviceManager();
+            manager.ResetDevice(device);
+            DebugLog.Write("[mf] wrapped external D3D11 device in DXGI device manager");
+            return manager;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] TryWrapExternalDevice threw: {ex.Message}; encoder will run without GPU manager");
+            return null;
+        }
+    }
+
     private static (ID3D11Device?, IMFDXGIDeviceManager?) TryCreateD3DManager()
     {
         try

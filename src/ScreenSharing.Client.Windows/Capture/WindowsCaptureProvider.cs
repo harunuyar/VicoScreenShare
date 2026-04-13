@@ -15,13 +15,35 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
 {
     private readonly Func<IntPtr> _hwndProvider;
     private readonly D3D11DeviceManager _devices;
+    private readonly bool _ownsDevices;
     private bool _disposed;
 
     public WindowsCaptureProvider(Func<IntPtr> hwndProvider)
     {
         _hwndProvider = hwndProvider;
         _devices = new D3D11DeviceManager();
+        _ownsDevices = true;
     }
+
+    /// <summary>
+    /// Constructor used when the D3D11 device is created externally so both
+    /// the capture source and the encoder can share it. The caller retains
+    /// ownership — Dispose leaves the device alone in this mode.
+    /// </summary>
+    public WindowsCaptureProvider(Func<IntPtr> hwndProvider, D3D11DeviceManager sharedDevices)
+    {
+        _hwndProvider = hwndProvider;
+        _devices = sharedDevices;
+        _ownsDevices = false;
+    }
+
+    /// <summary>
+    /// The underlying device manager, exposed so the encoder factory built
+    /// in startup wiring can reuse the same device for zero-copy texture
+    /// handoff. Null until <see cref="PickSourceAsync"/> has been called at
+    /// least once (which triggers <see cref="D3D11DeviceManager.Initialize"/>).
+    /// </summary>
+    public D3D11DeviceManager Devices => _devices;
 
     public async Task<ICaptureSource?> PickSourceAsync()
     {
@@ -48,6 +70,9 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _devices.Dispose();
+        if (_ownsDevices)
+        {
+            _devices.Dispose();
+        }
     }
 }

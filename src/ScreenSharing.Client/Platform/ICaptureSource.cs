@@ -11,6 +11,18 @@ namespace ScreenSharing.Client.Platform;
 public delegate void FrameArrivedHandler(in CaptureFrameData frame);
 
 /// <summary>
+/// Handler for textures produced directly by a GPU-backed capture backend.
+/// The <paramref name="nativeTexture"/> is an <c>ID3D11Texture2D</c> pointer
+/// on the shared capture device; callers that can consume it (hardware
+/// encoder with a matching DXGI device manager) avoid the CPU readback step
+/// that <see cref="FrameArrivedHandler"/> incurs. Callers that cannot
+/// consume textures should simply not subscribe — the fallback CPU path
+/// still fires via <see cref="ICaptureSource.FrameArrived"/>. The texture
+/// is valid only for the duration of the call.
+/// </summary>
+public delegate void TextureArrivedHandler(IntPtr nativeTexture, int width, int height, TimeSpan timestamp);
+
+/// <summary>
 /// A live capture of a single source (window or monitor). Produced by
 /// <see cref="ICaptureProvider.PickSourceAsync"/>. Callers own the instance and
 /// must dispose it when they are finished capturing.
@@ -25,6 +37,14 @@ public interface ICaptureSource : IAsyncDisposable
     /// data they need before the handler returns.
     /// </summary>
     event FrameArrivedHandler? FrameArrived;
+
+    /// <summary>
+    /// Raised when the backend produces a GPU texture that can be consumed
+    /// directly by a hardware encoder on the same D3D11 device. Only fires
+    /// on backends that run the capture pipeline on GPU. The texture
+    /// pointer is valid only for the duration of the call.
+    /// </summary>
+    event TextureArrivedHandler? TextureArrived;
 
     /// <summary>
     /// Raised when the backend loses access to the source (the shared window was

@@ -68,6 +68,8 @@ public sealed partial class RoomViewModel : ViewModelBase
     private long _statsPrevSenderBytes;
     private long _statsPrevReceiverFrames;
     private long _statsPrevReceiverBytes;
+    private long _statsPrevRenderInput;
+    private long _statsPrevRenderPainted;
     private DateTime _statsPrevTickUtc = DateTime.MinValue;
 
     public RoomViewModel(
@@ -170,7 +172,17 @@ public sealed partial class RoomViewModel : ViewModelBase
     private bool _isSharing;
 
     [ObservableProperty]
-    private Bitmap? _remoteStream;
+    private bool _hasRemoteStream;
+
+    /// <summary>
+    /// Exposed to the view so <see cref="Rendering.VideoFrameControl"/> can
+    /// subscribe directly to the renderer's FrameRendered event and paint
+    /// the current bitmap from inside OnRender. Bypasses the
+    /// bitmap → property → binding → layout → render chain that was
+    /// capping us at ~30 paint fps on 1440p.
+    /// </summary>
+    [ObservableProperty]
+    private Rendering.WriteableBitmapRenderer? _remoteRendererView;
 
     [ObservableProperty]
     private Bitmap? _localPreview;
@@ -219,6 +231,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             _webRtc = session;
             _remoteRenderer = renderer;
             _streamReceiver = receiver;
+            RemoteRendererView = renderer;
             MediaStatus = "Waiting for a streamer...";
         }
         catch (Exception ex)
@@ -257,17 +270,21 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         if (_remoteRenderer is null) return;
         _lastRemoteFrameUtc = DateTime.UtcNow;
-        var next = _remoteRenderer.CurrentBitmap;
+        // The bitmap itself is painted by VideoFrameControl directly on its
+        // own OnRender — we only need to flip the visibility flag once when
+        // the first frame arrives. No per-frame property churn, no
+        // per-frame binding notification, no Image.Source reassignment.
+        if (HasRemoteStream && MediaStatus is null) return;
         if (Dispatcher.UIThread.CheckAccess())
         {
-            RemoteStream = next;
+            HasRemoteStream = true;
             MediaStatus = null;
         }
         else
         {
             Dispatcher.UIThread.Post(() =>
             {
-                RemoteStream = next;
+                HasRemoteStream = true;
                 MediaStatus = null;
             });
         }
@@ -430,6 +447,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_remoteRenderer is not null)
         {
             _remoteRenderer.FrameRendered -= OnRemoteFrameRendered;
+            RemoteRendererView = null;
             try { _remoteRenderer.Dispose(); } catch { }
             _remoteRenderer = null;
         }
@@ -622,7 +640,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         _currentlyStreamingPeerId = null;
         _remoteRenderer?.Clear();
-        RemoteStream = null;
+        HasRemoteStream = false;
         MediaStatus = statusMessage;
         StopStaleFrameTimer();
     }
@@ -646,7 +664,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void OnStaleFrameTick(object? sender, EventArgs e)
     {
         if (_currentlyStreamingPeerId is null) return;
-        if (RemoteStream is null) return;
+        if (!HasRemoteStream) return;
         if (DateTime.UtcNow - _lastRemoteFrameUtc < StaleFrameTimeout) return;
 
         // Publisher went dark without a clean StreamEnded — wipe the tile so
@@ -727,12 +745,37 @@ public sealed partial class RoomViewModel : ViewModelBase
         var fps = deltaFrames / elapsedSeconds;
         var mbps = deltaBytes * 8.0 / elapsedSeconds / 1_000_000.0;
 
+        // Renderer-side diagnostics: "decoder produced 120 fps" doesn't
+        // mean "you saw 120 fps on screen". We measure the UI-thread
+        // pixel-copy rate separately and surface the gap — if paint_fps
+        // is well below fps, the WriteableBitmap path (not the decoder
+        // or the network) is the bottleneck.
+        var renderLine = "";
+        var renderer = _remoteRenderer;
+        if (renderer is not null)
+        {
+            var currentInput = renderer.InputFrameCount;
+            var currentPainted = renderer.PaintedFrameCount;
+            var deltaInput = currentInput - _statsPrevRenderInput;
+            var deltaPainted = currentPainted - _statsPrevRenderPainted;
+            _statsPrevRenderInput = currentInput;
+            _statsPrevRenderPainted = currentPainted;
+
+            var inputFps = deltaInput / elapsedSeconds;
+            var paintFps = deltaPainted / elapsedSeconds;
+            var droppedFps = Math.Max(0, inputFps - paintFps);
+            renderLine =
+                $"\npaint:  {paintFps:F1} fps ({renderer.LastPaintMs:F1} ms/frame)" +
+                $"\ndropped:{droppedFps:F1} fps (UI thread behind)";
+        }
+
         return
             $"codec:  {receiver.Codec}\n" +
             $"size:   {receiver.LastWidth}x{receiver.LastHeight}\n" +
             $"fps:    {fps:F1}\n" +
             $"rate:   {mbps:F2} Mbps\n" +
-            $"frames: {receiver.FramesDecoded}";
+            $"frames: {receiver.FramesDecoded}" +
+            renderLine;
     }
 
     private void OnServerError(ErrorCode code, string message)
@@ -768,6 +811,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             _remoteRenderer.Detach(_streamReceiver);
             _remoteRenderer.FrameRendered -= OnRemoteFrameRendered;
+            RemoteRendererView = null;
             _remoteRenderer.Dispose();
             _remoteRenderer = null;
         }

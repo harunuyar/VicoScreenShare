@@ -3,11 +3,15 @@ using ScreenSharing.Client.Media.Codecs;
 namespace ScreenSharing.Client.Media;
 
 /// <summary>
-/// User-configurable video pipeline settings. Drives the
-/// <see cref="CaptureStreamer"/> resolution cap, the frame-rate throttle,
-/// the codec choice, and (future) the encoder bitrate target. Persisted to
-/// disk through <see cref="Services.SettingsStore"/> so the user's
-/// preferences survive across app launches.
+/// User-configurable video pipeline settings. Drives the encoder's target
+/// resolution, frame rate, bitrate, keyframe interval, scaler quality and
+/// codec. Persisted to disk through <see cref="Services.SettingsStore"/> so
+/// the user's preferences survive across app launches.
+///
+/// The resolution model is "pick a target height, derive width from the
+/// source aspect ratio" so the output never distorts the captured source.
+/// <see cref="TargetHeight"/> = 0 means "use the source's own height" — i.e.
+/// no downscaling.
 /// </summary>
 public sealed class VideoSettings
 {
@@ -18,30 +22,57 @@ public sealed class VideoSettings
     /// supported on the GPU. Read at room-join time and not re-applied during
     /// an active session — changes take effect the next time you join a room.
     /// </summary>
-    public VideoCodec Codec { get; set; } = VideoCodec.Vp8;
+    public VideoCodec Codec { get; set; } = VideoCodec.H264;
 
     /// <summary>
-    /// Largest width the encoder will accept. Captures bigger than this are
-    /// aspect-preserved downscaled via <see cref="BgraDownscale.FitWithin"/>
-    /// before encoding.
+    /// Target encoder height in pixels. Width is derived from the source
+    /// aspect ratio at runtime so the output never distorts. 0 means "match
+    /// the source height" (no downscale).
     /// </summary>
-    public int MaxEncoderWidth { get; set; } = 1280;
-
-    /// <summary>Same as <see cref="MaxEncoderWidth"/> for the height axis.</summary>
-    public int MaxEncoderHeight { get; set; } = 720;
+    public int TargetHeight { get; set; } = 1080;
 
     /// <summary>
     /// Target frame rate in frames per second. CaptureStreamer drops any frame
     /// whose timestamp is closer than <c>1 / TargetFrameRate</c> seconds to the
-    /// previously encoded frame.
+    /// previously encoded frame. Upper bound is 240 so a 240Hz display can be
+    /// captured at native rate.
     /// </summary>
-    public int TargetFrameRate { get; set; } = 30;
+    public int TargetFrameRate { get; set; } = 60;
 
     /// <summary>
     /// Target encoder bitrate in bits per second. Hardware encoders treat
     /// this as an average / target; the rate controller may spike above it
-    /// on keyframes. 6 Mbps is a reasonable 720p default; 1080p60 should
-    /// usually be 10-15 Mbps, 1440p60 15-25 Mbps.
+    /// on keyframes.
     /// </summary>
-    public int TargetBitrate { get; set; } = 6_000_000;
+    public int TargetBitrate { get; set; } = 12_000_000;
+
+    /// <summary>
+    /// Keyframe (GOP) interval in seconds. Shorter = faster new-viewer
+    /// join-in but more bits spent on keyframes. 2s is a reasonable default
+    /// for screen sharing where movement is bursty.
+    /// </summary>
+    public double KeyframeIntervalSeconds { get; set; } = 2.0;
+
+    /// <summary>
+    /// Scaling filter used when <see cref="TargetHeight"/> is smaller than
+    /// the source. Nearest is fastest but produces shimmering/stairstepped
+    /// text. Bilinear is the default — cheap on GPU, good enough for most
+    /// content. Bicubic and Lanczos give sharper text at a slightly higher
+    /// GPU cost; their availability depends on the Video Processor caps of
+    /// the host GPU, with automatic fallback to bilinear.
+    /// </summary>
+    public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
+}
+
+/// <summary>
+/// Downscale filter quality. Ordered cheapest-to-sharpest. The D3D11 Video
+/// Processor picks the best available filter on the host GPU and falls
+/// back to <see cref="Bilinear"/> if the requested mode is unsupported.
+/// </summary>
+public enum ScalerQuality
+{
+    Nearest = 0,
+    Bilinear = 1,
+    Bicubic = 2,
+    Lanczos = 3,
 }

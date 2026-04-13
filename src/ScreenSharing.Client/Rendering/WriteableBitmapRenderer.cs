@@ -22,8 +22,13 @@ namespace ScreenSharing.Client.Rendering;
 public sealed class WriteableBitmapRenderer : IDisposable
 {
     private readonly object _lock = new();
-    private readonly WriteableBitmap?[] _pool = new WriteableBitmap?[2];
-    private int _nextSlot;
+    // Single bitmap (was a 2-slot ping-pong). The ping-pong only existed
+    // to work around Image.Source="{Binding …}" not noticing in-place
+    // pixel updates — with VideoFrameControl reading CurrentBitmap
+    // directly in its OnRender, the reference never needs to change.
+    // Keeping one bitmap halves the allocated pixel footprint and removes
+    // the branch that picks a slot on each frame.
+    private WriteableBitmap? _bitmap;
     private WriteableBitmap? _current;
 
     private byte[]? _staged;
@@ -32,6 +37,29 @@ public sealed class WriteableBitmapRenderer : IDisposable
     private int _stagedStride;
     private bool _pendingFrame;
     private bool _disposed;
+
+    // Diagnostics for "decoder says 120 fps but it doesn't feel like 120 fps".
+    // The stats overlay reads these to show "input fps / paint fps / dropped"
+    // so we can tell whether the decoder is the cap or the UI thread is.
+    //
+    //   InputFrameCount  — every frame the decoder (or capture) handed us.
+    //   PaintedFrameCount— every frame that actually made it to the UI-thread
+    //                      pixel copy (WriteableBitmap.Lock + memcpy). Frames
+    //                      coalesced by the _pendingFrame flag never count
+    //                      here, so InputFrameCount - PaintedFrameCount is the
+    //                      number of frames dropped on the floor because the
+    //                      UI thread couldn't keep up.
+    //   LastPaintMs      — elapsed wall-clock time the most recent paint spent
+    //                      inside Lock+memcpy+Unlock. At 1080p the copy is
+    //                      ~8 MB; if this creeps above the frame gap, the UI
+    //                      thread becomes the bottleneck.
+    public long InputFrameCount { get; private set; }
+
+    public long PaintedFrameCount { get; private set; }
+
+    public long DroppedFrameCount => InputFrameCount - PaintedFrameCount;
+
+    public double LastPaintMs { get; private set; }
 
     public event Action? FrameRendered;
 
@@ -68,6 +96,7 @@ public sealed class WriteableBitmapRenderer : IDisposable
 
         lock (_lock)
         {
+            InputFrameCount++;
             var required = frame.Height * frame.StrideBytes;
             if (_staged is null || _staged.Length < required)
             {
@@ -78,6 +107,11 @@ public sealed class WriteableBitmapRenderer : IDisposable
             _stagedHeight = frame.Height;
             _stagedStride = frame.StrideBytes;
 
+            // Coalesce: if a previous frame is already queued for the UI
+            // thread, overwrite _staged but don't queue a second Post. This
+            // is intentional — we never want to fall behind — but it means
+            // bursty input to a slow UI loses frames. DroppedFrameCount
+            // makes that loss visible in the stats overlay.
             if (_pendingFrame) return;
             _pendingFrame = true;
         }
@@ -88,6 +122,7 @@ public sealed class WriteableBitmapRenderer : IDisposable
     private void PushStagedFrame()
     {
         WriteableBitmap? rendered;
+        var paintStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Everything below runs under the same lock the capture thread uses to
         // write _staged so a second FrameArrived cannot overwrite our source
@@ -105,10 +140,7 @@ public sealed class WriteableBitmapRenderer : IDisposable
             var stride = _stagedStride;
             var pixels = _staged;
 
-            var slot = _nextSlot;
-            _nextSlot = 1 - _nextSlot;
-
-            var target = _pool[slot];
+            var target = _bitmap;
             if (target is null ||
                 target.PixelSize.Width != width ||
                 target.PixelSize.Height != height)
@@ -119,7 +151,7 @@ public sealed class WriteableBitmapRenderer : IDisposable
                     new Vector(96, 96),
                     PixelFormat.Bgra8888,
                     AlphaFormat.Premul);
-                _pool[slot] = target;
+                _bitmap = target;
             }
 
             using (var fb = target.Lock())
@@ -138,7 +170,11 @@ public sealed class WriteableBitmapRenderer : IDisposable
 
             _current = target;
             rendered = target;
+            PaintedFrameCount++;
         }
+
+        var paintEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+        LastPaintMs = (paintEnd - paintStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
         if (rendered is not null)
         {
@@ -150,10 +186,8 @@ public sealed class WriteableBitmapRenderer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _pool[0]?.Dispose();
-        _pool[1]?.Dispose();
-        _pool[0] = null;
-        _pool[1] = null;
+        _bitmap?.Dispose();
+        _bitmap = null;
         _current = null;
         _staged = null;
     }

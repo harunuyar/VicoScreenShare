@@ -26,7 +26,12 @@ public sealed class D3D11DeviceManager : IDisposable
     {
         if (_device is not null) return;
 
-        var flags = DeviceCreationFlags.BgraSupport;
+        // BgraSupport: WGC framepool + staging textures are BGRA.
+        // VideoSupport: lets the device run a D3D11 Video Processor for
+        // GPU-side scaling AND lets the Media Foundation hardware H.264
+        // encoder accept SET_D3D_MANAGER pointing at this device so the
+        // encoder can ingest texture samples with no CPU roundtrip.
+        var flags = DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport;
         var featureLevels = new[]
         {
             FeatureLevel.Level_11_1,
@@ -44,6 +49,14 @@ public sealed class D3D11DeviceManager : IDisposable
             out _,
             out _context);
         hr.CheckError();
+
+        // Multithread protection: framepool callbacks and MF encoder pump
+        // threads both hit this device's immediate context. Without this the
+        // two can race on ProcessOutput / CopyResource and crash.
+        using (var mt = _device!.QueryInterfaceOrNull<ID3D11Multithread>())
+        {
+            mt?.SetMultithreadProtected(true);
+        }
 
         using var dxgiDevice = _device!.QueryInterface<IDXGIDevice>();
         _winrtDevice = Direct3D11Interop.CreateDirect3DDeviceFromDxgi(dxgiDevice.NativePointer);

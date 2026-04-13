@@ -125,6 +125,7 @@ public sealed class LoopbackMediaE2ETests
     {
         public string DisplayName => "fake";
         public event FrameArrivedHandler? FrameArrived;
+        public event TextureArrivedHandler? TextureArrived { add { } remove { } }
 #pragma warning disable CS0067 // ICaptureSource contract requires this event even though the fake never closes.
         public event Action? Closed;
 #pragma warning restore CS0067

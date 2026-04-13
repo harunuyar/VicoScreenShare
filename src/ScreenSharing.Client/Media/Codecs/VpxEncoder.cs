@@ -31,6 +31,11 @@ internal sealed class VpxEncoder : IVideoEncoder
 
     public int Height => _height;
 
+    public bool SupportsTextureInput => false;
+
+    public byte[]? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight) =>
+        throw new NotSupportedException("libvpx VP8 is a CPU-only encoder and has no texture ingest path.");
+
     public byte[]? EncodeBgra(byte[] bgra, int stride)
     {
         if (_disposed) return null;

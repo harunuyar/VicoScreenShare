@@ -95,32 +95,46 @@ public sealed class SettingsStore
     private sealed class PersistedSettings
     {
         public string? ServerUri { get; set; }
-        public int MaxEncoderWidth { get; set; } = 1280;
-        public int MaxEncoderHeight { get; set; } = 720;
-        public int TargetFrameRate { get; set; } = 30;
-        public int TargetBitrate { get; set; } = 6_000_000;
-        public VideoCodec Codec { get; set; } = VideoCodec.Vp8;
+
+        // New schema fields.
+        public int? TargetHeight { get; set; }
+        public int TargetFrameRate { get; set; } = 60;
+        public int TargetBitrate { get; set; } = 12_000_000;
+        public double KeyframeIntervalSeconds { get; set; } = 2.0;
+        public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
+        public VideoCodec Codec { get; set; } = VideoCodec.H264;
+
+        // Legacy fields kept so existing settings.json files migrate instead
+        // of silently dropping back to defaults. Only read on load — never
+        // written back. MaxEncoderHeight becomes the new TargetHeight;
+        // MaxEncoderWidth is ignored because width is now derived from the
+        // source aspect ratio at runtime.
+        public int? MaxEncoderWidth { get; set; }
+        public int? MaxEncoderHeight { get; set; }
 
         public static PersistedSettings From(ClientSettings source) => new()
         {
             ServerUri = source.ServerUri.ToString(),
-            MaxEncoderWidth = source.Video.MaxEncoderWidth,
-            MaxEncoderHeight = source.Video.MaxEncoderHeight,
+            TargetHeight = source.Video.TargetHeight,
             TargetFrameRate = source.Video.TargetFrameRate,
             TargetBitrate = source.Video.TargetBitrate,
+            KeyframeIntervalSeconds = source.Video.KeyframeIntervalSeconds,
+            ScalerQuality = source.Video.ScalerQuality,
             Codec = source.Video.Codec,
         };
 
         public ClientSettings ToClientSettings()
         {
+            var height = TargetHeight ?? MaxEncoderHeight ?? 1080;
             var result = new ClientSettings
             {
                 Video = new VideoSettings
                 {
-                    MaxEncoderWidth = MaxEncoderWidth,
-                    MaxEncoderHeight = MaxEncoderHeight,
+                    TargetHeight = height,
                     TargetFrameRate = TargetFrameRate,
                     TargetBitrate = TargetBitrate,
+                    KeyframeIntervalSeconds = KeyframeIntervalSeconds,
+                    ScalerQuality = ScalerQuality,
                     Codec = Codec,
                 },
             };

@@ -44,19 +44,19 @@ public class CaptureStreamerTests
     }
 
     [Fact]
-    public void Respects_encoder_resolution_cap_from_video_settings()
+    public void Derives_width_from_source_aspect_when_target_height_is_set()
     {
         var source = new FakeCaptureSource();
         var settings = new VideoSettings
         {
-            MaxEncoderWidth = 640,
-            MaxEncoderHeight = 360,
+            TargetHeight = 360,
             TargetFrameRate = 30,
         };
         using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
         streamer.Start();
 
-        // Source frame is 1280x720 (double the cap in each axis).
+        // Source frame is 1280x720 (16:9). Target height 360 → width should be
+        // derived as 640 to preserve aspect.
         const int width = 1280;
         const int height = 720;
         var bgra = new byte[width * height * 4];
@@ -67,13 +67,34 @@ public class CaptureStreamerTests
     }
 
     [Fact]
+    public void Preserves_ultrawide_aspect_when_downscaling()
+    {
+        var source = new FakeCaptureSource();
+        var settings = new VideoSettings
+        {
+            TargetHeight = 720,
+            TargetFrameRate = 30,
+        };
+        using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
+        streamer.Start();
+
+        // 3440x1440 ultrawide → 720 target height → width should be 1720.
+        const int width = 3440;
+        const int height = 1440;
+        var bgra = new byte[width * height * 4];
+        source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(0));
+
+        streamer.CurrentEncoderHeight.Should().Be(720);
+        streamer.CurrentEncoderWidth.Should().Be(1720);
+    }
+
+    [Fact]
     public void Drops_frames_when_incoming_rate_exceeds_target_fps()
     {
         var source = new FakeCaptureSource();
         var settings = new VideoSettings
         {
-            MaxEncoderWidth = 1280,
-            MaxEncoderHeight = 720,
+            TargetHeight = 720,
             TargetFrameRate = 30,
         };
         using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
@@ -120,6 +141,7 @@ public class CaptureStreamerTests
     {
         public string DisplayName => "fake";
         public event FrameArrivedHandler? FrameArrived;
+        public event TextureArrivedHandler? TextureArrived { add { } remove { } }
         public event Action? Closed;
         public Task StartAsync() => Task.CompletedTask;
         public Task StopAsync() => Task.CompletedTask;

@@ -18,6 +18,13 @@ public interface IVideoEncoder : IDisposable
     int Height { get; }
 
     /// <summary>
+    /// True when <see cref="EncodeTexture"/> is usable. False implementations
+    /// (software VP8, or a hardware MFT that couldn't attach a D3D device)
+    /// still accept the CPU path via <see cref="EncodeBgra"/>.
+    /// </summary>
+    bool SupportsTextureInput { get; }
+
+    /// <summary>
     /// Encode one packed BGRA frame. Returns the encoded payload (caller owns
     /// the bytes) or null / empty when the codec produced no output for this
     /// input (e.g. the encoder swallowed a frame for rate control, or an
@@ -30,4 +37,14 @@ public interface IVideoEncoder : IDisposable
     /// can happen inside the encoder on its own schedule.
     /// </summary>
     byte[]? EncodeBgra(byte[] bgra, int stride);
+
+    /// <summary>
+    /// Encode one BGRA texture on the encoder's D3D11 device. This is the
+    /// zero-copy fast path: the capture source hands us its framepool
+    /// texture and the encoder downscales (via the D3D11 Video Processor)
+    /// and color-converts on the GPU internally, with no CPU roundtrip and
+    /// no compact pass. Throws <see cref="NotSupportedException"/> when
+    /// <see cref="SupportsTextureInput"/> is false.
+    /// </summary>
+    byte[]? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight);
 }

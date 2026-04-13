@@ -64,6 +64,11 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     public event FrameArrivedHandler? FrameArrived;
 
+    // StreamReceiver is a CPU-path-only view onto decoded remote frames —
+    // no D3D11 texture is involved on the receive side today. Declared to
+    // satisfy ICaptureSource, never raised.
+    public event TextureArrivedHandler? TextureArrived { add { } remove { } }
+
     /// <summary>Alias for <see cref="FrameArrived"/> that reads clearer from the receiver side.</summary>
     public event FrameArrivedHandler? FrameDecoded
     {

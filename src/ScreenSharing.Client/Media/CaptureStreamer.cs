@@ -11,8 +11,8 @@ namespace ScreenSharing.Client.Media;
 /// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery send path.
 ///
 /// Pipeline per frame: compact the source-owned span into a packed BGRA buffer,
-/// downscale to the <see cref="VideoSettings.MaxEncoderWidth"/> x
-/// <see cref="VideoSettings.MaxEncoderHeight"/> cap (aspect preserved), convert
+/// downscale to <see cref="VideoSettings.TargetHeight"/> (width is derived
+/// from the source aspect ratio so output never distorts), convert
 /// BGRA to I420 via our own <see cref="BgraToI420"/> (SIPSorcery's
 /// EncodeVideo(Bgra) path mislabels channels), run the I420 bytes through a
 /// VP8 encoder, emit the encoded payload via an <see cref="Action{T1, T2}"/>
@@ -40,11 +40,12 @@ public sealed class CaptureStreamer : IDisposable
     private readonly IVideoEncoderFactory _encoderFactory;
     private readonly object _encodeLock = new();
 
-    private readonly int _maxEncoderWidth;
-    private readonly int _maxEncoderHeight;
+    private readonly int _targetHeight;
     private readonly int _targetFps;
     private readonly int _targetBitrate;
-    private readonly long _minFrameGapTicks;
+    private readonly long _frameGapTicks;
+    private readonly long _frameGapToleranceTicks;
+    private long _nextDeadlineTicks;
 
     private IVideoEncoder? _encoder;
     private int _encoderWidth;
@@ -54,6 +55,8 @@ public sealed class CaptureStreamer : IDisposable
     private byte[] _scaledBgraBuffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
     private long _lastAcceptedFrameTicks = long.MinValue;
+    private long _lastArrivalWallTicks;
+    private long _lastArrivalFrameTicks;
     private int _timingLogFrames;
     private bool _attached;
     private bool _disposed;
@@ -72,12 +75,20 @@ public sealed class CaptureStreamer : IDisposable
         _source = source;
         _onEncoded = onEncoded;
         _encoderFactory = encoderFactory;
-        _maxEncoderWidth = Math.Max(2, settings.MaxEncoderWidth);
-        _maxEncoderHeight = Math.Max(2, settings.MaxEncoderHeight);
-        _targetFps = Math.Clamp(settings.TargetFrameRate, 1, 120);
+        // 0 means "match source" — let the first frame decide.
+        _targetHeight = settings.TargetHeight <= 0 ? 0 : Math.Max(2, settings.TargetHeight);
+        _targetFps = Math.Clamp(settings.TargetFrameRate, 1, 240);
         _targetBitrate = Math.Max(500_000, settings.TargetBitrate);
         var fps = _targetFps;
-        _minFrameGapTicks = TimeSpan.FromSeconds(1.0 / fps).Ticks;
+        // Phase-locked throttle: we keep a monotonic deadline and accept any
+        // frame whose timestamp (+ a small tolerance for jitter) reaches the
+        // deadline. Each accept advances the deadline by exactly one frame
+        // period, so WGC delivery jitter can't snowball into dropped frames
+        // the way a strict "gap >= period" check does. Tolerance is 20% of
+        // the period — generous enough that arrivals within a frame-time
+        // jitter window still get through.
+        _frameGapTicks = TimeSpan.FromSeconds(1.0 / fps).Ticks;
+        _frameGapToleranceTicks = _frameGapTicks / 5;
     }
 
     /// <summary>Total frames that reached the encoder since <see cref="Start"/>.</summary>
@@ -92,18 +103,18 @@ public sealed class CaptureStreamer : IDisposable
     public long EncodedByteCount { get; private set; }
 
     /// <summary>Source frame dimensions as they come out of the capture
-    /// provider, before the aspect-preserving downscale to the encoder cap.
-    /// Exposed for the stats overlay.</summary>
+    /// provider, before the aspect-preserving downscale. Exposed for the
+    /// stats overlay.</summary>
     public int SourceWidth { get; private set; }
 
     /// <summary>Same as <see cref="SourceWidth"/> on the Y axis.</summary>
     public int SourceHeight { get; private set; }
 
-    /// <summary>Current encoder target width after FitWithin. 0 before the
-    /// first frame has flowed through.</summary>
+    /// <summary>Current encoder target width, derived from the source aspect.
+    /// 0 before the first frame has flowed through.</summary>
     public int EncoderWidth => _encoderWidth;
 
-    /// <summary>Current encoder target height after FitWithin.</summary>
+    /// <summary>Current encoder target height.</summary>
     public int EncoderHeight => _encoderHeight;
 
     /// <summary>Configured fps cap read at construction time.</summary>
@@ -126,32 +137,213 @@ public sealed class CaptureStreamer : IDisposable
         _attached = true;
         _timingLogFrames = 0;
         _diagnosticFrames = 0;
-        _source.FrameArrived += OnFrameArrived;
+
+        // When the encoder factory advertises texture input AND the capture
+        // source can produce textures (WindowsCaptureSource fires the event,
+        // fakes used by unit tests don't), take the GPU path — D3D11 Video
+        // Processor does the scale, NVENC does BGRA->NV12 internally, and
+        // there is no CPU readback on the hot path. Otherwise fall through
+        // to the BGRA compact + downscale + encode path.
+        if (_encoderFactory.SupportsTextureInput)
+        {
+            _source.TextureArrived += OnTextureArrived;
+            _usingTexturePath = true;
+            DebugLog.Write("[send] using GPU texture path (zero CPU readback)");
+        }
+        else
+        {
+            _source.FrameArrived += OnFrameArrived;
+            _usingTexturePath = false;
+            DebugLog.Write("[send] using CPU frame path");
+        }
     }
 
     public void Stop()
     {
         if (!_attached) return;
         _attached = false;
-        _source.FrameArrived -= OnFrameArrived;
+        if (_usingTexturePath)
+        {
+            _source.TextureArrived -= OnTextureArrived;
+        }
+        else
+        {
+            _source.FrameArrived -= OnFrameArrived;
+        }
+    }
+
+    private bool _usingTexturePath;
+
+    /// <summary>
+    /// Phase-locked frame throttle. Maintains a monotonic deadline that
+    /// advances by one frame period on every accept. Accepts any frame
+    /// whose timestamp reaches (or is within jitter tolerance of) the
+    /// deadline. This does two things a strict gap check can't:
+    ///   - jitter doesn't amplify into doubled intervals (a frame arriving
+    ///     1 ms early no longer forces the next kept frame to land 2 × T
+    ///     later)
+    ///   - rate ratios like 30 fps from a 46 fps source work: we accept
+    ///     every frame whose arrival time has caught up with the deadline,
+    ///     so we get ~30 fps instead of ~23 fps
+    /// On big drift (deadline lagging by more than a frame — pipeline
+    /// stall, source paused) we re-anchor the deadline to the current
+    /// timestamp so the throttle doesn't try to burn through a backlog.
+    /// </summary>
+    private bool ShouldAcceptFrame(long frameTs)
+    {
+        if (_lastAcceptedFrameTicks == long.MinValue)
+        {
+            _lastAcceptedFrameTicks = frameTs;
+            _nextDeadlineTicks = frameTs + _frameGapTicks;
+            return true;
+        }
+
+        if (frameTs + _frameGapToleranceTicks < _nextDeadlineTicks)
+        {
+            return false;
+        }
+
+        _lastAcceptedFrameTicks = frameTs;
+        _nextDeadlineTicks += _frameGapTicks;
+        // Re-anchor if we've drifted more than one period behind — prevents
+        // the throttle from accepting every incoming frame to "catch up"
+        // after a source pause.
+        if (_nextDeadlineTicks < frameTs)
+        {
+            _nextDeadlineTicks = frameTs + _frameGapTicks;
+        }
+        return true;
     }
 
     private int _diagnosticFrames;
+
+    /// <summary>
+    /// GPU path handler. Fires inside the framepool callback thread. Runs
+    /// the throttle, derives encoder dims from the source aspect on first
+    /// frame, and hands the raw texture to the encoder (which does the
+    /// GPU scale internally). No compact, no downscale, no CPU copy.
+    /// </summary>
+    private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
+    {
+        var wallNow = Stopwatch.GetTimestamp();
+        var frameTs = timestamp.Ticks;
+        if (_timingLogFrames < 10)
+        {
+            if (_lastArrivalWallTicks != 0)
+            {
+                var ticksPerMs = Stopwatch.Frequency / 1000.0;
+                var wallGapMs = (wallNow - _lastArrivalWallTicks) / ticksPerMs;
+                var captureGapMs = (frameTs - _lastArrivalFrameTicks) / (double)TimeSpan.TicksPerMillisecond;
+                DebugLog.Write($"[arrival-gpu] wallGap={wallGapMs:F1}ms captureGap={captureGapMs:F1}ms");
+            }
+            _lastArrivalWallTicks = wallNow;
+            _lastArrivalFrameTicks = frameTs;
+        }
+
+        if (!ShouldAcceptFrame(frameTs))
+        {
+            return;
+        }
+
+        var timingStart = _timingLogFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
+
+        SourceWidth = width;
+        SourceHeight = height;
+        var sourceWidth = width & ~1;
+        var sourceHeight = height & ~1;
+        if (sourceWidth <= 0 || sourceHeight <= 0) return;
+
+        int encWidth, encHeight;
+        if (_targetHeight == 0 || _targetHeight >= sourceHeight)
+        {
+            encWidth = sourceWidth;
+            encHeight = sourceHeight;
+        }
+        else
+        {
+            encHeight = _targetHeight & ~1;
+            var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
+            encWidth = derivedWidth & ~1;
+            if (encWidth < 2) encWidth = 2;
+        }
+
+        if (_diagnosticFrames < 3)
+        {
+            Interlocked.Increment(ref _diagnosticFrames);
+            DebugLog.Write(
+                $"[send-gpu] src {sourceWidth}x{sourceHeight} -> enc {encWidth}x{encHeight}");
+        }
+
+        byte[]? encoded;
+        lock (_encodeLock)
+        {
+            if (_disposed) return;
+
+            FrameCount++;
+
+            if (_encoder is null || encWidth != _encoderWidth || encHeight != _encoderHeight)
+            {
+                try { _encoder?.Dispose(); } catch { }
+                _encoder = _encoderFactory.CreateEncoder(encWidth, encHeight, _targetFps, _targetBitrate);
+                _encoderWidth = encWidth;
+                _encoderHeight = encHeight;
+            }
+
+            encoded = _encoder.EncodeTexture(nativeTexture, sourceWidth, sourceHeight);
+
+            if (encoded is null || encoded.Length == 0)
+            {
+                LogGpuTiming(timingStart);
+                return;
+            }
+
+            EncodedFrameCount++;
+            EncodedByteCount += encoded.Length;
+        }
+
+        var duration = ComputeDurationRtpUnits(timestamp);
+        _onEncoded(duration, encoded);
+
+        LogGpuTiming(timingStart);
+    }
+
+    private void LogGpuTiming(long timingStart)
+    {
+        if (timingStart == 0) return;
+        var encodeEnd = Stopwatch.GetTimestamp();
+        _timingLogFrames++;
+        var ticksPerMs = Stopwatch.Frequency / 1000.0;
+        var totalMs = (encodeEnd - timingStart) / ticksPerMs;
+        DebugLog.Write($"[timing-gpu #{_timingLogFrames}] total={totalMs:F1}ms");
+    }
 
     private void OnFrameArrived(in CaptureFrameData frame)
     {
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
-        // FPS throttle: drop a frame if its timestamp is less than
-        // _minFrameGapTicks after the previously accepted frame. First frame
-        // (_lastAcceptedFrameTicks == long.MinValue) always passes.
-        var ts = frame.Timestamp.Ticks;
-        if (_lastAcceptedFrameTicks != long.MinValue &&
-            ts - _lastAcceptedFrameTicks < _minFrameGapTicks)
+        // Inter-arrival diagnostic: how often does the framepool actually hand
+        // us a frame, before any throttling? If this is wider than the target
+        // 1/fps gap then the bottleneck is upstream of the encoder (framepool
+        // rate or _frameLock contention with the preview path), not us.
+        var wallNow = Stopwatch.GetTimestamp();
+        var frameTs = frame.Timestamp.Ticks;
+        if (_timingLogFrames < 10)
+        {
+            if (_lastArrivalWallTicks != 0)
+            {
+                var ticksPerMs = Stopwatch.Frequency / 1000.0;
+                var wallGapMs = (wallNow - _lastArrivalWallTicks) / ticksPerMs;
+                var captureGapMs = (frameTs - _lastArrivalFrameTicks) / (double)TimeSpan.TicksPerMillisecond;
+                DebugLog.Write($"[arrival] wallGap={wallGapMs:F1}ms captureGap={captureGapMs:F1}ms");
+            }
+            _lastArrivalWallTicks = wallNow;
+            _lastArrivalFrameTicks = frameTs;
+        }
+
+        if (!ShouldAcceptFrame(frameTs))
         {
             return;
         }
-        _lastAcceptedFrameTicks = ts;
 
         var timingStart = _timingLogFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
 
@@ -162,9 +354,22 @@ public sealed class CaptureStreamer : IDisposable
         var sourceHeight = frame.Height & ~1;
         if (sourceWidth <= 0 || sourceHeight <= 0) return;
 
-        // Decide the encoder target: aspect-preserving fit into the max box.
-        var (encWidth, encHeight) = BgraDownscale.FitWithin(
-            sourceWidth, sourceHeight, _maxEncoderWidth, _maxEncoderHeight);
+        // Decide the encoder target. The user picks a target height; width is
+        // derived from the source aspect ratio at runtime so the output never
+        // distorts. _targetHeight == 0 (or >= source) means "don't downscale".
+        int encWidth, encHeight;
+        if (_targetHeight == 0 || _targetHeight >= sourceHeight)
+        {
+            encWidth = sourceWidth;
+            encHeight = sourceHeight;
+        }
+        else
+        {
+            encHeight = _targetHeight & ~1;
+            var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
+            encWidth = derivedWidth & ~1;
+            if (encWidth < 2) encWidth = 2;
+        }
 
         // Compact the source into a packed BGRA buffer first.
         var packedRowBytes = sourceWidth * 4;

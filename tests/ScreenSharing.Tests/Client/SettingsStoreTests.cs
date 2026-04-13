@@ -28,9 +28,9 @@ public class SettingsStoreTests : IDisposable
         var store = new SettingsStore(_settingsPath);
         var settings = store.LoadOrCreate();
 
-        settings.Video.MaxEncoderWidth.Should().Be(1280);
-        settings.Video.MaxEncoderHeight.Should().Be(720);
-        settings.Video.TargetFrameRate.Should().Be(30);
+        settings.Video.TargetHeight.Should().Be(1080);
+        settings.Video.TargetFrameRate.Should().Be(60);
+        settings.Video.ScalerQuality.Should().Be(ScalerQuality.Bilinear);
         settings.ServerUri.Should().Be(new Uri("ws://localhost:5000/ws"));
         File.Exists(_settingsPath).Should().BeFalse("LoadOrCreate only persists on Save");
     }
@@ -44,18 +44,39 @@ public class SettingsStoreTests : IDisposable
             ServerUri = new Uri("ws://example.test:9000/ws"),
             Video = new VideoSettings
             {
-                MaxEncoderWidth = 1920,
-                MaxEncoderHeight = 1080,
-                TargetFrameRate = 60,
+                TargetHeight = 1440,
+                TargetFrameRate = 120,
+                TargetBitrate = 25_000_000,
+                KeyframeIntervalSeconds = 1.0,
+                ScalerQuality = ScalerQuality.Bicubic,
             },
         });
 
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
 
         loaded.ServerUri.Should().Be(new Uri("ws://example.test:9000/ws"));
-        loaded.Video.MaxEncoderWidth.Should().Be(1920);
-        loaded.Video.MaxEncoderHeight.Should().Be(1080);
+        loaded.Video.TargetHeight.Should().Be(1440);
+        loaded.Video.TargetFrameRate.Should().Be(120);
+        loaded.Video.TargetBitrate.Should().Be(25_000_000);
+        loaded.Video.KeyframeIntervalSeconds.Should().Be(1.0);
+        loaded.Video.ScalerQuality.Should().Be(ScalerQuality.Bicubic);
+    }
+
+    [Fact]
+    public void LoadOrCreate_migrates_legacy_MaxEncoderHeight_to_TargetHeight()
+    {
+        // Settings files written by the old dropdown UI stored MaxEncoderWidth /
+        // MaxEncoderHeight — users shouldn't lose their preferred resolution
+        // after the slider rewrite.
+        File.WriteAllText(
+            _settingsPath,
+            """{ "maxEncoderWidth": 1920, "maxEncoderHeight": 1080, "targetFrameRate": 60, "targetBitrate": 10000000 }""");
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+
+        loaded.Video.TargetHeight.Should().Be(1080);
         loaded.Video.TargetFrameRate.Should().Be(60);
+        loaded.Video.TargetBitrate.Should().Be(10_000_000);
     }
 
     [Fact]
@@ -86,8 +107,8 @@ public class SettingsStoreTests : IDisposable
         var store = new SettingsStore(_settingsPath);
         var settings = store.LoadOrCreate();
 
-        settings.Video.MaxEncoderWidth.Should().Be(1280);
-        settings.Video.TargetFrameRate.Should().Be(30);
+        settings.Video.TargetHeight.Should().Be(1080);
+        settings.Video.TargetFrameRate.Should().Be(60);
     }
 
     [Fact]
