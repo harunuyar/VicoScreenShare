@@ -48,6 +48,8 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly IMFMediaEventGenerator? _events;
     private readonly ID3D11Device? _d3dDevice;
     private readonly IMFDXGIDeviceManager? _dxgiManager;
+    private readonly bool _inputIsBgra; // true = ARGB32, false = NV12
+    private readonly int _inputBufferSize;
     private readonly Thread? _pumpThread;
     private readonly CancellationTokenSource _pumpCts = new();
     private readonly SemaphoreSlim _needInputSignal = new(0, int.MaxValue);
@@ -67,7 +69,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         _height = height;
         _fps = Math.Max(1, fps);
         _bitrate = Math.Max(500_000, bitrate);
-        _nv12Buffer = new byte[width * height * 3 / 2];
 
         // Create a D3D11 device and DXGI device manager for the encoder MFT
         // BEFORE we hand it any media types. NVENC's MFT routes its async
@@ -77,8 +78,13 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         // on most modern hardware encoder builds.
         (_d3dDevice, _dxgiManager) = TryCreateD3DManager();
 
-        (_transform, _isAsync, var pickedLabel) = CreateEncoder(width, height, _fps, _bitrate, _dxgiManager);
-        DebugLog.Write($"[mf] H264 encoder initialized {width}x{height}@{_fps} {_bitrate} bps ({pickedLabel})");
+        var (transform, isAsync, pickedLabel, inputIsBgra) = CreateEncoder(width, height, _fps, _bitrate, _dxgiManager);
+        _transform = transform;
+        _isAsync = isAsync;
+        _inputIsBgra = inputIsBgra;
+        _nv12Buffer = inputIsBgra ? Array.Empty<byte>() : new byte[width * height * 3 / 2];
+        _inputBufferSize = inputIsBgra ? width * height * 4 : width * height * 3 / 2;
+        DebugLog.Write($"[mf] H264 encoder initialized {width}x{height}@{_fps} {_bitrate} bps ({pickedLabel}, input={(inputIsBgra ? "BGRA" : "NV12")})");
 
         if (_isAsync)
         {
@@ -231,14 +237,24 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
         var timingStart = _loggedTimingFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
 
-        // One-pass BGRA -> NV12 straight into the encoder's NV12 buffer.
-        // No I420 intermediate, no extra memory pass. Unsafe pointer loop,
-        // NVENC then ingests NV12 natively with no further conversion.
-        BgraToNv12Fast(bgra, stride, _nv12Buffer, _width, _height);
+        // Two paths:
+        //
+        //   ARGB32 mode: NVENC accepted BGRA input, so we hand it BGRA
+        //   bytes verbatim — no color conversion on the CPU at all. NVENC
+        //   does BGRA -> NV12 on the GPU as part of its internal pipeline.
+        //   This is what we want.
+        //
+        //   NV12 mode: fallback for hardware encoders that won't take
+        //   ARGB32. The old BgraToNv12Fast scalar pass runs and we feed
+        //   the NV12 bytes.
+        if (!_inputIsBgra)
+        {
+            BgraToNv12Fast(bgra, stride, _nv12Buffer, _width, _height);
+        }
 
         var convertEnd = timingStart != 0 ? Stopwatch.GetTimestamp() : 0L;
 
-        var encoded = _isAsync ? EncodeAsync() : EncodeSync();
+        var encoded = _isAsync ? EncodeAsync(bgra, stride) : EncodeSync(bgra, stride);
 
         if (timingStart != 0)
         {
@@ -248,7 +264,8 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             var convertMs = (convertEnd - timingStart) / ticksPerMs;
             var encodeMs = (totalEnd - convertEnd) / ticksPerMs;
             var totalMs = (totalEnd - timingStart) / ticksPerMs;
-            DebugLog.Write($"[mf-timing #{_loggedTimingFrames}] bgra->nv12={convertMs:F1}ms encode={encodeMs:F1}ms total={totalMs:F1}ms");
+            var label = _inputIsBgra ? "no-conv" : "bgra->nv12";
+            DebugLog.Write($"[mf-timing #{_loggedTimingFrames}] {label}={convertMs:F1}ms encode={encodeMs:F1}ms total={totalMs:F1}ms");
         }
 
         if (encoded is { Length: > 0 } && _loggedEncodedFrames < 3)
@@ -259,12 +276,8 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         return encoded;
     }
 
-    private byte[]? EncodeAsync()
+    private byte[]? EncodeAsync(byte[] bgraSource, int bgraStride)
     {
-        // Wait briefly for a NeedInput credit. If the encoder is temporarily
-        // saturated, skip feeding this frame and just drain any output that
-        // the pump already queued — the capture stream keeps flowing at the
-        // lower effective rate rather than blocking the capture thread.
         if (!_needInputSignal.Wait(50))
         {
             if (_loggedTimeouts < 3)
@@ -275,7 +288,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             return TryDequeueOutput();
         }
 
-        var sample = CreateInputSample();
+        var sample = CreateInputSample(bgraSource, bgraStride);
         try
         {
             lock (_processLock)
@@ -304,9 +317,9 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         return TryDequeueOutput();
     }
 
-    private byte[]? EncodeSync()
+    private byte[]? EncodeSync(byte[] bgraSource, int bgraStride)
     {
-        var sample = CreateInputSample();
+        var sample = CreateInputSample(bgraSource, bgraStride);
         try
         {
             lock (_processLock)
@@ -331,22 +344,47 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         return DrainOutputLocked();
     }
 
-    private IMFSample CreateInputSample()
+    /// <summary>
+    /// Build an IMFSample backed by a system-memory IMFMediaBuffer. In ARGB32
+    /// mode the source bytes are the caller's BGRA frame copied row-by-row
+    /// in case the source stride is wider than width*4. In NV12 mode they're
+    /// the converted contents of <see cref="_nv12Buffer"/>.
+    /// </summary>
+    private IMFSample CreateInputSample(byte[] bgraSource, int bgraStride)
     {
-        var buffer = MediaFactory.MFCreateMemoryBuffer(_nv12Buffer.Length);
+        var buffer = MediaFactory.MFCreateMemoryBuffer(_inputBufferSize);
         buffer.Lock(out nint ptr, out int maxLen, out _);
         try
         {
-            fixed (byte* srcPtr = _nv12Buffer)
+            if (_inputIsBgra)
             {
-                Buffer.MemoryCopy(srcPtr, ptr.ToPointer(), maxLen, _nv12Buffer.Length);
+                var rowBytes = _width * 4;
+                fixed (byte* srcBase = bgraSource)
+                {
+                    var dstBase = (byte*)ptr.ToPointer();
+                    for (var y = 0; y < _height; y++)
+                    {
+                        Buffer.MemoryCopy(
+                            srcBase + y * bgraStride,
+                            dstBase + y * rowBytes,
+                            maxLen - y * rowBytes,
+                            rowBytes);
+                    }
+                }
+            }
+            else
+            {
+                fixed (byte* srcPtr = _nv12Buffer)
+                {
+                    Buffer.MemoryCopy(srcPtr, ptr.ToPointer(), maxLen, _nv12Buffer.Length);
+                }
             }
         }
         finally
         {
             buffer.Unlock();
         }
-        buffer.CurrentLength = _nv12Buffer.Length;
+        buffer.CurrentLength = _inputBufferSize;
 
         var sample = MediaFactory.MFCreateSample();
         sample.AddBuffer(buffer);
@@ -601,7 +639,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
     // --- Encoder enumeration + type negotiation ---
 
-    private static (IMFTransform transform, bool isAsync, string label) CreateEncoder(int width, int height, int fps, long bitrate, IMFDXGIDeviceManager? dxgiManager)
+    private static (IMFTransform transform, bool isAsync, string label, bool inputIsBgra) CreateEncoder(int width, int height, int fps, long bitrate, IMFDXGIDeviceManager? dxgiManager)
     {
         // Try async hardware MFTs first — NVENC / QSV / VCE. Passing both
         // HARDWARE and ASYNCMFT flags returns async hardware encoders, which
@@ -609,21 +647,21 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         var async = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagSortandfilter),
             width, height, fps, bitrate, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager);
-        if (async is not null) return (async, true, "hardware async");
+        if (async.transform is not null) return (async.transform, true, "hardware async", async.inputIsBgra);
 
         // Fall back to sync hardware MFTs — rare on modern drivers but they
         // exist (e.g. older Intel QSV builds).
         var sync = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
             width, height, fps, bitrate, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager);
-        if (sync is not null) return (sync, false, "hardware sync");
+        if (sync.transform is not null) return (sync.transform, false, "hardware sync", sync.inputIsBgra);
 
         // Last resort: Microsoft's software H.264 encoder. Always available.
         // Software encoder doesn't need the D3D manager, pass null.
         var software = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
             width, height, fps, bitrate, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null);
-        if (software is not null) return (software, false, "software");
+        if (software.transform is not null) return (software.transform, false, "software", software.inputIsBgra);
 
         throw new InvalidOperationException("Media Foundation has no usable H.264 encoder on this machine");
     }
@@ -675,7 +713,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         }
     }
 
-    private static IMFTransform? TryCreateEncoder(
+    private static (IMFTransform? transform, bool inputIsBgra) TryCreateEncoder(
         uint flags,
         int width,
         int height,
@@ -754,14 +792,15 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 // realtime streaming.
                 ApplyCodecApiAttributes(transform, bitrate, friendlyName);
 
-                if (!TrySetTypes(transform, width, height, fps, bitrate, $"{label} [{friendlyName}]"))
+                var (typesOk, inputIsBgra) = TrySetTypes(transform, width, height, fps, bitrate, $"{label} [{friendlyName}]");
+                if (!typesOk)
                 {
                     transform.Dispose();
                     continue;
                 }
 
                 DebugLog.Write($"[mf] picked {label} H264 MFT: {friendlyName} ({hardwareUrl})");
-                return transform;
+                return (transform, inputIsBgra);
             }
             catch (Exception ex)
             {
@@ -770,10 +809,10 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             }
         }
 
-        return null;
+        return (null, false);
     }
 
-    private static bool TrySetTypes(IMFTransform transform, int width, int height, int fps, long bitrate, string label)
+    private static (bool ok, bool inputIsBgra) TrySetTypes(IMFTransform transform, int width, int height, int fps, long bitrate, string label)
     {
         var outputType = MediaFactory.MFCreateMediaType();
         outputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
@@ -792,13 +831,31 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         {
             DebugLog.Write($"[mf] probing {label} H264 MFT — SetOutputType rejected, skipping: {ex.Message}");
             outputType.Dispose();
-            return false;
+            return (false, false);
         }
         outputType.Dispose();
 
+        // Try ARGB32 input first (NVENC and most HW encoders take BGRA D3D11
+        // textures and convert to NV12 on the GPU internally — saves us the
+        // Compute Shader / VideoProcessorMFT chain entirely). Fall back to
+        // NV12 if rejected.
+        if (TrySetInputType(transform, VideoFormatGuids.Argb32, width, height, fps, label, "ARGB32"))
+        {
+            return (true, true);
+        }
+        if (TrySetInputType(transform, VideoFormatGuids.NV12, width, height, fps, label, "NV12"))
+        {
+            return (true, false);
+        }
+
+        return (false, false);
+    }
+
+    private static bool TrySetInputType(IMFTransform transform, Guid subtype, int width, int height, int fps, string label, string subtypeName)
+    {
         var inputType = MediaFactory.MFCreateMediaType();
         inputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
-        inputType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12);
+        inputType.Set(MediaTypeAttributeKeys.Subtype, subtype);
         inputType.SetEnumValue(MediaTypeAttributeKeys.InterlaceMode, VideoInterlaceMode.Progressive);
         MediaFactory.MFSetAttributeSize(inputType, MediaTypeAttributeKeys.FrameSize, (uint)width, (uint)height);
         MediaFactory.MFSetAttributeRatio(inputType, MediaTypeAttributeKeys.FrameRate, (uint)fps, 1u);
@@ -807,16 +864,16 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         try
         {
             transform.SetInputType(0, inputType, 0);
+            DebugLog.Write($"[mf] {label} accepted {subtypeName} input");
+            inputType.Dispose();
+            return true;
         }
         catch (Exception ex)
         {
-            DebugLog.Write($"[mf] probing {label} H264 MFT — SetInputType rejected, skipping: {ex.Message}");
+            DebugLog.Write($"[mf] {label} rejected {subtypeName} input: {ex.Message}");
             inputType.Dispose();
             return false;
         }
-        inputType.Dispose();
-
-        return true;
     }
 
     // ComCast removed: use transform.QueryInterface<IMFMediaEventGenerator>()
