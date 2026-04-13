@@ -72,12 +72,21 @@ internal sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 IsBackground = true,
                 Name = "MF H264 event pump",
             };
+            // Start the pump BEFORE we send the streaming messages so no
+            // initial NeedInput event races past an unattached queue.
+            _pumpThread.Start();
         }
 
-        // Start streaming. Async MFTs begin emitting NeedInput events after
-        // this point, which the pump thread translates into semaphore credits.
+        // NOTIFY_BEGIN_STREAMING allocates native resources (hw context,
+        // encoder buffers). Async MFTs additionally require NOTIFY_START_OF_STREAM
+        // to actually start emitting METransformNeedInput events — without
+        // it, NVENC sits idle and the event pump never gets a credit to
+        // release back to EncodeI420.
         _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, 0);
-        _pumpThread?.Start();
+        if (_isAsync)
+        {
+            _transform.ProcessMessage(TMessageType.MessageNotifyStartOfStream, 0);
+        }
     }
 
     public VideoCodec Codec => VideoCodec.H264;
