@@ -36,4 +36,12 @@ public sealed class VideoSettings
     /// previously encoded frame.
     /// </summary>
     public int TargetFrameRate { get; set; } = 30;
+
+    /// <summary>
+    /// Target encoder bitrate in bits per second. Hardware encoders treat
+    /// this as an average / target; the rate controller may spike above it
+    /// on keyframes. 6 Mbps is a reasonable 720p default; 1080p60 should
+    /// usually be 10-15 Mbps, 1440p60 15-25 Mbps.
+    /// </summary>
+    public int TargetBitrate { get; set; } = 6_000_000;
 }

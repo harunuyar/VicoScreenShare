@@ -11,5 +11,5 @@ public sealed class VpxEncoderFactory : IVideoEncoderFactory
 
     public bool IsAvailable => true;
 
-    public IVideoEncoder CreateEncoder(int width, int height) => new VpxEncoder(width, height);
+    public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate) => new VpxEncoder(width, height);
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Net;
+using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
 using SIPSorcery.Net;
@@ -24,6 +25,7 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     private readonly RTCPeerConnection _pc;
     private readonly IVideoDecoder _decoder;
     private readonly object _decodeLock = new();
+    private DateTime _lastFrameUtc = DateTime.MinValue;
     private bool _attached;
     private bool _disposed;
 
@@ -44,6 +46,21 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     public long FramesReceived { get; private set; }
 
     public long FramesDecoded { get; private set; }
+
+    /// <summary>Cumulative encoded bytes received on the peer connection's
+    /// video track since this receiver attached. The stats overlay divides
+    /// the delta between two reads by elapsed time to get a bitrate.</summary>
+    public long EncodedByteCount { get; private set; }
+
+    /// <summary>Width of the most recently decoded frame, or 0 if nothing
+    /// has decoded yet.</summary>
+    public int LastWidth { get; private set; }
+
+    /// <summary>Same for height.</summary>
+    public int LastHeight { get; private set; }
+
+    /// <summary>Codec tag for the decoder instance powering this receiver.</summary>
+    public VideoCodec Codec => _decoder.Codec;
 
     public event FrameArrivedHandler? FrameArrived;
 
@@ -110,10 +127,19 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         if (encodedSample is null || encodedSample.Length == 0) return;
 
         System.Collections.Generic.IReadOnlyList<DecodedVideoFrame> frames;
+        var now = DateTime.UtcNow;
+        var gap = _lastFrameUtc == DateTime.MinValue ? TimeSpan.Zero : now - _lastFrameUtc;
+        _lastFrameUtc = now;
+        if (gap > TimeSpan.FromSeconds(2))
+        {
+            DebugLog.Write($"[recv] incoming packet after {gap.TotalSeconds:F1}s gap — stream restarted");
+        }
+
         lock (_decodeLock)
         {
             if (_disposed) return;
             FramesReceived++;
+            EncodedByteCount += encodedSample.Length;
             frames = _decoder.Decode(encodedSample);
         }
 
@@ -127,6 +153,8 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             if (decoded.Bgra.Length < bgraSize) continue;
 
             FramesDecoded++;
+            LastWidth = decoded.Width;
+            LastHeight = decoded.Height;
 
             var frame = new CaptureFrameData(
                 decoded.Bgra.AsSpan(0, bgraSize),

@@ -9,6 +9,9 @@
     <Project Path="src/ScreenSharing.Server/ScreenSharing.Server.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/ScreenSharing.MediaHarness/ScreenSharing.MediaHarness.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="tests/ScreenSharing.Tests/ScreenSharing.Tests.csproj" />
   </Folder>
 </Solution>

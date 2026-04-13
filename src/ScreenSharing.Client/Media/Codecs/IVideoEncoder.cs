@@ -18,11 +18,16 @@ public interface IVideoEncoder : IDisposable
     int Height { get; }
 
     /// <summary>
-    /// Encode one I420-packed frame. Returns the encoded payload (caller owns
+    /// Encode one packed BGRA frame. Returns the encoded payload (caller owns
     /// the bytes) or null / empty when the codec produced no output for this
-    /// input (e.g. the encoder swallowed a frame for rate control). The buffer
-    /// must hold <c>width * height * 3 / 2</c> bytes laid out as Y plane,
-    /// U plane, V plane.
+    /// input (e.g. the encoder swallowed a frame for rate control, or an
+    /// async hardware MFT hasn't handed back output yet).
+    ///
+    /// The encoder implementation is responsible for any color-space
+    /// conversion — VP8 wants planar I420 internally, NVENC wants NV12, and
+    /// the caller shouldn't have to know which. Taking BGRA here matches
+    /// what the capture path produces, so the hottest single-pass conversion
+    /// can happen inside the encoder on its own schedule.
     /// </summary>
-    byte[]? EncodeI420(byte[] i420);
+    byte[]? EncodeBgra(byte[] bgra, int stride);
 }

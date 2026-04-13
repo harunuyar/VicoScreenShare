@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Media.Codecs;
@@ -41,6 +42,8 @@ public sealed class CaptureStreamer : IDisposable
 
     private readonly int _maxEncoderWidth;
     private readonly int _maxEncoderHeight;
+    private readonly int _targetFps;
+    private readonly int _targetBitrate;
     private readonly long _minFrameGapTicks;
 
     private IVideoEncoder? _encoder;
@@ -49,9 +52,9 @@ public sealed class CaptureStreamer : IDisposable
 
     private byte[] _sourceBgraBuffer = Array.Empty<byte>();
     private byte[] _scaledBgraBuffer = Array.Empty<byte>();
-    private byte[] _i420Buffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
     private long _lastAcceptedFrameTicks = long.MinValue;
+    private int _timingLogFrames;
     private bool _attached;
     private bool _disposed;
 
@@ -71,7 +74,9 @@ public sealed class CaptureStreamer : IDisposable
         _encoderFactory = encoderFactory;
         _maxEncoderWidth = Math.Max(2, settings.MaxEncoderWidth);
         _maxEncoderHeight = Math.Max(2, settings.MaxEncoderHeight);
-        var fps = Math.Clamp(settings.TargetFrameRate, 1, 120);
+        _targetFps = Math.Clamp(settings.TargetFrameRate, 1, 120);
+        _targetBitrate = Math.Max(500_000, settings.TargetBitrate);
+        var fps = _targetFps;
         _minFrameGapTicks = TimeSpan.FromSeconds(1.0 / fps).Ticks;
     }
 
@@ -81,6 +86,36 @@ public sealed class CaptureStreamer : IDisposable
     /// <summary>Total frames whose encoder output was non-empty and forwarded to the callback.</summary>
     public long EncodedFrameCount { get; private set; }
 
+    /// <summary>Total encoded bytes (cumulative). A stats poll computes
+    /// bitrate as the delta between two reads divided by the elapsed wall
+    /// time, so we don't have to keep a sliding window here.</summary>
+    public long EncodedByteCount { get; private set; }
+
+    /// <summary>Source frame dimensions as they come out of the capture
+    /// provider, before the aspect-preserving downscale to the encoder cap.
+    /// Exposed for the stats overlay.</summary>
+    public int SourceWidth { get; private set; }
+
+    /// <summary>Same as <see cref="SourceWidth"/> on the Y axis.</summary>
+    public int SourceHeight { get; private set; }
+
+    /// <summary>Current encoder target width after FitWithin. 0 before the
+    /// first frame has flowed through.</summary>
+    public int EncoderWidth => _encoderWidth;
+
+    /// <summary>Current encoder target height after FitWithin.</summary>
+    public int EncoderHeight => _encoderHeight;
+
+    /// <summary>Configured fps cap read at construction time.</summary>
+    public int TargetFps => _targetFps;
+
+    /// <summary>Configured target bitrate read at construction time.</summary>
+    public int TargetBitrate => _targetBitrate;
+
+    /// <summary>Underlying codec identifier of the last encoder instance
+    /// (useful for the stats panel to show "H264" vs "VP8").</summary>
+    public VideoCodec? CurrentCodec => _encoder?.Codec;
+
     internal int CurrentEncoderWidth => _encoderWidth;
 
     internal int CurrentEncoderHeight => _encoderHeight;
@@ -89,6 +124,8 @@ public sealed class CaptureStreamer : IDisposable
     {
         if (_attached || _disposed) return;
         _attached = true;
+        _timingLogFrames = 0;
+        _diagnosticFrames = 0;
         _source.FrameArrived += OnFrameArrived;
     }
 
@@ -116,7 +153,11 @@ public sealed class CaptureStreamer : IDisposable
         }
         _lastAcceptedFrameTicks = ts;
 
+        var timingStart = _timingLogFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
+
         // Source crop: even dimensions (libvpx chroma subsampling) and non-negative.
+        SourceWidth = frame.Width;
+        SourceHeight = frame.Height;
         var sourceWidth = frame.Width & ~1;
         var sourceHeight = frame.Height & ~1;
         if (sourceWidth <= 0 || sourceHeight <= 0) return;
@@ -138,6 +179,8 @@ public sealed class CaptureStreamer : IDisposable
                 .Slice(y * frame.StrideBytes, packedRowBytes)
                 .CopyTo(_sourceBgraBuffer.AsSpan(y * packedRowBytes, packedRowBytes));
         }
+
+        var compactEnd = timingStart != 0 ? Stopwatch.GetTimestamp() : 0L;
 
         // Downscale (if needed) into the scaled buffer.
         byte[] encoderInput;
@@ -165,6 +208,8 @@ public sealed class CaptureStreamer : IDisposable
             encoderInputStride = encWidth * 4;
         }
 
+        var downscaleEnd = timingStart != 0 ? Stopwatch.GetTimestamp() : 0L;
+
         if (_diagnosticFrames < 3)
         {
             Interlocked.Increment(ref _diagnosticFrames);
@@ -174,6 +219,19 @@ public sealed class CaptureStreamer : IDisposable
 
         var timestamp = frame.Timestamp;
         EncodeAndEmit(encoderInput, encoderInputStride, encWidth, encHeight, timestamp);
+
+        if (timingStart != 0)
+        {
+            var encodeEnd = Stopwatch.GetTimestamp();
+            _timingLogFrames++;
+            var ticksPerMs = Stopwatch.Frequency / 1000.0;
+            var compactMs = (compactEnd - timingStart) / ticksPerMs;
+            var downscaleMs = (downscaleEnd - compactEnd) / ticksPerMs;
+            var encodeMs = (encodeEnd - downscaleEnd) / ticksPerMs;
+            var totalMs = (encodeEnd - timingStart) / ticksPerMs;
+            DebugLog.Write(
+                $"[timing #{_timingLogFrames}] compact={compactMs:F1}ms downscale={downscaleMs:F1}ms encode={encodeMs:F1}ms total={totalMs:F1}ms");
+        }
     }
 
     private void EncodeAndEmit(byte[] encoderInput, int encoderStrideBytes, int width, int height, TimeSpan timestamp)
@@ -193,24 +251,16 @@ public sealed class CaptureStreamer : IDisposable
             if (_encoder is null || width != _encoderWidth || height != _encoderHeight)
             {
                 try { _encoder?.Dispose(); } catch { }
-                _encoder = _encoderFactory.CreateEncoder(width, height);
+                _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate);
                 _encoderWidth = width;
                 _encoderHeight = height;
             }
 
-            var i420Required = BgraToI420.RequiredOutputSize(width, height);
-            if (_i420Buffer.Length < i420Required)
-            {
-                _i420Buffer = new byte[i420Required];
-            }
-            BgraToI420.Convert(
-                encoderInput.AsSpan(0, height * encoderStrideBytes),
-                width,
-                height,
-                encoderStrideBytes,
-                _i420Buffer);
-
-            encoded = _encoder.EncodeI420(_i420Buffer);
+            // BGRA -> encoder's native pixel format (NV12 for H.264 / I420 for
+            // VP8) happens inside the encoder now — a single fused pass
+            // instead of the double conversion (BGRA -> I420 -> NV12) this
+            // hot path used to do on the capture thread.
+            encoded = _encoder.EncodeBgra(encoderInput, encoderStrideBytes);
 
             if (encoded is null || encoded.Length == 0)
             {
@@ -218,6 +268,7 @@ public sealed class CaptureStreamer : IDisposable
             }
 
             EncodedFrameCount++;
+            EncodedByteCount += encoded.Length;
         }
 
         var duration = ComputeDurationRtpUnits(timestamp);

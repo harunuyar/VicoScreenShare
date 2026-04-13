@@ -55,6 +55,21 @@
                 </StackPanel>
 
                 <StackPanel Spacing="6">
+                    <TextBlock Text="Bitrate" Opacity="0.7" FontSize="12" />
+                    <ComboBox ItemsSource="{Binding BitratePresets}"
+                              SelectedItem="{Binding SelectedBitrate}"
+                              HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="vm:BitratePreset">
+                                <TextBlock Text="{Binding DisplayName}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                    <TextBlock Text="Higher values mean better quality and more bandwidth. For 1080p60 aim for 10-15 Mbps; 1440p60 wants 20-50."
+                               Opacity="0.5" FontSize="11" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <StackPanel Spacing="6">
                     <TextBlock Text="Codec" Opacity="0.7" FontSize="12" />
                     <ComboBox ItemsSource="{Binding CodecOptions}"
                               SelectedItem="{Binding SelectedCodec}"

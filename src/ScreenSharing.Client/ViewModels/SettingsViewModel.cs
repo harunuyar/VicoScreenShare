@@ -49,6 +49,15 @@ public sealed partial class SettingsViewModel : ViewModelBase
             new ResolutionPreset("1440p (2560 x 1440)", 2560, 1440),
         };
         FrameRatePresets = new[] { 15, 24, 30, 60 };
+        BitratePresets = new[]
+        {
+            new BitratePreset("2 Mbps (low)", 2_000_000),
+            new BitratePreset("5 Mbps (720p good)", 5_000_000),
+            new BitratePreset("10 Mbps (1080p good)", 10_000_000),
+            new BitratePreset("15 Mbps (1080p high)", 15_000_000),
+            new BitratePreset("25 Mbps (1440p good)", 25_000_000),
+            new BitratePreset("50 Mbps (1440p high)", 50_000_000),
+        };
 
         // Build codec options from the host-registered catalog so entries the
         // current machine can't support are clearly marked. Order matters —
@@ -69,6 +78,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _selectedFrameRate = FrameRatePresets.Contains(_settings.Video.TargetFrameRate)
             ? _settings.Video.TargetFrameRate
             : 30;
+        _selectedBitrate = BitratePresets.FirstOrDefault(b => b.Bitrate == _settings.Video.TargetBitrate)
+            ?? BitratePresets[2];
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
     }
@@ -77,6 +88,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     public IReadOnlyList<int> FrameRatePresets { get; }
 
+    public IReadOnlyList<BitratePreset> BitratePresets { get; }
+
     public IReadOnlyList<CodecOption> CodecOptions { get; }
 
     [ObservableProperty]
@@ -84,6 +97,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     [ObservableProperty]
     private int _selectedFrameRate;
+
+    [ObservableProperty]
+    private BitratePreset _selectedBitrate;
 
     [ObservableProperty]
     private CodecOption _selectedCodec;
@@ -107,6 +123,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.MaxEncoderWidth = SelectedResolution.Width;
         _settings.Video.MaxEncoderHeight = SelectedResolution.Height;
         _settings.Video.TargetFrameRate = SelectedFrameRate;
+        _settings.Video.TargetBitrate = SelectedBitrate.Bitrate;
         _settings.Video.Codec = SelectedCodec.Codec;
 
         try
@@ -142,5 +159,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
 }
 
 public sealed record ResolutionPreset(string DisplayName, int Width, int Height);
+
+public sealed record BitratePreset(string DisplayName, int Bitrate);
 
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);

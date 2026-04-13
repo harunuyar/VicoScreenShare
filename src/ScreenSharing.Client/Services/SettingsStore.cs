@@ -98,6 +98,7 @@ public sealed class SettingsStore
         public int MaxEncoderWidth { get; set; } = 1280;
         public int MaxEncoderHeight { get; set; } = 720;
         public int TargetFrameRate { get; set; } = 30;
+        public int TargetBitrate { get; set; } = 6_000_000;
         public VideoCodec Codec { get; set; } = VideoCodec.Vp8;
 
         public static PersistedSettings From(ClientSettings source) => new()
@@ -106,6 +107,7 @@ public sealed class SettingsStore
             MaxEncoderWidth = source.Video.MaxEncoderWidth,
             MaxEncoderHeight = source.Video.MaxEncoderHeight,
             TargetFrameRate = source.Video.TargetFrameRate,
+            TargetBitrate = source.Video.TargetBitrate,
             Codec = source.Video.Codec,
         };
 
@@ -118,6 +120,7 @@ public sealed class SettingsStore
                     MaxEncoderWidth = MaxEncoderWidth,
                     MaxEncoderHeight = MaxEncoderHeight,
                     TargetFrameRate = TargetFrameRate,
+                    TargetBitrate = TargetBitrate,
                     Codec = Codec,
                 },
             };

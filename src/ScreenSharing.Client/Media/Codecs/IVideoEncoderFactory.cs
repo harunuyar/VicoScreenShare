@@ -13,5 +13,5 @@ public interface IVideoEncoderFactory
 
     bool IsAvailable { get; }
 
-    IVideoEncoder CreateEncoder(int width, int height);
+    IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate);
 }

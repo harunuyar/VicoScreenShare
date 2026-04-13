@@ -15,6 +15,7 @@ internal sealed class VpxEncoder : IVideoEncoder
     private readonly VpxVideoEncoder _encoder;
     private readonly int _width;
     private readonly int _height;
+    private byte[] _i420Buffer = Array.Empty<byte>();
     private bool _disposed;
 
     public VpxEncoder(int width, int height)
@@ -30,15 +31,26 @@ internal sealed class VpxEncoder : IVideoEncoder
 
     public int Height => _height;
 
-    public byte[]? EncodeI420(byte[] i420)
+    public byte[]? EncodeBgra(byte[] bgra, int stride)
     {
         if (_disposed) return null;
+
+        // libvpx wants planar I420 input, so the BGRA-to-I420 conversion
+        // happens here rather than on the capture thread. Buffer is reused
+        // across calls to avoid GC pressure on the hot path.
+        var required = BgraToI420.RequiredOutputSize(_width, _height);
+        if (_i420Buffer.Length < required)
+        {
+            _i420Buffer = new byte[required];
+        }
+        BgraToI420.Convert(bgra.AsSpan(0, _height * stride), _width, _height, stride, _i420Buffer);
+
         try
         {
             return _encoder.EncodeVideo(
                 _width,
                 _height,
-                i420,
+                _i420Buffer,
                 VideoPixelFormatsEnum.I420,
                 VideoCodecsEnum.VP8);
         }

@@ -6,6 +6,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
@@ -60,6 +61,14 @@ public sealed partial class RoomViewModel : ViewModelBase
     private static readonly TimeSpan StaleFrameTimeout = TimeSpan.FromSeconds(2);
     private DispatcherTimer? _staleFrameTimer;
     private DateTime _lastRemoteFrameUtc = DateTime.MinValue;
+
+    // Stats overlay: polled twice a second off the media objects' counters.
+    private DispatcherTimer? _statsTimer;
+    private long _statsPrevSenderFrames;
+    private long _statsPrevSenderBytes;
+    private long _statsPrevReceiverFrames;
+    private long _statsPrevReceiverBytes;
+    private DateTime _statsPrevTickUtc = DateTime.MinValue;
 
     public RoomViewModel(
         SignalingClient signaling,
@@ -130,12 +139,17 @@ public sealed partial class RoomViewModel : ViewModelBase
         // ready to both send (when the user hits Share) and receive (whenever any
         // other peer's RTP flows through the SFU).
         _ = StartWebRtcAsync();
+
+        StartStatsTimer();
     }
 
     public ObservableCollection<PeerViewModel> Peers { get; }
 
     [ObservableProperty]
     private string _roomId;
+
+    [ObservableProperty]
+    private string _copyButtonText = "Copy";
 
     [ObservableProperty]
     private Guid _yourPeerId;
@@ -163,6 +177,14 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     [ObservableProperty]
     private string? _localStreamLabel;
+
+    // Stats panel — multi-line strings so the view can just bind to these
+    // and the layout stays simple. Updated twice a second.
+    [ObservableProperty]
+    private string _senderStats = "—";
+
+    [ObservableProperty]
+    private string _receiverStats = "—";
 
     public bool CanShareScreen => _captureProvider is not null;
 
@@ -309,10 +331,12 @@ public sealed partial class RoomViewModel : ViewModelBase
             {
                 await _signaling.SendStreamStartedAsync(streamId, StreamKind.Screen, hasAudio: false)
                     .ConfigureAwait(true);
+                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId})");
             }
-            catch
+            catch (Exception ex)
             {
                 // Signaling failure doesn't roll back the share; see comment above.
+                DebugLog.Write($"[room] SendStreamStartedAsync threw: {ex.Message}");
             }
         }
         catch (Exception ex)
@@ -352,6 +376,23 @@ public sealed partial class RoomViewModel : ViewModelBase
     /// click Share again manually — we don't auto-resume because the
     /// capture source selection is user-driven.
     /// </summary>
+    /// <summary>
+    /// Called by the view's Copy button handler after the clipboard write
+    /// succeeds. Flips the button label to "Copied!" for a moment so the
+    /// user gets visible feedback, then restores "Copy".
+    /// </summary>
+    public void OnRoomIdCopied()
+    {
+        CopyButtonText = "Copied!";
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            CopyButtonText = "Copy";
+        };
+        timer.Start();
+    }
+
     public async Task RebuildMediaGraphAsync()
     {
         MediaStatus = "Switching codec...";
@@ -450,8 +491,12 @@ public sealed partial class RoomViewModel : ViewModelBase
             try
             {
                 await _signaling.SendStreamEndedAsync(streamId).ConfigureAwait(true);
+                DebugLog.Write($"[room] sent StreamEnded (streamId={streamId})");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[room] SendStreamEndedAsync threw: {ex.Message}");
+            }
         }
     }
 
@@ -527,21 +572,28 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnStreamStartedReceived(StreamStarted message)
     {
+        DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId})");
         Dispatcher.UIThread.Post(() =>
         {
             // Ignore our own echo if the server ever delivers it (currently it
             // excludes the sender, but we guard anyway).
-            if (message.PeerId == YourPeerId) return;
+            if (message.PeerId == YourPeerId)
+            {
+                DebugLog.Write("[room] StreamStarted ignored — self echo");
+                return;
+            }
 
             _currentlyStreamingPeerId = message.PeerId;
             _lastRemoteFrameUtc = DateTime.UtcNow;
             MediaStatus = "Waiting for first frame...";
             StartStaleFrameTimer();
+            DebugLog.Write($"[room] tracking streamer {message.PeerId}, waiting for decoded frames");
         });
     }
 
     private void OnStreamEndedReceived(StreamEnded message)
     {
+        DebugLog.Write($"[room] StreamEnded received from {message.PeerId} (current={_currentlyStreamingPeerId})");
         Dispatcher.UIThread.Post(() =>
         {
             if (_currentlyStreamingPeerId != message.PeerId) return;
@@ -585,6 +637,87 @@ public sealed partial class RoomViewModel : ViewModelBase
         ClearRemoteStream("Stream stalled");
     }
 
+    private void StartStatsTimer()
+    {
+        if (_statsTimer is not null) return;
+        _statsPrevTickUtc = DateTime.UtcNow;
+        _statsTimer = new DispatcherTimer(
+            TimeSpan.FromMilliseconds(500),
+            DispatcherPriority.Background,
+            OnStatsTick);
+        _statsTimer.Start();
+    }
+
+    private void StopStatsTimer()
+    {
+        _statsTimer?.Stop();
+        _statsTimer = null;
+    }
+
+    private void OnStatsTick(object? sender, EventArgs e)
+    {
+        var now = DateTime.UtcNow;
+        var elapsedSeconds = Math.Max(0.001, (now - _statsPrevTickUtc).TotalSeconds);
+        _statsPrevTickUtc = now;
+
+        SenderStats = BuildSenderStats(elapsedSeconds);
+        ReceiverStats = BuildReceiverStats(elapsedSeconds);
+    }
+
+    private string BuildSenderStats(double elapsedSeconds)
+    {
+        var streamer = _captureStreamer;
+        if (streamer is null)
+        {
+            return "not sharing";
+        }
+
+        var currentFrames = streamer.EncodedFrameCount;
+        var currentBytes = streamer.EncodedByteCount;
+        var deltaFrames = currentFrames - _statsPrevSenderFrames;
+        var deltaBytes = currentBytes - _statsPrevSenderBytes;
+        _statsPrevSenderFrames = currentFrames;
+        _statsPrevSenderBytes = currentBytes;
+
+        var fps = deltaFrames / elapsedSeconds;
+        var mbps = deltaBytes * 8.0 / elapsedSeconds / 1_000_000.0;
+        var codec = streamer.CurrentCodec?.ToString() ?? "—";
+
+        return
+            $"codec:  {codec}\n" +
+            $"src:    {streamer.SourceWidth}x{streamer.SourceHeight}\n" +
+            $"enc:    {streamer.EncoderWidth}x{streamer.EncoderHeight}\n" +
+            $"fps:    {fps:F1} / {streamer.TargetFps}\n" +
+            $"rate:   {mbps:F2} / {streamer.TargetBitrate / 1_000_000.0:F1} Mbps\n" +
+            $"frames: {streamer.EncodedFrameCount} ({streamer.FrameCount - streamer.EncodedFrameCount} dropped)";
+    }
+
+    private string BuildReceiverStats(double elapsedSeconds)
+    {
+        var receiver = _streamReceiver;
+        if (receiver is null || receiver.FramesDecoded == 0)
+        {
+            return "no incoming stream";
+        }
+
+        var currentFrames = receiver.FramesDecoded;
+        var currentBytes = receiver.EncodedByteCount;
+        var deltaFrames = currentFrames - _statsPrevReceiverFrames;
+        var deltaBytes = currentBytes - _statsPrevReceiverBytes;
+        _statsPrevReceiverFrames = currentFrames;
+        _statsPrevReceiverBytes = currentBytes;
+
+        var fps = deltaFrames / elapsedSeconds;
+        var mbps = deltaBytes * 8.0 / elapsedSeconds / 1_000_000.0;
+
+        return
+            $"codec:  {receiver.Codec}\n" +
+            $"size:   {receiver.LastWidth}x{receiver.LastHeight}\n" +
+            $"fps:    {fps:F1}\n" +
+            $"rate:   {mbps:F2} Mbps\n" +
+            $"frames: {receiver.FramesDecoded}";
+    }
+
     private void OnServerError(ErrorCode code, string message)
     {
         Dispatcher.UIThread.Post(() => StatusMessage = $"Server error: {message}");
@@ -610,6 +743,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.StreamStartedReceived -= OnStreamStartedReceived;
         _signaling.StreamEndedReceived -= OnStreamEndedReceived;
         StopStaleFrameTimer();
+        StopStatsTimer();
 
         await StopSharingInternalAsync().ConfigureAwait(true);
 

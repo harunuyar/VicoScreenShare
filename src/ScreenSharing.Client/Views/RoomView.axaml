@@ -12,7 +12,14 @@
         <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto">
             <StackPanel Grid.Column="0" Spacing="4">
                 <TextBlock Text="Room" Opacity="0.6" FontSize="12" />
-                <TextBlock Text="{Binding RoomId}" FontSize="28" FontWeight="Bold" />
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding RoomId}" FontSize="28" FontWeight="Bold" VerticalAlignment="Center" />
+                    <Button Name="CopyRoomIdButton"
+                            Content="{Binding CopyButtonText}"
+                            Click="OnCopyRoomIdClick"
+                            VerticalAlignment="Center"
+                            Padding="12,4" />
+                </StackPanel>
             </StackPanel>
             <Button Grid.Column="1"
                     Content="Share screen"
@@ -92,35 +99,61 @@
 
             </Grid>
 
-            <Border Grid.Column="1"
-                    CornerRadius="8"
-                    BorderThickness="1"
-                    BorderBrush="#40808080"
-                    Padding="12">
-                <DockPanel>
-                    <TextBlock DockPanel.Dock="Top"
-                               Text="People in this room"
-                               FontWeight="SemiBold"
-                               Margin="0,0,0,8" />
-                    <ListBox ItemsSource="{Binding Peers}">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate DataType="vm:PeerViewModel">
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
-                                    <Border CornerRadius="10" Background="#4CAF50" Padding="6,1"
-                                            IsVisible="{Binding IsHost}">
-                                        <TextBlock Text="host" FontSize="10" Foreground="White" />
-                                    </Border>
-                                    <Border CornerRadius="10" Background="#4080FF" Padding="6,1"
-                                            IsVisible="{Binding IsSelf}">
-                                        <TextBlock Text="you" FontSize="10" Foreground="White" />
-                                    </Border>
-                                </StackPanel>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </DockPanel>
-            </Border>
+            <Grid Grid.Column="1" RowDefinitions="*,Auto">
+                <Border Grid.Row="0"
+                        CornerRadius="8"
+                        BorderThickness="1"
+                        BorderBrush="#40808080"
+                        Padding="12">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top"
+                                   Text="People in this room"
+                                   FontWeight="SemiBold"
+                                   Margin="0,0,0,8" />
+                        <ListBox ItemsSource="{Binding Peers}">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="vm:PeerViewModel">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                                        <Border CornerRadius="10" Background="#4CAF50" Padding="6,1"
+                                                IsVisible="{Binding IsHost}">
+                                            <TextBlock Text="host" FontSize="10" Foreground="White" />
+                                        </Border>
+                                        <Border CornerRadius="10" Background="#4080FF" Padding="6,1"
+                                                IsVisible="{Binding IsSelf}">
+                                            <TextBlock Text="you" FontSize="10" Foreground="White" />
+                                        </Border>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </Border>
+
+                <Border Grid.Row="1"
+                        Margin="0,12,0,0"
+                        CornerRadius="8"
+                        BorderThickness="1"
+                        BorderBrush="#40808080"
+                        Padding="12">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Stats"
+                                   FontWeight="SemiBold" />
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Sending" Opacity="0.6" FontSize="11" />
+                            <TextBlock Text="{Binding SenderStats}"
+                                       FontFamily="Consolas,Menlo,monospace"
+                                       FontSize="11" />
+                        </StackPanel>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Receiving" Opacity="0.6" FontSize="11" />
+                            <TextBlock Text="{Binding ReceiverStats}"
+                                       FontFamily="Consolas,Menlo,monospace"
+                                       FontSize="11" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </Grid>
 
         </Grid>
 
