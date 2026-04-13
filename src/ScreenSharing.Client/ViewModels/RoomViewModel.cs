@@ -395,6 +395,23 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     public async Task RebuildMediaGraphAsync()
     {
+        // Only the codec change actually requires a new peer connection —
+        // fps / bitrate / resolution are read fresh by the next
+        // CaptureStreamer from _settings.Video at share time, and they
+        // don't touch the negotiated SDP at all. Tearing down the WebRtc
+        // session for those changes is wasteful AND breaks the receiver:
+        // the server's SfuPeer can't cleanly handle a re-offer from the
+        // same client peer id (SIPSorcery's setRemoteDescription on an
+        // already-connected RTCPeerConnection leaves the fan-out tracks
+        // wedged), so any peer that was watching this stream sees a
+        // permanently blank tile.
+        if (_settings.Video.Codec == _sessionCodec)
+        {
+            DebugLog.Write($"[room] RebuildMediaGraphAsync no-op — codec unchanged ({_sessionCodec}); fps/bitrate/resolution apply on next Share");
+            return;
+        }
+
+        DebugLog.Write($"[room] RebuildMediaGraphAsync — codec switch {_sessionCodec} -> {_settings.Video.Codec}");
         MediaStatus = "Switching codec...";
 
         // Stop any in-flight share so the encoder stops feeding the (soon

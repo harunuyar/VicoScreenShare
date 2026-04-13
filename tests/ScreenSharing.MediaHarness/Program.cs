@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Windows.Media.Codecs;
 using Vortice.Direct3D11;
@@ -43,6 +44,7 @@ internal static class Program
             {
                 "bench-encode" => RunEncodeBenchmark(argMap),
                 "bench-encode-gpu" => RunGpuEncodeBenchmark(argMap),
+                "bench-downscale" => RunDownscaleBenchmark(argMap),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -318,6 +320,53 @@ internal static class Program
         var meetingTarget = actualFps >= fps * 0.95;
         Console.WriteLine($"VERDICT: {(meetingTarget ? "PASS" : "FAIL")} (fps {actualFps:F1}/{fps})");
         return meetingTarget ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Bench scenario for the BgraDownscale hot path. Runs N iterations of
+    /// nearest-neighbor downscale from src dims to dst dims and reports
+    /// average / min / max time per call. Useful for verifying optimization
+    /// changes without firing up the whole encode pipeline.
+    /// </summary>
+    private static int RunDownscaleBenchmark(Dictionary<string, string> args)
+    {
+        var srcWidth = int.Parse(args.GetValueOrDefault("src-width", "2560"));
+        var srcHeight = int.Parse(args.GetValueOrDefault("src-height", "1392"));
+        var dstWidth = int.Parse(args.GetValueOrDefault("dst-width", "1920"));
+        var dstHeight = int.Parse(args.GetValueOrDefault("dst-height", "1044"));
+        var iterations = int.Parse(args.GetValueOrDefault("iterations", "200"));
+
+        Console.WriteLine($"# bench-downscale {srcWidth}x{srcHeight} -> {dstWidth}x{dstHeight} iterations={iterations}");
+
+        var src = new byte[srcWidth * srcHeight * 4];
+        var dst = new byte[dstWidth * dstHeight * 4];
+        for (var i = 0; i < src.Length; i++) src[i] = (byte)(i & 0xFF);
+
+        for (var w = 0; w < 5; w++)
+        {
+            BgraDownscale.Downscale(src, srcWidth, srcHeight, dst, dstWidth, dstHeight);
+        }
+
+        var totalMs = 0.0;
+        var maxMs = 0.0;
+        var minMs = double.MaxValue;
+        for (var i = 0; i < iterations; i++)
+        {
+            var start = Stopwatch.GetTimestamp();
+            BgraDownscale.Downscale(src, srcWidth, srcHeight, dst, dstWidth, dstHeight);
+            var end = Stopwatch.GetTimestamp();
+            var ms = (end - start) * 1000.0 / Stopwatch.Frequency;
+            totalMs += ms;
+            if (ms > maxMs) maxMs = ms;
+            if (ms < minMs) minMs = ms;
+        }
+
+        var avgMs = totalMs / iterations;
+        Console.WriteLine($"RESULT: avg_ms={avgMs:F2}");
+        Console.WriteLine($"RESULT: min_ms={minMs:F2}");
+        Console.WriteLine($"RESULT: max_ms={maxMs:F2}");
+        Console.WriteLine($"RESULT: implied_fps_cap={1000.0 / avgMs:F0}");
+        return 0;
     }
 
     private static void FillSyntheticNv12(byte[] nv12, int width, int height)
