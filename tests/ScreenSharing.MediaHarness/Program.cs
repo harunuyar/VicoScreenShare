@@ -721,7 +721,7 @@ internal static class Program
         var senderRoomJoined = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
         senderSig.RoomJoined += j => senderRoomJoined.TrySetResult(j);
         await senderSig.ConnectAsync(wsUri, new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current), cts.Token);
-        await senderSig.CreateRoomAsync(null, cts.Token);
+        await senderSig.CreateRoomAsync(cts.Token);
         var senderJoin = await senderRoomJoined.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
         var roomId = senderJoin.RoomId;
 
@@ -748,7 +748,7 @@ internal static class Program
         var receiverRoomJoined = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
         receiverSig.RoomJoined += j => receiverRoomJoined.TrySetResult(j);
         await receiverSig.ConnectAsync(wsUri, new ClientHello(Guid.NewGuid(), "Bob", ProtocolVersion.Current), cts.Token);
-        await receiverSig.JoinRoomAsync(roomId, null, cts.Token);
+        await receiverSig.JoinRoomAsync(roomId, cts.Token);
         await receiverRoomJoined.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
 
         await using var receiverRtc = new WebRtcSession(receiverSig, WebRtcRole.Receiver, VideoCodec.H264);

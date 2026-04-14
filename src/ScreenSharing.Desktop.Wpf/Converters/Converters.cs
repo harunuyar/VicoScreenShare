@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
-using ScreenSharing.Desktop.Wpf.ViewModels;
-using ScreenSharing.Desktop.Wpf.Views;
+using ScreenSharing.Desktop.App.ViewModels;
+using ScreenSharing.Desktop.App.Views;
 
-namespace ScreenSharing.Desktop.Wpf.Converters;
+namespace ScreenSharing.Desktop.App.Converters;
 
 /// <summary>
 /// Small set of value converters the XAML needs. Kept in one file.

@@ -9,20 +9,15 @@ public sealed class Room
     private readonly object _lock = new();
     private readonly List<RoomPeer> _peers = new();
 
-    public Room(string id, string? passwordHash)
+    public Room(string id)
     {
         Id = id;
-        PasswordHash = passwordHash;
         CreatedAt = DateTime.UtcNow;
     }
 
     public string Id { get; }
 
-    public string? PasswordHash { get; }
-
     public DateTime CreatedAt { get; }
-
-    public bool HasPassword => PasswordHash is not null;
 
     public int PeerCount
     {

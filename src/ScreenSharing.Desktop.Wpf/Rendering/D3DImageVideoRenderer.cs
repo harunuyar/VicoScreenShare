@@ -10,7 +10,7 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.Mathematics;
 
-namespace ScreenSharing.Desktop.Wpf.Rendering;
+namespace ScreenSharing.Desktop.App.Rendering;
 
 /// <summary>
 /// Hosts a child Win32 HWND with its own DXGI swap chain and presents
@@ -45,6 +45,26 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         get => (StreamReceiver?)GetValue(ReceiverProperty);
         set => SetValue(ReceiverProperty, value);
+    }
+
+    /// <summary>
+    /// Optional local capture source — when non-null, the renderer
+    /// subscribes to <see cref="ICaptureSource.FrameArrived"/> on this
+    /// source instead of <see cref="Receiver"/>, so the streamer sees
+    /// a self-preview of what they're sharing. Set to null to go back
+    /// to rendering the remote stream.
+    /// </summary>
+    public static readonly DependencyProperty LocalPreviewSourceProperty =
+        DependencyProperty.Register(
+            nameof(LocalPreviewSource),
+            typeof(ICaptureSource),
+            typeof(D3DImageVideoRenderer),
+            new PropertyMetadata(null, OnLocalPreviewSourceChanged));
+
+    public ICaptureSource? LocalPreviewSource
+    {
+        get => (ICaptureSource?)GetValue(LocalPreviewSourceProperty);
+        set => SetValue(LocalPreviewSourceProperty, value);
     }
 
     private const int WS_CHILD = 0x40000000;
@@ -107,6 +127,7 @@ public sealed class D3DImageVideoRenderer : HwndHost
     private int _swapChainWidth;
     private int _swapChainHeight;
     private StreamReceiver? _attachedReceiver;
+    private ICaptureSource? _attachedLocalSource;
     private readonly object _renderLock = new();
     private bool _disposed;
 
@@ -157,7 +178,7 @@ public sealed class D3DImageVideoRenderer : HwndHost
         // before WPF has laid the element out. InitD3D runs lazily on
         // the first OnFrameArrived call, when we know both the window
         // size (via Arrange) and the frame size.
-        AttachReceiver(Receiver);
+        RefreshActiveFrameSource();
         return new HandleRef(this, _hwnd);
     }
 
@@ -167,11 +188,17 @@ public sealed class D3DImageVideoRenderer : HwndHost
         {
             _disposed = true;
             DetachReceiver();
+            DetachLocalSource();
             _scaler?.Dispose(); _scaler = null;
             _uploadTexture?.Dispose(); _uploadTexture = null;
             _swapChain?.Dispose(); _swapChain = null;
-            _context?.Dispose(); _context = null;
-            _device?.Dispose(); _device = null;
+            // _device and _context are borrowed from App.SharedDevices.
+            // This renderer can be instantiated more than once (main
+            // tile + self-preview tile), so we must NOT dispose them —
+            // the other instance is still using them and the App exit
+            // path is the one that actually owns their lifetime.
+            _context = null;
+            _device = null;
         }
         if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd);
         _hwnd = IntPtr.Zero;
@@ -276,28 +303,43 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static void OnReceiverChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is D3DImageVideoRenderer self)
+        if (d is D3DImageVideoRenderer self) self.RefreshActiveFrameSource();
+    }
+
+    private static void OnLocalPreviewSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is D3DImageVideoRenderer self) self.RefreshActiveFrameSource();
+    }
+
+    /// <summary>
+    /// Picks which frame source feeds the renderer: local capture takes
+    /// precedence (so a streamer sees their own screen), remote receiver
+    /// otherwise. Detaches from the previously-active source first so we
+    /// never have both pumping the same <see cref="OnFrameArrived"/>.
+    /// </summary>
+    private void RefreshActiveFrameSource()
+    {
+        DetachReceiver();
+        DetachLocalSource();
+        if (_hwnd == IntPtr.Zero)
         {
-            self.DetachReceiver();
-            self.AttachReceiver((StreamReceiver?)e.NewValue);
+            // HwndHost hasn't built yet — BuildWindowCore will call us
+            // again with both DP values already in place.
+            return;
+        }
+        if (LocalPreviewSource is { } local)
+        {
+            AttachLocalSource(local);
+            return;
+        }
+        if (Receiver is { } receiver)
+        {
+            AttachReceiver(receiver);
         }
     }
 
-    private void AttachReceiver(StreamReceiver? receiver)
+    private void AttachReceiver(StreamReceiver receiver)
     {
-        if (receiver is null)
-        {
-            ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] AttachReceiver called with null receiver");
-            return;
-        }
-        if (_hwnd == IntPtr.Zero)
-        {
-            // HwndHost hasn't built yet. BuildWindowCore will call
-            // AttachReceiver(Receiver) once it has, so the subscription
-            // lands at that point with the DP value already set.
-            ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] AttachReceiver skipped — hwnd not yet built");
-            return;
-        }
         _attachedReceiver = receiver;
         receiver.FrameArrived += OnFrameArrived;
         ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] subscribed to StreamReceiver.FrameArrived");
@@ -309,6 +351,21 @@ public sealed class D3DImageVideoRenderer : HwndHost
         try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch { }
         _attachedReceiver = null;
         ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed StreamReceiver.FrameArrived");
+    }
+
+    private void AttachLocalSource(ICaptureSource source)
+    {
+        _attachedLocalSource = source;
+        source.FrameArrived += OnFrameArrived;
+        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] subscribed to ICaptureSource.FrameArrived (local preview)");
+    }
+
+    private void DetachLocalSource()
+    {
+        if (_attachedLocalSource is null) return;
+        try { _attachedLocalSource.FrameArrived -= OnFrameArrived; } catch { }
+        _attachedLocalSource = null;
+        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed ICaptureSource.FrameArrived (local preview)");
     }
 
     private long _frameArrivedCount;

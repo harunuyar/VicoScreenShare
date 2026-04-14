@@ -6,8 +6,10 @@ using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Windows.Capture;
 using ScreenSharing.Client.Windows.Direct3D;
 using ScreenSharing.Client.Windows.Media.Codecs;
+using Wpf.Ui.Appearance;
+using Wpf.Ui.Controls;
 
-namespace ScreenSharing.Desktop.Wpf;
+namespace ScreenSharing.Desktop.App;
 
 public partial class App : Application
 {
@@ -23,6 +25,11 @@ public partial class App : Application
     {
         DebugLog.Reset();
         DebugLog.Write($"== ScreenSharing (WPF) start @ {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==");
+
+        // Apply Fluent dark theme before any window materializes so the
+        // first paint is already themed — otherwise you get a single
+        // frame of default-WPF chrome at startup.
+        ApplicationThemeManager.Apply(ApplicationTheme.Dark, WindowBackdropType.Mica, updateAccent: true);
 
         var sharedDevices = new D3D11DeviceManager();
         sharedDevices.Initialize();

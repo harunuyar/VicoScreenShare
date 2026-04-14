@@ -1,6 +1,5 @@
 using FluentAssertions;
 using Microsoft.Extensions.Options;
-using ScreenSharing.Server.Auth;
 using ScreenSharing.Server.Config;
 using ScreenSharing.Server.Rooms;
 
@@ -16,59 +15,39 @@ public class RoomManagerTests
             MaxTotalRooms = maxRooms,
         });
         var monitor = new StaticOptionsMonitor<RoomServerOptions>(options.Value);
-        return new RoomManager(new PasswordHasher(), monitor);
+        return new RoomManager(monitor);
     }
 
     private static RoomPeer MakePeer(string name = "Alice") =>
         new(Guid.NewGuid(), Guid.NewGuid(), name);
 
     [Fact]
-    public void CreateRoom_without_password_returns_success()
+    public void CreateRoom_returns_success_with_six_char_id()
     {
         var mgr = CreateManager();
-        var result = mgr.CreateRoom(null);
+        var result = mgr.CreateRoom();
 
         result.Status.Should().Be(CreateRoomStatus.Success);
         result.Room.Should().NotBeNull();
         result.Room!.Id.Should().HaveLength(6);
-        result.Room.HasPassword.Should().BeFalse();
-    }
-
-    [Fact]
-    public void CreateRoom_with_password_stores_hash_not_plaintext()
-    {
-        var mgr = CreateManager();
-        var result = mgr.CreateRoom("hunter2");
-        result.Room!.PasswordHash.Should().NotBeNull();
-        result.Room.PasswordHash.Should().NotBe("hunter2");
     }
 
     [Fact]
     public void TryJoin_returns_NotFound_for_unknown_room()
     {
         var mgr = CreateManager();
-        var result = mgr.TryJoin("NOPE42", null, MakePeer());
+        var result = mgr.TryJoin("NOPE42", MakePeer());
         result.Status.Should().Be(JoinRoomStatus.NotFound);
     }
 
     [Fact]
-    public void TryJoin_rejects_wrong_password()
+    public void TryJoin_first_peer_becomes_host()
     {
         var mgr = CreateManager();
-        var room = mgr.CreateRoom("secret").Room!;
-
-        var result = mgr.TryJoin(room.Id, "wrong", MakePeer());
-        result.Status.Should().Be(JoinRoomStatus.InvalidPassword);
-    }
-
-    [Fact]
-    public void TryJoin_accepts_correct_password_and_becomes_host()
-    {
-        var mgr = CreateManager();
-        var room = mgr.CreateRoom("secret").Room!;
+        var room = mgr.CreateRoom().Room!;
         var peer = MakePeer();
 
-        var result = mgr.TryJoin(room.Id, "secret", peer);
+        var result = mgr.TryJoin(room.Id, peer);
 
         result.Status.Should().Be(JoinRoomStatus.Success);
         result.HostPeerId.Should().Be(peer.PeerId);
@@ -79,12 +58,12 @@ public class RoomManagerTests
     public void Second_peer_joins_but_first_remains_host()
     {
         var mgr = CreateManager();
-        var room = mgr.CreateRoom(null).Room!;
+        var room = mgr.CreateRoom().Room!;
         var alice = MakePeer("Alice");
         var bob = MakePeer("Bob");
 
-        mgr.TryJoin(room.Id, null, alice);
-        var result = mgr.TryJoin(room.Id, null, bob);
+        mgr.TryJoin(room.Id, alice);
+        var result = mgr.TryJoin(room.Id, bob);
 
         result.Status.Should().Be(JoinRoomStatus.Success);
         result.HostPeerId.Should().Be(alice.PeerId);
@@ -95,14 +74,14 @@ public class RoomManagerTests
     public void TryJoin_returns_Full_at_capacity()
     {
         var mgr = CreateManager(capacity: 3);
-        var room = mgr.CreateRoom(null).Room!;
+        var room = mgr.CreateRoom().Room!;
 
         for (var i = 0; i < 3; i++)
         {
-            mgr.TryJoin(room.Id, null, MakePeer($"P{i}"));
+            mgr.TryJoin(room.Id, MakePeer($"P{i}"));
         }
 
-        var overflow = mgr.TryJoin(room.Id, null, MakePeer("Over"));
+        var overflow = mgr.TryJoin(room.Id, MakePeer("Over"));
         overflow.Status.Should().Be(JoinRoomStatus.Full);
     }
 
@@ -110,12 +89,12 @@ public class RoomManagerTests
     public void RemovePeer_promotes_next_oldest_when_host_leaves()
     {
         var mgr = CreateManager();
-        var room = mgr.CreateRoom(null).Room!;
+        var room = mgr.CreateRoom().Room!;
         var alice = MakePeer("Alice");
         var bob = MakePeer("Bob");
 
-        mgr.TryJoin(room.Id, null, alice);
-        mgr.TryJoin(room.Id, null, bob);
+        mgr.TryJoin(room.Id, alice);
+        mgr.TryJoin(room.Id, bob);
 
         var outcome = mgr.RemovePeer(room.Id, alice.PeerId);
 
@@ -129,9 +108,9 @@ public class RoomManagerTests
     public void RemovePeer_deletes_room_when_last_peer_leaves()
     {
         var mgr = CreateManager();
-        var room = mgr.CreateRoom(null).Room!;
+        var room = mgr.CreateRoom().Room!;
         var alice = MakePeer("Alice");
-        mgr.TryJoin(room.Id, null, alice);
+        mgr.TryJoin(room.Id, alice);
 
         var outcome = mgr.RemovePeer(room.Id, alice.PeerId);
 
@@ -143,7 +122,7 @@ public class RoomManagerTests
     public void Different_rooms_get_different_ids()
     {
         var mgr = CreateManager();
-        var ids = Enumerable.Range(0, 20).Select(_ => mgr.CreateRoom(null).Room!.Id).ToList();
+        var ids = Enumerable.Range(0, 20).Select(_ => mgr.CreateRoom().Room!.Id).ToList();
         ids.Distinct().Should().HaveCount(20);
     }
 

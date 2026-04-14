@@ -3,12 +3,12 @@ using System.Windows;
 using System.Windows.Interop;
 using ScreenSharing.Client;
 using ScreenSharing.Client.Services;
-using ScreenSharing.Desktop.Wpf.Services;
-using ScreenSharing.Desktop.Wpf.ViewModels;
+using ScreenSharing.Desktop.App.Services;
+using ScreenSharing.Desktop.App.ViewModels;
 
-namespace ScreenSharing.Desktop.Wpf;
+namespace ScreenSharing.Desktop.App;
 
-public partial class MainWindow : Window
+public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 {
     public MainWindow()
     {

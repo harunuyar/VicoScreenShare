@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using ScreenSharing.Server.Auth;
 using ScreenSharing.Server.Config;
 using ScreenSharing.Server.Sfu;
 
@@ -18,16 +17,13 @@ public sealed class RoomManager
 
     private readonly ConcurrentDictionary<string, Room> _rooms = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SfuSession> _sfuSessions = new(StringComparer.OrdinalIgnoreCase);
-    private readonly PasswordHasher _hasher;
     private readonly IOptionsMonitor<RoomServerOptions> _options;
     private readonly ILoggerFactory? _loggerFactory;
 
     public RoomManager(
-        PasswordHasher hasher,
         IOptionsMonitor<RoomServerOptions> options,
         ILoggerFactory? loggerFactory = null)
     {
-        _hasher = hasher;
         _options = options;
         _loggerFactory = loggerFactory;
     }
@@ -37,7 +33,7 @@ public sealed class RoomManager
     public SfuSession? GetSfuSession(string roomId) =>
         _sfuSessions.TryGetValue(roomId, out var sfu) ? sfu : null;
 
-    public CreateRoomResult CreateRoom(string? password)
+    public CreateRoomResult CreateRoom()
     {
         var opts = _options.CurrentValue;
         if (_rooms.Count >= opts.MaxTotalRooms)
@@ -45,12 +41,10 @@ public sealed class RoomManager
             return CreateRoomResult.ServerFull();
         }
 
-        var hash = string.IsNullOrEmpty(password) ? null : _hasher.Hash(password!);
-
         for (var attempt = 0; attempt < CreateCollisionRetries; attempt++)
         {
             var id = GenerateId();
-            var room = new Room(id, hash);
+            var room = new Room(id);
             if (_rooms.TryAdd(id, room))
             {
                 _sfuSessions[id] = new SfuSession(_loggerFactory);
@@ -60,24 +54,11 @@ public sealed class RoomManager
         return CreateRoomResult.CollisionRetriesExceeded();
     }
 
-    public JoinRoomResult TryJoin(string roomId, string? password, RoomPeer peer)
+    public JoinRoomResult TryJoin(string roomId, RoomPeer peer)
     {
         if (!_rooms.TryGetValue(roomId, out var room))
         {
             return JoinRoomResult.NotFound();
-        }
-
-        if (room.PasswordHash is not null)
-        {
-            if (!_hasher.Verify(password ?? string.Empty, room.PasswordHash))
-            {
-                return JoinRoomResult.InvalidPassword();
-            }
-        }
-        else if (!string.IsNullOrEmpty(password))
-        {
-            // Room is public; a client sending a password is a protocol mismatch,
-            // but accept for convenience in Phase 1.
         }
 
         var add = room.TryAddPeer(peer, _options.CurrentValue.MaxRoomCapacity);
@@ -156,7 +137,6 @@ public enum JoinRoomStatus
 {
     Success,
     NotFound,
-    InvalidPassword,
     Full,
     AlreadyIn,
 }
@@ -170,7 +150,6 @@ public readonly record struct JoinRoomResult(
     public static JoinRoomResult Success(Room room, Guid hostPeerId, IReadOnlyList<RoomPeer> snapshot) =>
         new(JoinRoomStatus.Success, room, hostPeerId, snapshot);
     public static JoinRoomResult NotFound() => new(JoinRoomStatus.NotFound, null, Guid.Empty, Array.Empty<RoomPeer>());
-    public static JoinRoomResult InvalidPassword() => new(JoinRoomStatus.InvalidPassword, null, Guid.Empty, Array.Empty<RoomPeer>());
     public static JoinRoomResult Full() => new(JoinRoomStatus.Full, null, Guid.Empty, Array.Empty<RoomPeer>());
     public static JoinRoomResult AlreadyIn() => new(JoinRoomStatus.AlreadyIn, null, Guid.Empty, Array.Empty<RoomPeer>());
 }

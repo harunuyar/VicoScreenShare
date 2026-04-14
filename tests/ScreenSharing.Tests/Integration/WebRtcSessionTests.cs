@@ -38,7 +38,7 @@ public sealed class WebRtcSessionTests
             signaling.RoomJoined += j => roomJoinedTcs.TrySetResult(j);
 
             await signaling.ConnectAsync(wsUri, hello, cts.Token);
-            await signaling.CreateRoomAsync(null, cts.Token);
+            await signaling.CreateRoomAsync(cts.Token);
 
             await roomJoinedTcs.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
 

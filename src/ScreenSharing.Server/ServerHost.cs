@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using ScreenSharing.Server.Auth;
 using ScreenSharing.Server.Config;
 using ScreenSharing.Server.Rooms;
 using ScreenSharing.Server.Signaling;
@@ -28,7 +27,6 @@ public static class ServerHost
         {
             services.Configure<RoomServerOptions>(_ => { });
         }
-        services.AddSingleton<PasswordHasher>();
         services.AddSingleton<RoomManager>();
         services.AddSingleton<SessionRegistry>();
     }

@@ -38,7 +38,7 @@ public sealed class LoopbackMediaE2ETests
         senderSignaling.RoomJoined += j => senderRoomJoined.TrySetResult(j);
 
         await senderSignaling.ConnectAsync(wsUri, new ClientHello(Guid.NewGuid(), "Alice", ProtocolVersion.Current), cts.Token);
-        await senderSignaling.CreateRoomAsync(null, cts.Token);
+        await senderSignaling.CreateRoomAsync(cts.Token);
         var senderJoin = await senderRoomJoined.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
         var roomId = senderJoin.RoomId;
 
@@ -58,7 +58,7 @@ public sealed class LoopbackMediaE2ETests
         receiverSignaling.RoomJoined += j => receiverRoomJoined.TrySetResult(j);
 
         await receiverSignaling.ConnectAsync(wsUri, new ClientHello(Guid.NewGuid(), "Bob", ProtocolVersion.Current), cts.Token);
-        await receiverSignaling.JoinRoomAsync(roomId, null, cts.Token);
+        await receiverSignaling.JoinRoomAsync(roomId, cts.Token);
         await receiverRoomJoined.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
 
         await using var receiverRtc = new WebRtcSession(receiverSignaling, WebRtcRole.Receiver);

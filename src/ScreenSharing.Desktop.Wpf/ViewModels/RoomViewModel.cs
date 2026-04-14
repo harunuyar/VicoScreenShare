@@ -11,11 +11,11 @@ using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
-using ScreenSharing.Desktop.Wpf.Services;
+using ScreenSharing.Desktop.App.Services;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
 
-namespace ScreenSharing.Desktop.Wpf.ViewModels;
+namespace ScreenSharing.Desktop.App.ViewModels;
 
 /// <summary>
 /// Room session view model. Owns the WebRTC peer connection, the stream
@@ -47,16 +47,26 @@ public sealed partial class RoomViewModel : ViewModelBase
     private Guid? _currentlyStreamingPeerId;
     private string? _localStreamId;
 
-    private static readonly TimeSpan StaleFrameTimeout = TimeSpan.FromSeconds(2);
+    // Remote-tile stall state machine.
+    //   Active                                      — frames flowing
+    //   no frame for PauseAfter         → Paused    — "Paused" overlay
+    //   no frame for PauseAfter + IdleAfter → Idle  — empty state
+    // A new frame from any moment flips us straight back to Active.
+    private static readonly TimeSpan PauseAfter = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan IdleAfter = TimeSpan.FromSeconds(5);
     private DispatcherTimer? _staleFrameTimer;
     private DateTime _lastRemoteFrameUtc = DateTime.MinValue;
 
+    // Per-stream stats. Two timers would be pointless — one 500 ms
+    // DispatcherTimer computes fps/mbps deltas for whichever tile is
+    // currently showing its overlay. Previous-value state lives here.
     private DispatcherTimer? _statsTimer;
     private long _statsPrevSenderFrames;
     private long _statsPrevSenderBytes;
     private long _statsPrevReceiverFrames;
     private long _statsPrevReceiverBytes;
     private DateTime _statsPrevTickUtc = DateTime.MinValue;
+
 
     public RoomViewModel(
         SignalingClient signaling,
@@ -103,18 +113,32 @@ public sealed partial class RoomViewModel : ViewModelBase
         _signaling.StreamStartedReceived += OnStreamStartedReceived;
         _signaling.StreamEndedReceived += OnStreamEndedReceived;
 
+        // Seed the per-peer IsStreaming flag from the initial roster so
+        // the members strip already shows live dots on anyone who was
+        // mid-stream when we joined.
+        foreach (var p in initial.Peers)
+        {
+            var vm = Peers.FirstOrDefault(x => x.PeerId == p.PeerId);
+            if (vm is not null) vm.IsStreaming = p.IsStreaming;
+        }
+
         var existingStreamer = initial.Peers.FirstOrDefault(
             p => p.IsStreaming && p.PeerId != initial.YourPeerId);
         if (existingStreamer is not null)
         {
             _currentlyStreamingPeerId = existingStreamer.PeerId;
             _lastRemoteFrameUtc = DateTime.UtcNow;
-            MediaStatus = "Joining mid-stream...";
             StartStaleFrameTimer();
         }
 
         _ = StartWebRtcAsync();
         StartStatsTimer();
+    }
+
+    private void SetPeerStreaming(Guid peerId, bool streaming)
+    {
+        var vm = Peers.FirstOrDefault(p => p.PeerId == peerId);
+        if (vm is not null) vm.IsStreaming = streaming;
     }
 
     public ObservableCollection<PeerViewModel> Peers { get; }
@@ -125,28 +149,82 @@ public sealed partial class RoomViewModel : ViewModelBase
     /// </summary>
     public StreamReceiver? StreamReceiver => _streamReceiver;
 
+    /// <summary>
+    /// Local capture exposed to a separate, smaller renderer for the
+    /// streamer's self-preview. Non-null only while <see cref="IsSharing"/>
+    /// is true. The main tile renders the remote stream; this one sits
+    /// in a small box on top.
+    /// </summary>
+    public ICaptureSource? LocalPreviewSource => IsSharing ? _localCaptureSource : null;
+
+    partial void OnIsSharingChanged(bool value)
+    {
+        OnPropertyChanged(nameof(LocalPreviewSource));
+    }
+
     [ObservableProperty] private string _roomId;
     [ObservableProperty] private string _copyButtonText = "Copy";
     [ObservableProperty] private Guid _yourPeerId;
     [ObservableProperty] private Guid? _hostPeerId;
     [ObservableProperty] private bool _youAreHost;
     [ObservableProperty] private string? _statusMessage;
-    [ObservableProperty] private string? _mediaStatus = "Connecting media...";
+    [ObservableProperty] private string? _mediaStatus;
     [ObservableProperty] private bool _isSharing;
     [ObservableProperty] private bool _hasRemoteStream;
-    [ObservableProperty] private string? _localStreamLabel;
-    [ObservableProperty] private string _senderStats = "—";
-    [ObservableProperty] private string _receiverStats = "—";
 
     /// <summary>
-    /// Extra "paint fps" lines appended to the receiver stats block,
-    /// produced by <see cref="Views.RoomView"/>'s poll of the
-    /// <see cref="Rendering.D3DImageVideoRenderer"/>. The VM can't read
-    /// the renderer directly because the renderer is a visual-tree
-    /// concern — instead the view pushes its own reading into this
-    /// property and <see cref="BuildReceiverStats"/> concatenates it.
+    /// True when the remote stream has stalled (no frames for
+    /// <see cref="PauseAfter"/>) but we haven't yet given up. The room
+    /// view freezes the last frame and overlays a "Paused" badge. If
+    /// frames start flowing again we flip back to active; if nothing
+    /// arrives by <see cref="PauseAfter"/> + <see cref="IdleAfter"/>,
+    /// we clear the tile to the empty state.
     /// </summary>
-    [ObservableProperty] private string? _renderStatsLine;
+    [ObservableProperty] private bool _isRemotePaused;
+
+    /// <summary>
+    /// Union of <see cref="HasRemoteStream"/> and <see cref="IsRemotePaused"/>.
+    /// Drives the remote-tile renderer's Visibility so it goes
+    /// Collapsed on Idle — the HwndHost child window otherwise keeps
+    /// showing whatever was last in its swap chain back buffer.
+    /// </summary>
+    public bool HasRemoteVideo => HasRemoteStream || IsRemotePaused;
+
+    partial void OnHasRemoteStreamChanged(bool value) => OnPropertyChanged(nameof(HasRemoteVideo));
+    partial void OnIsRemotePausedChanged(bool value) => OnPropertyChanged(nameof(HasRemoteVideo));
+
+    /// <summary>
+    /// Connection dot brush. Green while the signaling socket is up,
+    /// red once it drops. Consumed as a Brush binding in the top bar.
+    /// </summary>
+    [ObservableProperty] private System.Windows.Media.Brush _connectionDotBrush =
+        System.Windows.Media.Brushes.LimeGreen;
+
+    // Right-edge stats panel. Single open/close flag — replaces the
+    // per-tile hover overlays which couldn't work under HwndHost
+    // airspace. The button on the top bar toggles it; an X inside
+    // the panel closes it.
+    [ObservableProperty] private bool _isStatsPanelOpen;
+    [ObservableProperty] private string _outgoingStats = "—";
+    [ObservableProperty] private string _incomingStats = "—";
+
+    /// <summary>
+    /// Paint-fps line for the self-preview renderer. The view's 500 ms
+    /// poller snapshots the renderer and writes here; the stats timer
+    /// appends it to <see cref="OutgoingStats"/>.
+    /// </summary>
+    [ObservableProperty] private string? _selfRenderStatsLine;
+
+    /// <summary>
+    /// Paint-fps line for the remote-stream renderer. Same pattern.
+    /// </summary>
+    [ObservableProperty] private string? _remoteRenderStatsLine;
+
+    [RelayCommand]
+    private void ToggleStatsPanel() => IsStatsPanelOpen = !IsStatsPanelOpen;
+
+    [RelayCommand]
+    private void CloseStatsPanel() => IsStatsPanelOpen = false;
 
     public bool CanShareScreen => _captureProvider is not null;
 
@@ -193,20 +271,27 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void OnRemoteFrameArrived(in CaptureFrameData frame)
     {
         _lastRemoteFrameUtc = DateTime.UtcNow;
-        if (HasRemoteStream && MediaStatus is null) return;
+
+        // Fast path: already in the Active state with nothing to clear.
+        // Skip the dispatcher hop entirely — this fires on every decoded
+        // frame, potentially 120+ times per second.
+        if (HasRemoteStream && !IsRemotePaused && MediaStatus is null) return;
+
         if (_dispatcher.CheckAccess())
         {
-            HasRemoteStream = true;
-            MediaStatus = null;
+            EnterActiveState();
         }
         else
         {
-            _dispatcher.BeginInvoke(new Action(() =>
-            {
-                HasRemoteStream = true;
-                MediaStatus = null;
-            }));
+            _dispatcher.BeginInvoke(new Action(EnterActiveState));
         }
+    }
+
+    private void EnterActiveState()
+    {
+        HasRemoteStream = true;
+        IsRemotePaused = false;
+        MediaStatus = null;
     }
 
     [RelayCommand]
@@ -224,8 +309,8 @@ public sealed partial class RoomViewModel : ViewModelBase
                 return;
             }
 
-            LocalStreamLabel = source.DisplayName;
             _localCaptureSource = source;
+            SetPeerStreaming(YourPeerId, true);
             source.Closed += OnLocalCaptureClosed;
 
             var session = _webRtc;
@@ -350,7 +435,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         }
 
         IsSharing = false;
-        LocalStreamLabel = null;
+        SetPeerStreaming(YourPeerId, false);
 
         var streamId = _localStreamId;
         _localStreamId = null;
@@ -395,7 +480,13 @@ public sealed partial class RoomViewModel : ViewModelBase
 
             if (_currentlyStreamingPeerId == peerId)
             {
-                ClearRemoteStream("Stream ended");
+                // PeerLeft with no StreamEnded preceding it = the
+                // streamer didn't gracefully stop (process killed,
+                // WebSocket dropped, network cut). Treat it like a
+                // network stall: freeze on the last frame, show Paused,
+                // let the stale-frame timer drop us to Idle after
+                // IdleAfter if nothing recovers.
+                EnterPausedState();
             }
 
             if (newHostPeerId.HasValue)
@@ -413,10 +504,10 @@ public sealed partial class RoomViewModel : ViewModelBase
         DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId})");
         _dispatcher.BeginInvoke(new Action(() =>
         {
+            SetPeerStreaming(message.PeerId, true);
             if (message.PeerId == YourPeerId) return;
             _currentlyStreamingPeerId = message.PeerId;
             _lastRemoteFrameUtc = DateTime.UtcNow;
-            MediaStatus = "Waiting for first frame...";
             StartStaleFrameTimer();
         }));
     }
@@ -426,17 +517,44 @@ public sealed partial class RoomViewModel : ViewModelBase
         DebugLog.Write($"[room] StreamEnded received from {message.PeerId} (current={_currentlyStreamingPeerId})");
         _dispatcher.BeginInvoke(new Action(() =>
         {
+            SetPeerStreaming(message.PeerId, false);
             if (_currentlyStreamingPeerId != message.PeerId) return;
-            ClearRemoteStream("Stream ended");
+            // Explicit StreamEnded = the streamer stopped on purpose.
+            // Jump straight to Idle so watchers don't stare at a frozen
+            // last frame for no reason. Paused is reserved for
+            // unexpected stalls (network drop, process crash) caught by
+            // the stale-frame timer.
+            ClearRemoteStream(null);
         }));
     }
 
-    private void ClearRemoteStream(string statusMessage)
+    /// <summary>
+    /// Moves the remote tile into Idle — clears the streamer, hides the
+    /// last frame, stops the stall timer. Called on explicit teardown
+    /// paths (LeaveRoom, codec switch) and from the stall state machine
+    /// once we've sat in Paused long enough.
+    /// </summary>
+    private void ClearRemoteStream(string? statusMessage)
     {
+        if (_currentlyStreamingPeerId is Guid id) SetPeerStreaming(id, false);
         _currentlyStreamingPeerId = null;
         HasRemoteStream = false;
+        IsRemotePaused = false;
         MediaStatus = statusMessage;
         StopStaleFrameTimer();
+    }
+
+    /// <summary>
+    /// Moves the remote tile into Paused — keeps the last frame on
+    /// screen and shows the "Paused" overlay, but leaves the stall
+    /// timer running so we can either recover to Active or drop to
+    /// Idle. No-op if we're not currently receiving a stream.
+    /// </summary>
+    private void EnterPausedState()
+    {
+        if (!HasRemoteStream && !IsRemotePaused) return;
+        HasRemoteStream = false;
+        IsRemotePaused = true;
     }
 
     private void StartStaleFrameTimer()
@@ -459,9 +577,21 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void OnStaleFrameTick()
     {
         if (_currentlyStreamingPeerId is null) return;
-        if (!HasRemoteStream) return;
-        if (DateTime.UtcNow - _lastRemoteFrameUtc < StaleFrameTimeout) return;
-        ClearRemoteStream("Stream stalled");
+
+        var gap = DateTime.UtcNow - _lastRemoteFrameUtc;
+
+        // Active → Paused: freeze the last frame and show a Paused badge.
+        if (HasRemoteStream && gap >= PauseAfter)
+        {
+            EnterPausedState();
+            return;
+        }
+
+        // Paused → Idle: give up, clear the tile to the empty state.
+        if (IsRemotePaused && gap >= PauseAfter + IdleAfter)
+        {
+            ClearRemoteStream(null);
+        }
     }
 
     private void StartStatsTimer()
@@ -488,11 +618,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         var elapsedSeconds = Math.Max(0.001, (now - _statsPrevTickUtc).TotalSeconds);
         _statsPrevTickUtc = now;
 
-        SenderStats = BuildSenderStats(elapsedSeconds);
-        ReceiverStats = BuildReceiverStats(elapsedSeconds);
+        OutgoingStats = BuildOutgoingStats(elapsedSeconds);
+        IncomingStats = BuildIncomingStats(elapsedSeconds);
     }
 
-    private string BuildSenderStats(double elapsedSeconds)
+    private string BuildOutgoingStats(double elapsedSeconds)
     {
         var streamer = _captureStreamer;
         if (streamer is null) return "not sharing";
@@ -508,16 +638,20 @@ public sealed partial class RoomViewModel : ViewModelBase
         var mbps = deltaBytes * 8.0 / elapsedSeconds / 1_000_000.0;
         var codec = streamer.CurrentCodec?.ToString() ?? "—";
 
-        return
+        var core =
             $"codec:  {codec}\n" +
             $"src:    {streamer.SourceWidth}x{streamer.SourceHeight}\n" +
             $"enc:    {streamer.EncoderWidth}x{streamer.EncoderHeight}\n" +
             $"fps:    {fps:F1} / {streamer.TargetFps}\n" +
             $"rate:   {mbps:F2} / {streamer.TargetBitrate / 1_000_000.0:F1} Mbps\n" +
             $"frames: {streamer.EncodedFrameCount} ({streamer.FrameCount - streamer.EncodedFrameCount} dropped)";
+
+        return string.IsNullOrEmpty(SelfRenderStatsLine)
+            ? core
+            : core + "\n" + SelfRenderStatsLine;
     }
 
-    private string BuildReceiverStats(double elapsedSeconds)
+    private string BuildIncomingStats(double elapsedSeconds)
     {
         var receiver = _streamReceiver;
         if (receiver is null || receiver.FramesDecoded == 0) return "no incoming stream";
@@ -539,14 +673,9 @@ public sealed partial class RoomViewModel : ViewModelBase
             $"rate:   {mbps:F2} Mbps\n" +
             $"frames: {receiver.FramesDecoded}";
 
-        // The view polls the renderer and stores its "paint fps" string
-        // here. When empty, we just show the core block.
-        var render = RenderStatsLine;
-        if (!string.IsNullOrEmpty(render))
-        {
-            return core + "\n" + render;
-        }
-        return core;
+        return string.IsNullOrEmpty(RemoteRenderStatsLine)
+            ? core
+            : core + "\n" + RemoteRenderStatsLine;
     }
 
     private void OnServerError(ErrorCode code, string message)
@@ -561,6 +690,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             StatusMessage = string.IsNullOrEmpty(reason)
                 ? "Disconnected."
                 : $"Disconnected: {reason}";
+            ConnectionDotBrush = System.Windows.Media.Brushes.OrangeRed;
         }));
     }
 

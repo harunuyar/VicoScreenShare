@@ -8,7 +8,7 @@
          (MinUpdateInterval, IsBorderRequired) are available at compile
          time and gated at runtime with ApiInformation. -->
     <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
-    <RootNamespace>ScreenSharing.Desktop.Wpf</RootNamespace>
+    <RootNamespace>ScreenSharing.Desktop.App</RootNamespace>
     <AssemblyName>ScreenSharing</AssemblyName>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+    <PackageReference Include="WPF-UI" Version="4.2.0" />
   </ItemGroup>
 
   <ItemGroup>

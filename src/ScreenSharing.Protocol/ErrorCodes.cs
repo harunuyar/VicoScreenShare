@@ -7,7 +7,6 @@ public enum ErrorCode
     ProtocolVersionMismatch = 2,
     RoomNotFound = 10,
     RoomFull = 11,
-    InvalidPassword = 12,
     AlreadyInRoom = 13,
     NotInRoom = 14,
     UnknownPeer = 15,

@@ -1,6 +1,6 @@
 using System.Windows.Controls;
 
-namespace ScreenSharing.Desktop.Wpf.Views;
+namespace ScreenSharing.Desktop.App.Views;
 
 public partial class HomeView : UserControl
 {

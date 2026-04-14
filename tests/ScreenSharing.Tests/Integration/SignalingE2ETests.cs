@@ -51,7 +51,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
 
         // Host creates the room.
         var host = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(), cts.Token);
 
         var created = await ExpectAsync(host, MessageType.RoomCreated, cts.Token);
         var roomId = created.Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
@@ -64,7 +64,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
 
         // Second client joins.
         var viewer = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
 
         var viewerJoined = await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token);
         var viewerPayload = viewerJoined.Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
@@ -83,24 +83,16 @@ public sealed class SignalingE2ETests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Joining_with_wrong_password_returns_InvalidPassword_error()
+    public async Task Joining_unknown_room_returns_RoomNotFound_error()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var host = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(host, MessageType.CreateRoom, new CreateRoom("hunter2"), cts.Token);
-
-        var roomId = (await ExpectAsync(host, MessageType.RoomCreated, cts.Token))
-            .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
-        await ExpectAsync(host, MessageType.RoomJoined, cts.Token);
-
         var viewer = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, "wrong"), cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom("ZZZZZZ"), cts.Token);
 
         var err = await ExpectAsync(viewer, MessageType.Error, cts.Token);
         var payload = err.Payload.Deserialize<Error>(ProtocolJson.Options)!;
-        payload.Code.Should().Be(ErrorCode.InvalidPassword);
+        payload.Code.Should().Be(ErrorCode.RoomNotFound);
 
-        await CleanCloseAsync(host);
         await CleanCloseAsync(viewer);
     }
 
@@ -109,13 +101,13 @@ public sealed class SignalingE2ETests : IAsyncLifetime
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var host = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(), cts.Token);
         var roomId = (await ExpectAsync(host, MessageType.RoomCreated, cts.Token))
             .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
         await ExpectAsync(host, MessageType.RoomJoined, cts.Token);
 
         var viewer = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
         var viewerJoin = (await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token))
             .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
         await ExpectAsync(host, MessageType.PeerJoined, cts.Token);
@@ -135,7 +127,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         // Factory is configured with MaxRoomCapacity = 4.
         var host = await ConnectAsync("Host", cts.Token);
-        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(), cts.Token);
         var roomId = (await ExpectAsync(host, MessageType.RoomCreated, cts.Token))
             .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
         await ExpectAsync(host, MessageType.RoomJoined, cts.Token);
@@ -144,13 +136,13 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         for (var i = 0; i < 3; i++)
         {
             var c = await ConnectAsync($"U{i}", cts.Token);
-            await SendAsync(c, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+            await SendAsync(c, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
             await ExpectAsync(c, MessageType.RoomJoined, cts.Token);
             extras.Add(c);
         }
 
         var overflow = await ConnectAsync("Overflow", cts.Token);
-        await SendAsync(overflow, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await SendAsync(overflow, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
         var err = await ExpectAsync(overflow, MessageType.Error, cts.Token);
         var payload = err.Payload.Deserialize<Error>(ProtocolJson.Options)!;
         payload.Code.Should().Be(ErrorCode.RoomFull);
@@ -166,14 +158,14 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
         var streamer = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(), cts.Token);
         var roomId = (await ExpectAsync(streamer, MessageType.RoomCreated, cts.Token))
             .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
         var streamerJoin = (await ExpectAsync(streamer, MessageType.RoomJoined, cts.Token))
             .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
 
         var viewer = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
         await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token);
         await ExpectAsync(streamer, MessageType.PeerJoined, cts.Token);
 
@@ -213,14 +205,14 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
         var streamer = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(), cts.Token);
         var roomId = (await ExpectAsync(streamer, MessageType.RoomCreated, cts.Token))
             .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
         var streamerJoin = (await ExpectAsync(streamer, MessageType.RoomJoined, cts.Token))
             .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
 
         var viewer = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
         await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token);
         await ExpectAsync(streamer, MessageType.PeerJoined, cts.Token);
 
@@ -254,7 +246,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
         var streamer = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(null), cts.Token);
+        await SendAsync(streamer, MessageType.CreateRoom, new CreateRoom(), cts.Token);
         var roomId = (await ExpectAsync(streamer, MessageType.RoomCreated, cts.Token))
             .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
         var streamerJoin = (await ExpectAsync(streamer, MessageType.RoomJoined, cts.Token))
@@ -271,7 +263,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         // clear-on-stop tracking; otherwise Alice's StreamEnded would be
         // ignored and Bob's tile would freeze on the last frame.
         var lateJoiner = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(lateJoiner, MessageType.JoinRoom, new JoinRoom(roomId, null), cts.Token);
+        await SendAsync(lateJoiner, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
 
         var joined = await ExpectAsync(lateJoiner, MessageType.RoomJoined, cts.Token);
         var payload = joined.Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;

@@ -3,11 +3,11 @@ using System.Collections.Generic;
 
 namespace ScreenSharing.Protocol.Messages;
 
-public sealed record CreateRoom(string? Password);
+public sealed record CreateRoom();
 
 public sealed record RoomCreated(string RoomId);
 
-public sealed record JoinRoom(string RoomId, string? Password);
+public sealed record JoinRoom(string RoomId);
 
 /// <summary>
 /// Sent to a peer immediately after they successfully join a room. Contains the snapshot of the roster.

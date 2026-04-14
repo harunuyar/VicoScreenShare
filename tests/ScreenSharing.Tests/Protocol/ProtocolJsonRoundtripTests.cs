@@ -10,8 +10,8 @@ public class ProtocolJsonRoundtripTests
     [Fact]
     public void Envelope_uses_camelCase_field_names()
     {
-        var payload = JsonSerializer.SerializeToElement(new CreateRoom("hunter2"), ProtocolJson.Options);
-        var envelope = new MessageEnvelope(MessageType.CreateRoom, "corr-1", payload);
+        var payload = JsonSerializer.SerializeToElement(new JoinRoom("ABC123"), ProtocolJson.Options);
+        var envelope = new MessageEnvelope(MessageType.JoinRoom, "corr-1", payload);
 
         var json = JsonSerializer.Serialize(envelope, ProtocolJson.Options);
 
@@ -19,7 +19,7 @@ public class ProtocolJsonRoundtripTests
         doc.RootElement.TryGetProperty("type", out _).Should().BeTrue();
         doc.RootElement.TryGetProperty("correlationId", out _).Should().BeTrue();
         doc.RootElement.TryGetProperty("payload", out var payloadElement).Should().BeTrue();
-        payloadElement.TryGetProperty("password", out _).Should().BeTrue();
+        payloadElement.TryGetProperty("roomId", out _).Should().BeTrue();
     }
 
     [Fact]

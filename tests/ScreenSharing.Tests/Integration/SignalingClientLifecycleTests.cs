@@ -156,7 +156,7 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
         client.RoomCreated += FirstHandler;
         await client.ConnectAsync(uri, hello, cts.Token);
 
-        await client.CreateRoomAsync(null, cts.Token);
+        await client.CreateRoomAsync(cts.Token);
         firstHandlerEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
             "the server's room_created must reach the first handler");
 

@@ -4,11 +4,11 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Services;
-using ScreenSharing.Desktop.Wpf.Services;
+using ScreenSharing.Desktop.App.Services;
 using ScreenSharing.Protocol;
 using ScreenSharing.Protocol.Messages;
 
-namespace ScreenSharing.Desktop.Wpf.ViewModels;
+namespace ScreenSharing.Desktop.App.ViewModels;
 
 public sealed partial class HomeViewModel : ViewModelBase
 {
@@ -44,20 +44,79 @@ public sealed partial class HomeViewModel : ViewModelBase
     [ObservableProperty]
     private string _displayName;
 
+    /// <summary>
+    /// When true, the home view swaps the "Joining as {name}" footer for an
+    /// inline TextBox to edit the display name.
+    /// </summary>
     [ObservableProperty]
-    private string _createPassword = string.Empty;
+    private bool _isEditingDisplayName;
 
     [ObservableProperty]
     private string _joinRoomId = string.Empty;
-
-    [ObservableProperty]
-    private string _joinPassword = string.Empty;
 
     [ObservableProperty]
     private string? _statusMessage;
 
     [ObservableProperty]
     private bool _isBusy;
+
+    /// <summary>
+    /// Enforces the 6-char uppercase alphanumeric shape as the user types
+    /// or pastes. Anything else is silently dropped so the input always
+    /// holds a valid (possibly partial) room ID.
+    /// </summary>
+    partial void OnJoinRoomIdChanged(string value)
+    {
+        var sanitized = SanitizeRoomId(value);
+        if (sanitized != value)
+        {
+            JoinRoomId = sanitized;
+        }
+    }
+
+    private static string SanitizeRoomId(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return string.Empty;
+        Span<char> buf = stackalloc char[6];
+        var n = 0;
+        foreach (var c in raw)
+        {
+            if (n == 6) break;
+            if (c >= '0' && c <= '9') buf[n++] = c;
+            else if (c >= 'A' && c <= 'Z') buf[n++] = c;
+            else if (c >= 'a' && c <= 'z') buf[n++] = (char)(c - 32);
+        }
+        return new string(buf[..n]);
+    }
+
+    [RelayCommand]
+    private void PasteRoomId()
+    {
+        try
+        {
+            if (System.Windows.Clipboard.ContainsText())
+            {
+                JoinRoomId = System.Windows.Clipboard.GetText();
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Paste failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void BeginEditDisplayName() => IsEditingDisplayName = true;
+
+    [RelayCommand]
+    private void CommitDisplayName()
+    {
+        if (!string.IsNullOrWhiteSpace(DisplayName))
+        {
+            SaveDisplayName();
+        }
+        IsEditingDisplayName = false;
+    }
 
     [RelayCommand]
     private void ShowSettings()
@@ -75,23 +134,20 @@ public sealed partial class HomeViewModel : ViewModelBase
     {
         if (!ValidateDisplayName()) return Task.CompletedTask;
         SaveDisplayName();
-        var password = string.IsNullOrWhiteSpace(CreatePassword) ? null : CreatePassword;
-        return RunRoomOperationAsync(signaling => signaling.CreateRoomAsync(password));
+        return RunRoomOperationAsync(signaling => signaling.CreateRoomAsync());
     }
 
     [RelayCommand]
     private Task JoinRoomAsync()
     {
         if (!ValidateDisplayName()) return Task.CompletedTask;
-        if (string.IsNullOrWhiteSpace(JoinRoomId))
+        if (JoinRoomId.Length < 6)
         {
-            StatusMessage = "Enter a room id to join.";
+            StatusMessage = "Enter a 6-character room ID.";
             return Task.CompletedTask;
         }
         SaveDisplayName();
-        var password = string.IsNullOrWhiteSpace(JoinPassword) ? null : JoinPassword;
-        var roomId = JoinRoomId.Trim().ToUpperInvariant();
-        return RunRoomOperationAsync(signaling => signaling.JoinRoomAsync(roomId, password));
+        return RunRoomOperationAsync(signaling => signaling.JoinRoomAsync(JoinRoomId));
     }
 
     private async Task RunRoomOperationAsync(Func<SignalingClient, Task> sendRequest)
@@ -189,7 +245,6 @@ public sealed partial class HomeViewModel : ViewModelBase
     {
         ErrorCode.RoomNotFound => "Room not found. Check the id and try again.",
         ErrorCode.RoomFull => "That room is full.",
-        ErrorCode.InvalidPassword => "Wrong password.",
         ErrorCode.AlreadyInRoom => "You are already in a room.",
         _ => $"Error: {err.Message}",
     };

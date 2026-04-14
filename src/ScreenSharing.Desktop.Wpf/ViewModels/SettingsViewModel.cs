@@ -7,9 +7,9 @@ using ScreenSharing.Client;
 using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Services;
-using ScreenSharing.Desktop.Wpf.Services;
+using ScreenSharing.Desktop.App.Services;
 
-namespace ScreenSharing.Desktop.Wpf.ViewModels;
+namespace ScreenSharing.Desktop.App.ViewModels;
 
 public sealed partial class SettingsViewModel : ViewModelBase
 {
@@ -90,6 +90,23 @@ public sealed partial class SettingsViewModel : ViewModelBase
             ?? ScalerQualityOptions[1];
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
+
+        // Dirty tracking: any change to a bound setting flips IsDirty to
+        // true so the floating Save pill becomes visible. Save() resets
+        // it after a successful write.
+        PropertyChanged += OnAnyPropertyChanged;
+    }
+
+    private void OnAnyPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        switch (e.PropertyName)
+        {
+            case nameof(IsDirty):
+            case nameof(StatusMessage):
+            case nameof(BitrateDisplay):
+                return;
+        }
+        IsDirty = true;
     }
 
     public IReadOnlyList<TargetHeightOption> TargetHeightOptions { get; }
@@ -120,6 +137,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     [ObservableProperty]
     private string? _statusMessage;
+
+    [ObservableProperty]
+    private bool _isDirty;
 
     public string BitrateDisplay => FormatBitrate(Bitrate);
 
@@ -167,6 +187,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         {
             _store.Save(_settings);
             StatusMessage = "Saved.";
+            IsDirty = false;
         }
         catch (Exception ex)
         {

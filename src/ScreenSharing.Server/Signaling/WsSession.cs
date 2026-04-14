@@ -223,8 +223,12 @@ public sealed class WsSession
             return;
         }
 
-        var request = WsMessageCodec.DecodePayload<CreateRoom>(envelope.Payload);
-        var result = _rooms.CreateRoom(request.Password);
+        // Payload is empty (CreateRoom is a marker record); decode is a
+        // no-op but kept so the envelope path is symmetric with the
+        // other handlers and any future fields land here without an
+        // extra dispatch tweak.
+        _ = WsMessageCodec.DecodePayload<CreateRoom>(envelope.Payload);
+        var result = _rooms.CreateRoom();
         if (result.Status != CreateRoomStatus.Success || result.Room is null)
         {
             var (code, message) = result.Status switch
@@ -238,7 +242,7 @@ public sealed class WsSession
 
         var room = result.Room;
         var peer = new RoomPeer(PeerId, _userId!.Value, _displayName);
-        var join = _rooms.TryJoin(room.Id, request.Password, peer);
+        var join = _rooms.TryJoin(room.Id, peer);
         if (join.Status != JoinRoomStatus.Success)
         {
             _logger.LogWarning("Session {PeerId} could not self-join room {RoomId} after create (status {Status})", PeerId, room.Id, join.Status);
@@ -263,7 +267,7 @@ public sealed class WsSession
 
         var request = WsMessageCodec.DecodePayload<JoinRoom>(envelope.Payload);
         var peer = new RoomPeer(PeerId, _userId!.Value, _displayName);
-        var result = _rooms.TryJoin(request.RoomId, request.Password, peer);
+        var result = _rooms.TryJoin(request.RoomId, peer);
 
         switch (result.Status)
         {
@@ -274,10 +278,6 @@ public sealed class WsSession
                 break;
             case JoinRoomStatus.NotFound:
                 await SendErrorAsync(ErrorCode.RoomNotFound, "Room not found", envelope.CorrelationId).ConfigureAwait(false);
-                break;
-            case JoinRoomStatus.InvalidPassword:
-                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-                await SendErrorAsync(ErrorCode.InvalidPassword, "Invalid password", envelope.CorrelationId).ConfigureAwait(false);
                 break;
             case JoinRoomStatus.Full:
                 await SendErrorAsync(ErrorCode.RoomFull, "Room is full", envelope.CorrelationId).ConfigureAwait(false);

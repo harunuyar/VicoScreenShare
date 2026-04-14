@@ -149,7 +149,7 @@ public sealed class SfuHandshakeTests : IAsyncLifetime
             MessageType.ClientHello,
             new ClientHello(Guid.NewGuid(), displayName, ProtocolVersion.Current),
             ct);
-        await SendAsync(socket, MessageType.CreateRoom, new CreateRoom(null), ct);
+        await SendAsync(socket, MessageType.CreateRoom, new CreateRoom(), ct);
         await ExpectAsync(socket, MessageType.RoomCreated, ct);
         await ExpectAsync(socket, MessageType.RoomJoined, ct);
         return socket;

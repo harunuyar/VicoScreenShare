@@ -1,4 +1,4 @@
-namespace ScreenSharing.Desktop.Wpf.Services;
+namespace ScreenSharing.Desktop.App.Services;
 
 /// <summary>
 /// Abstracts how view models ask the shell to switch screens. Same

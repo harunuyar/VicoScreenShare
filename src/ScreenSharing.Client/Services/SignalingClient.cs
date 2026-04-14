@@ -104,11 +104,11 @@ public sealed class SignalingClient : IAsyncDisposable
         }
     }
 
-    public Task CreateRoomAsync(string? password, CancellationToken ct = default) =>
-        SendAsync(MessageType.CreateRoom, new CreateRoom(password), ct);
+    public Task CreateRoomAsync(CancellationToken ct = default) =>
+        SendAsync(MessageType.CreateRoom, new CreateRoom(), ct);
 
-    public Task JoinRoomAsync(string roomId, string? password, CancellationToken ct = default) =>
-        SendAsync(MessageType.JoinRoom, new JoinRoom(roomId, password), ct);
+    public Task JoinRoomAsync(string roomId, CancellationToken ct = default) =>
+        SendAsync(MessageType.JoinRoom, new JoinRoom(roomId), ct);
 
     public Task SendSdpOfferAsync(string sdp, CancellationToken ct = default) =>
         SendAsync(MessageType.SdpOffer, new SdpOffer(sdp), ct);

@@ -1,7 +1,7 @@
 using System;
 using CommunityToolkit.Mvvm.ComponentModel;
 
-namespace ScreenSharing.Desktop.Wpf.Services;
+namespace ScreenSharing.Desktop.App.Services;
 
 /// <summary>
 /// Tiny WPF navigation shim: a single <see cref="Current"/> property
