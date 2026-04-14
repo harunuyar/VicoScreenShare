@@ -200,6 +200,14 @@ public sealed partial class RoomViewModel : ViewModelBase
     [ObservableProperty] private System.Windows.Media.Brush _connectionDotBrush =
         System.Windows.Media.Brushes.LimeGreen;
 
+    /// <summary>
+    /// Nominal frame rate the current remote streamer announced in its
+    /// <see cref="StreamStarted"/> message. The renderer's jitter buffer
+    /// + paint pacer use this as their tick clock so the wall-clock
+    /// gap between painted frames matches the gap between sent frames.
+    /// </summary>
+    [ObservableProperty] private int _remoteNominalFrameRate = 60;
+
     // Right-edge stats panel. Single open/close flag — replaces the
     // per-tile hover overlays which couldn't work under HwndHost
     // airspace. The button on the top bar toggles it; an X inside
@@ -270,6 +278,15 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnRemoteFrameArrived(in CaptureFrameData frame)
     {
+        // Drop late frames that arrive after we've torn down the stream.
+        // StreamEnded comes in on the signaling path (TCP) and a handful
+        // of RTP packets can still be in flight on the media path (UDP);
+        // without this guard, those late decoded frames would call back
+        // into EnterActiveState() and re-flip HasRemoteStream to true
+        // forever, leaving the last frame stuck on screen because the
+        // stale-frame timer also checks _currentlyStreamingPeerId.
+        if (_currentlyStreamingPeerId is null) return;
+
         _lastRemoteFrameUtc = DateTime.UtcNow;
 
         // Fast path: already in the Active state with nothing to clear.
@@ -302,7 +319,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         ICaptureSource? source = null;
         try
         {
-            source = await _captureProvider.PickSourceAsync().ConfigureAwait(true);
+            source = await _captureProvider.PickSourceAsync(_settings.Video.TargetFrameRate).ConfigureAwait(true);
             if (source is null)
             {
                 StatusMessage = "Picker cancelled.";
@@ -330,9 +347,13 @@ public sealed partial class RoomViewModel : ViewModelBase
             _localStreamId = streamId;
             try
             {
-                await _signaling.SendStreamStartedAsync(streamId, StreamKind.Screen, hasAudio: false)
+                await _signaling.SendStreamStartedAsync(
+                    streamId,
+                    StreamKind.Screen,
+                    hasAudio: false,
+                    nominalFrameRate: _settings.Video.TargetFrameRate)
                     .ConfigureAwait(true);
-                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId})");
+                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={_settings.Video.TargetFrameRate})");
             }
             catch (Exception ex)
             {
@@ -501,13 +522,18 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnStreamStartedReceived(StreamStarted message)
     {
-        DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId})");
+        DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId}, nominalFps={message.NominalFrameRate})");
         _dispatcher.BeginInvoke(new Action(() =>
         {
             SetPeerStreaming(message.PeerId, true);
             if (message.PeerId == YourPeerId) return;
             _currentlyStreamingPeerId = message.PeerId;
             _lastRemoteFrameUtc = DateTime.UtcNow;
+            // The receiver's paint pacer needs the cadence the sender
+            // promised, so it can size its jitter buffer and tick at
+            // the same rate. Defaults to 60 if the sender pre-dates
+            // this field.
+            RemoteNominalFrameRate = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
             StartStaleFrameTimer();
         }));
     }

@@ -397,7 +397,7 @@ internal static class Program
             : MonitorCaptureItem.CreateForWindow(stimulus.Hwnd);
         Console.WriteLine($"# capturing {(captureMonitor ? "monitor" : "window")} '{item.DisplayName}' {item.Size.Width}x{item.Size.Height}");
 
-        var captureSource = new WindowsCaptureSource(item, sharedDevices);
+        var captureSource = new WindowsCaptureSource(item, sharedDevices, 60);
 
         var settings = new VideoSettings
         {
@@ -541,7 +541,7 @@ internal static class Program
         var decoder = decoderFactory.CreateDecoder();
 
         var item = MonitorCaptureItem.CreateForWindow(stimulus.Hwnd);
-        var captureSource = new WindowsCaptureSource(item, sharedDevices);
+        var captureSource = new WindowsCaptureSource(item, sharedDevices, 60);
 
         var settings = new VideoSettings
         {

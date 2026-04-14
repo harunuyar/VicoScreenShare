@@ -45,7 +45,7 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
     /// </summary>
     public D3D11DeviceManager Devices => _devices;
 
-    public async Task<ICaptureSource?> PickSourceAsync()
+    public async Task<ICaptureSource?> PickSourceAsync(int targetFrameRate)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(WindowsCaptureProvider));
 
@@ -63,7 +63,7 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
         var item = await picker.PickSingleItemAsync();
         if (item is null) return null;
 
-        return new WindowsCaptureSource(item, _devices);
+        return new WindowsCaptureSource(item, _devices, targetFrameRate);
     }
 
     public void Dispose()

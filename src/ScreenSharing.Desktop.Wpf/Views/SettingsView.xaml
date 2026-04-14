@@ -123,12 +123,28 @@
                                     Value="{Binding KeyframeIntervalSeconds}" Margin="0,4,0,0" />
                         </StackPanel>
 
-                        <StackPanel>
+                        <StackPanel Margin="0,0,0,16">
                             <TextBlock Text="Scaler quality" Opacity="0.7" FontSize="12" />
                             <ComboBox ItemsSource="{Binding ScalerQualityOptions}"
                                       SelectedItem="{Binding SelectedScalerQuality}"
                                       DisplayMemberPath="DisplayName"
                                       Margin="0,4,0,0" />
+                        </StackPanel>
+
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Receive buffer (jitter absorption)" Opacity="0.7" FontSize="12" />
+                                <TextBlock Grid.Column="1" Text="{Binding ReceiveBufferFrames, StringFormat={}{0} frames}"
+                                           Opacity="0.9" FontSize="12" FontFamily="Cascadia Mono, Consolas" />
+                            </Grid>
+                            <Slider Minimum="1" Maximum="10" TickFrequency="1" IsSnapToTickEnabled="True"
+                                    Value="{Binding ReceiveBufferFrames}" Margin="0,4,0,0" />
+                            <TextBlock Text="More frames = smoother under network jitter, more latency. 3 is a good default."
+                                       Opacity="0.5" FontSize="11" Margin="0,4,0,0" />
                         </StackPanel>
                     </StackPanel>
                 </ui:Card>

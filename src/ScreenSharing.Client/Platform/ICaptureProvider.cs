@@ -14,7 +14,9 @@ public interface ICaptureProvider
     /// <summary>
     /// Show the system picker and let the user pick a window or monitor. Returns
     /// an <see cref="ICaptureSource"/> ready to start, or <c>null</c> if the user
-    /// cancelled the picker.
+    /// cancelled the picker. <paramref name="targetFrameRate"/> is the cadence
+    /// the source's pace thread will dispatch frames at, regardless of how fast
+    /// the underlying OS API delivers raw captures.
     /// </summary>
-    Task<ICaptureSource?> PickSourceAsync();
+    Task<ICaptureSource?> PickSourceAsync(int targetFrameRate);
 }

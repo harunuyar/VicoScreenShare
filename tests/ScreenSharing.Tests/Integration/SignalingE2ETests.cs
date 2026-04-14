@@ -174,7 +174,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         await SendAsync(
             streamer,
             MessageType.StreamStarted,
-            new StreamStarted(Guid.Empty, "stream-xyz", StreamKind.Screen, HasAudio: false),
+            new StreamStarted(Guid.Empty, "stream-xyz", StreamKind.Screen, HasAudio: false, NominalFrameRate: 60),
             cts.Token);
 
         var started = await ExpectAsync(viewer, MessageType.StreamStarted, cts.Token);
@@ -219,7 +219,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         await SendAsync(
             streamer,
             MessageType.StreamStarted,
-            new StreamStarted(Guid.Empty, "stream-crash", StreamKind.Screen, HasAudio: false),
+            new StreamStarted(Guid.Empty, "stream-crash", StreamKind.Screen, HasAudio: false, NominalFrameRate: 60),
             cts.Token);
         await ExpectAsync(viewer, MessageType.StreamStarted, cts.Token);
 
@@ -255,7 +255,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         await SendAsync(
             streamer,
             MessageType.StreamStarted,
-            new StreamStarted(Guid.Empty, "live-stream", StreamKind.Screen, HasAudio: false),
+            new StreamStarted(Guid.Empty, "live-stream", StreamKind.Screen, HasAudio: false, NominalFrameRate: 60),
             cts.Token);
 
         // Bob joins AFTER Alice is already streaming. His RoomJoined snapshot

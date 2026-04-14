@@ -21,6 +21,15 @@ public partial class App : Application
     /// </summary>
     public static D3D11DeviceManager? SharedDevices { get; private set; }
 
+    /// <summary>
+    /// Receive-side jitter buffer prebuffer depth, in frames. Read by
+    /// <see cref="Rendering.D3DImageVideoRenderer"/> when it constructs
+    /// its <see cref="Rendering.JitterBufferQueue"/>. Set from
+    /// <c>VideoSettings.ReceiveBufferFrames</c> at startup; updates
+    /// require a renderer re-mount (next room join) to take effect.
+    /// </summary>
+    public static int ReceiveBufferFrames { get; set; } = 3;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         DebugLog.Reset();
@@ -37,6 +46,17 @@ public partial class App : Application
 
         ClientHost.CaptureProviderFactory = hwndProvider => new WindowsCaptureProvider(hwndProvider, sharedDevices);
         ClientHost.VideoCodecCatalog = new VideoCodecCatalog();
+
+        // Prime the receiver's prebuffer depth from saved settings so
+        // the first renderer instance constructed picks up the user's
+        // configured value. The settings store is read for real by the
+        // VMs later — this is just a one-shot read for the static.
+        try
+        {
+            var s = new ScreenSharing.Client.Services.SettingsStore().LoadOrCreate();
+            ReceiveBufferFrames = Math.Max(1, s.Video.ReceiveBufferFrames);
+        }
+        catch { /* fall back to default */ }
 
         MediaFoundationRuntime.EnsureInitialized();
         if (MediaFoundationRuntime.IsAvailable)

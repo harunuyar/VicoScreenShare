@@ -90,6 +90,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
             ?? ScalerQualityOptions[1];
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
+        _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 10);
 
         // Dirty tracking: any change to a bound setting flips IsDirty to
         // true so the floating Save pill becomes visible. Save() resets
@@ -134,6 +135,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     [ObservableProperty]
     private CodecOption _selectedCodec;
+
+    [ObservableProperty]
+    private int _receiveBufferFrames;
 
     [ObservableProperty]
     private string? _statusMessage;
@@ -182,10 +186,15 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.KeyframeIntervalSeconds = KeyframeIntervalSeconds;
         _settings.Video.ScalerQuality = SelectedScalerQuality.Quality;
         _settings.Video.Codec = SelectedCodec.Codec;
+        _settings.Video.ReceiveBufferFrames = ReceiveBufferFrames;
 
         try
         {
             _store.Save(_settings);
+            // Update the static so newly-mounted renderers pick up the
+            // change. Existing (already-running) renderers keep the
+            // value they were constructed with.
+            App.ReceiveBufferFrames = ReceiveBufferFrames;
             StatusMessage = "Saved.";
             IsDirty = false;
         }

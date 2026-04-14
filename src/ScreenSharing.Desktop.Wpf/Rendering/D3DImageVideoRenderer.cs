@@ -34,6 +34,11 @@ namespace ScreenSharing.Desktop.App.Rendering;
 /// </summary>
 public sealed class D3DImageVideoRenderer : HwndHost
 {
+    public D3DImageVideoRenderer()
+    {
+        _jitterBuffer = new JitterBufferQueue(PaintPaced, App.ReceiveBufferFrames);
+    }
+
     public static readonly DependencyProperty ReceiverProperty =
         DependencyProperty.Register(
             nameof(Receiver),
@@ -65,6 +70,33 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         get => (ICaptureSource?)GetValue(LocalPreviewSourceProperty);
         set => SetValue(LocalPreviewSourceProperty, value);
+    }
+
+    /// <summary>
+    /// Cadence the receiver should paint at, in frames per second.
+    /// Should match the sender's nominal frame rate from its
+    /// <see cref="ScreenSharing.Protocol.Messages.StreamStarted"/>
+    /// message. Default 60.
+    /// </summary>
+    public static readonly DependencyProperty NominalFrameRateProperty =
+        DependencyProperty.Register(
+            nameof(NominalFrameRate),
+            typeof(int),
+            typeof(D3DImageVideoRenderer),
+            new PropertyMetadata(60, OnNominalFrameRateChanged));
+
+    public int NominalFrameRate
+    {
+        get => (int)GetValue(NominalFrameRateProperty);
+        set => SetValue(NominalFrameRateProperty, value);
+    }
+
+    private static void OnNominalFrameRateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is D3DImageVideoRenderer self && e.NewValue is int fps)
+        {
+            self._jitterBuffer.SetNominalFrameRate(fps);
+        }
     }
 
     private const int WS_CHILD = 0x40000000;
@@ -131,6 +163,13 @@ public sealed class D3DImageVideoRenderer : HwndHost
     private readonly object _renderLock = new();
     private bool _disposed;
 
+    // Receive-side jitter buffer + paint pacer. OnFrameArrived enqueues
+    // on the decoder thread; the buffer's render thread pops one frame
+    // per tick (tick = 1/NominalFrameRate) and calls PaintPaced. The
+    // self-preview path bypasses the buffer entirely (it's not the path
+    // the user actually watches).
+    private readonly JitterBufferQueue _jitterBuffer;
+
     // Diagnostics for the stats overlay. Tracks both sides of the coin:
     //   InputFrameCount    — every frame that reached OnFrameArrived from
     //                        the decoder (before any render work).
@@ -178,12 +217,20 @@ public sealed class D3DImageVideoRenderer : HwndHost
         // before WPF has laid the element out. InitD3D runs lazily on
         // the first OnFrameArrived call, when we know both the window
         // size (via Arrange) and the frame size.
+        _jitterBuffer.Start();
         RefreshActiveFrameSource();
         return new HandleRef(this, _hwnd);
     }
 
     protected override void DestroyWindowCore(HandleRef hwnd)
     {
+        // Stop the jitter buffer's render thread BEFORE tearing D3D
+        // state. The render thread calls PaintPaced → upload+scale+
+        // Present which touches _swapChain / _scaler / _uploadTexture;
+        // disposing those while the thread is mid-paint would race.
+        // JitterBufferQueue.Dispose joins the thread so the D3D
+        // teardown below is unopposed.
+        _jitterBuffer.Dispose();
         lock (_renderLock)
         {
             _disposed = true;
@@ -375,14 +422,37 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
 
-        // Everything below must be inside a try/catch. If we throw, the
-        // exception propagates through StreamReceiver's FrameArrived?.Invoke
-        // and takes down the RTP receive thread — the symptom is "first
-        // frame renders, then 2s later the VM says Stream stalled" because
-        // no subsequent frames make it past the multicast.
+        // Two routes from here:
+        //
+        //   - Remote stream path: enqueue into the jitter buffer. The
+        //     buffer's render thread paces paints at NominalFrameRate
+        //     and calls PaintPaced for each tick. This is the path
+        //     watchers actually look at.
+        //   - Local self-preview path: paint inline. The user said
+        //     they don't actually watch the self-preview tile; it's
+        //     just there so the streamer can confirm the right window
+        //     is being shared. Bypassing the jitter buffer keeps it
+        //     responsive and avoids needing two sender clocks.
+        //
+        // Wrapped in try/catch: a throw here would propagate through
+        // StreamReceiver's FrameArrived?.Invoke and kill the RTP
+        // receive thread.
         try
         {
-            OnFrameArrivedCore(in frame);
+            lock (_renderLock)
+            {
+                if (_disposed) return;
+                InputFrameCount++;
+            }
+            if (_attachedReceiver is not null)
+            {
+                _jitterBuffer.Submit(in frame);
+            }
+            else
+            {
+                // Self-preview path — still paint inline.
+                OnFrameArrivedCore(in frame);
+            }
         }
         catch (Exception ex)
         {
@@ -395,14 +465,34 @@ public sealed class D3DImageVideoRenderer : HwndHost
         }
     }
 
+    /// <summary>
+    /// Jitter-buffer render-thread entry point. Same paint sequence as
+    /// the inline path, minus the InputFrameCount bookkeeping which is
+    /// already handled in <see cref="OnFrameArrived"/>.
+    /// </summary>
+    private void PaintPaced(in CaptureFrameData frame)
+    {
+        try
+        {
+            OnFrameArrivedCore(in frame);
+        }
+        catch (Exception ex)
+        {
+            var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
+            if (count <= 5 || count % 60 == 0)
+            {
+                ScreenSharing.Client.Diagnostics.DebugLog.Write(
+                    $"[renderer] PaintPaced threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
     private void OnFrameArrivedCore(in CaptureFrameData frame)
     {
         var paintStart = System.Diagnostics.Stopwatch.GetTimestamp();
         lock (_renderLock)
         {
             if (_disposed) return;
-
-            InputFrameCount++;
 
             // Lazy D3D init on first frame — we now know we have both
             // a valid hwnd AND WPF has had a chance to lay us out so

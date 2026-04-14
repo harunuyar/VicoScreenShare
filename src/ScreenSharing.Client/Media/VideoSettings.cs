@@ -62,6 +62,17 @@ public sealed class VideoSettings
     /// the host GPU, with automatic fallback to bilinear.
     /// </summary>
     public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
+
+    /// <summary>
+    /// How many frames the receiver buffers before starting to paint and
+    /// after every underflow. Each frame of buffer adds one frame's worth
+    /// of latency (16.67 ms at 60 fps) but absorbs that much network or
+    /// decoder jitter. 3 frames = ~50 ms latency at 60 fps, which is a
+    /// reasonable default for a low-RTT LAN/loopback session. Bump this
+    /// up for high-jitter networks; drop to 1 if you want minimum latency
+    /// and the network is rock solid.
+    /// </summary>
+    public int ReceiveBufferFrames { get; set; } = 3;
 }
 
 /// <summary>

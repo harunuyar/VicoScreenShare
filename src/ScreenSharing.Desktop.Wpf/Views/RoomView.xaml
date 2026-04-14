@@ -89,6 +89,7 @@
                     <Grid>
                         <rendering:D3DImageVideoRenderer x:Name="RemoteRenderer"
                                                          Receiver="{Binding StreamReceiver}"
+                                                         NominalFrameRate="{Binding RemoteNominalFrameRate}"
                                                          Visibility="{Binding HasRemoteVideo, Converter={StaticResource BoolToVisibility}}" />
 
                         <Grid Background="#80000000"
