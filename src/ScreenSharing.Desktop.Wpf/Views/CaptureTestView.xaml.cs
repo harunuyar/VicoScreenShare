@@ -346,10 +346,6 @@ public partial class CaptureTestView : UserControl
             return ValueTask.CompletedTask;
         }
 
-        private long _prevHash;
-        private long _dupCount;
-        private long _frameSeq;
-
         private void OnEncoded(uint durationRtp, byte[] encoded, TimeSpan contentTimestamp)
         {
             if (_disposed || encoded is null || encoded.Length == 0) return;
@@ -371,34 +367,6 @@ public partial class CaptureTestView : UserControl
                 if (decoded.Bgra is null || decoded.Bgra.Length == 0) continue;
                 var bgraSize = decoded.Width * decoded.Height * 4;
                 if (decoded.Bgra.Length < bgraSize) continue;
-
-                // Content-hash diagnostic: XOR-fold every 64th byte
-                // across the entire frame for a fast but thorough
-                // duplicate check.
-                _frameSeq++;
-                long hash = 0;
-                for (var p = 0; p < bgraSize; p += 64)
-                {
-                    hash ^= (long)decoded.Bgra[p] << ((p / 64) % 56);
-                    hash = hash * 2654435761L;  // Knuth multiplicative
-                }
-                if (hash == _prevHash)
-                {
-                    _dupCount++;
-                    if (_dupCount <= 30 || _dupCount % 60 == 0)
-                    {
-                        DebugLog.Write($"[content-dup] frame #{_frameSeq} DUPLICATE hash={hash:X} pts={contentTimestamp.TotalMilliseconds:F2}ms (run={_dupCount})");
-                    }
-                }
-                else
-                {
-                    if (_dupCount > 0 && _frameSeq < 200)
-                    {
-                        DebugLog.Write($"[content-dup] dup run ended after {_dupCount} frames, new hash={hash:X}");
-                    }
-                    _dupCount = 0;
-                }
-                _prevHash = hash;
 
                 var data = new CaptureFrameData(
                     decoded.Bgra.AsSpan(0, bgraSize),

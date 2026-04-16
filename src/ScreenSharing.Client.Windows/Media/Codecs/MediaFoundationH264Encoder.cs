@@ -53,22 +53,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly IMFDXGIDeviceManager? _dxgiManager;
     private readonly bool _ownsD3dDevice;
     private D3D11VideoScaler? _textureScaler;
-    // Ring buffer of encoder input textures. NVENC reads asynchronously
-    // from the texture wrapped in the input sample — if we used a single
-    // texture, the next EncodeTexture call's scaler blit would overwrite
-    // the pixels while NVENC is still reading, producing identical or
-    // corrupted frames. With 3 textures the write always targets a
-    // different slot than the 1-2 NVENC has in flight.
-    // NVENC holds input textures across its async pipeline depth. The
-    // HaveOutput event for frame N fires long after ProcessInput(N)
-    // returned — during that interval the texture must not be
-    // overwritten. Empirically (2560x1392 BGRA on NVIDIA) the pipeline
-    // depth is ~5-6 frames, producing a 5-duplicate pattern with a
-    // ring of 3. 16 slots guarantee the ring never cycles back into a
-    // texture NVENC is still reading.
-    private const int EncoderInputRingSize = 16;
-    private readonly ID3D11Texture2D?[] _encoderInputRing = new ID3D11Texture2D?[EncoderInputRingSize];
-    private int _encoderInputRingIndex;
+    private ID3D11Texture2D? _encoderInputTexture;
     private int _textureScalerSrcWidth;
     private int _textureScalerSrcHeight;
     private readonly bool _inputIsBgra; // true = ARGB32, false = NV12
@@ -196,6 +181,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         try
         {
             EnsureTextureScaler(sourceWidth, sourceHeight);
+            _textureScaler!.Process(sourceTexture, _encoderInputTexture!);
         }
         catch (Exception ex)
         {
@@ -203,27 +189,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             return null;
         }
 
-        // Pick the next encoder input texture from the ring buffer.
-        // NVENC reads asynchronously from the texture wrapped in the
-        // MF input sample — using a single texture means the NEXT
-        // EncodeTexture call's scaler blit overwrites the pixels while
-        // NVENC is still reading the PREVIOUS call's content. The ring
-        // ensures each in-flight input sample points to a different
-        // texture so there's no overwrite race.
-        var inputTexture = _encoderInputRing[_encoderInputRingIndex]!;
-        _encoderInputRingIndex = (_encoderInputRingIndex + 1) % EncoderInputRingSize;
-
-        try
-        {
-            _textureScaler!.Process(sourceTexture, inputTexture);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Write($"[mf] texture scaler threw: {ex.Message}");
-            return null;
-        }
-
-        return EncodeTexture(inputTexture, inputTimestamp);
+        return EncodeTexture(_encoderInputTexture!, inputTimestamp);
     }
 
     /// <summary>
@@ -236,18 +202,13 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         if (_textureScaler is not null
             && _textureScalerSrcWidth == srcWidth
             && _textureScalerSrcHeight == srcHeight
-            && _encoderInputRing[0] is not null)
+            && _encoderInputTexture is not null)
         {
             return;
         }
 
         _textureScaler?.Dispose();
-        for (var i = 0; i < EncoderInputRingSize; i++)
-        {
-            _encoderInputRing[i]?.Dispose();
-            _encoderInputRing[i] = null;
-        }
-        _encoderInputRingIndex = 0;
+        _encoderInputTexture?.Dispose();
 
         _textureScaler = new D3D11VideoScaler(_d3dDevice!, srcWidth, srcHeight, _width, _height);
         _textureScalerSrcWidth = srcWidth;
@@ -266,10 +227,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             CPUAccessFlags = CpuAccessFlags.None,
             MiscFlags = ResourceOptionFlags.None,
         };
-        for (var i = 0; i < EncoderInputRingSize; i++)
-        {
-            _encoderInputRing[i] = _d3dDevice!.CreateTexture2D(desc);
-        }
+        _encoderInputTexture = _d3dDevice!.CreateTexture2D(desc);
         DebugLog.Write($"[mf] texture pipeline built {srcWidth}x{srcHeight} -> {_width}x{_height}");
     }
 
@@ -822,10 +780,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         try { _events?.Dispose(); } catch { }
         try { _transform.Dispose(); } catch { }
         try { _textureScaler?.Dispose(); } catch { }
-        for (var i = 0; i < EncoderInputRingSize; i++)
-        {
-            try { _encoderInputRing[i]?.Dispose(); } catch { }
-        }
+        try { _encoderInputTexture?.Dispose(); } catch { }
         try { _dxgiManager?.Dispose(); } catch { }
         // Only dispose the D3D device when we created it ourselves. External
         // devices are owned by the capture pipeline and must outlive this

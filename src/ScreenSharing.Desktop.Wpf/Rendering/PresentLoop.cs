@@ -148,7 +148,7 @@ public sealed class PresentLoop : IDisposable
                     DebugLog.Write($"[present] paint threw: {ex.GetType().Name}: {ex.Message}");
                 }
 
-                if (_loggedFrames < 600)
+                if (_loggedFrames < 20)
                 {
                     _loggedFrames++;
                     var paintedAt = Stopwatch.GetTimestamp();
