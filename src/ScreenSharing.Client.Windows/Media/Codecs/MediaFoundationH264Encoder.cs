@@ -64,7 +64,8 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     private readonly ID3D11Device? _d3dDevice;
     private readonly IMFDXGIDeviceManager? _dxgiManager;
     private readonly bool _ownsD3dDevice;
-    private D3D11VideoScaler? _textureScaler;
+    private readonly bool _useLanczos;
+    private ITextureScaler? _textureScaler;
     private ID3D11Texture2D? _encoderInputTexture;
     private int _textureScalerSrcWidth;
     private int _textureScalerSrcHeight;
@@ -82,25 +83,19 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     private int _loggedTimingFrames;
     private bool _disposed;
 
-    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames)
-        : this(width, height, fps, bitrate, gopFrames, externalDevice: null)
+    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, bool useLanczos = false)
+        : this(width, height, fps, bitrate, gopFrames, useLanczos, externalDevice: null)
     {
     }
 
-    /// <summary>
-    /// Build the encoder on top of an externally-owned D3D11 device. Used by
-    /// the capture path so the framepool, the GPU scaler and the encoder all
-    /// live on one device — direct CopyResource and VideoProcessorBlt work,
-    /// no shared-handle dance. The caller retains ownership; Dispose leaves
-    /// the device alone in this mode.
-    /// </summary>
-    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, ID3D11Device? externalDevice)
+    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, bool useLanczos, ID3D11Device? externalDevice)
     {
         _width = width;
         _height = height;
         _fps = Math.Max(1, fps);
         _bitrate = Math.Max(500_000, bitrate);
         _gopFrames = Math.Max(1, gopFrames);
+        _useLanczos = useLanczos;
 
         // Create (or wrap) a D3D11 device and DXGI device manager for the
         // encoder MFT BEFORE we hand it any media types. NVENC's MFT routes
@@ -222,10 +217,28 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         _textureScaler?.Dispose();
         _encoderInputTexture?.Dispose();
 
-        _textureScaler = new D3D11VideoScaler(_d3dDevice!, srcWidth, srcHeight, _width, _height);
+        if (_useLanczos && _d3dDevice is not null)
+        {
+            try
+            {
+                _textureScaler = new LanczosScaler(_d3dDevice, srcWidth, srcHeight, _width, _height);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[mf] Lanczos scaler failed ({ex.Message}), falling back to bilinear");
+                _textureScaler = new D3D11VideoScaler(_d3dDevice, srcWidth, srcHeight, _width, _height);
+            }
+        }
+        else
+        {
+            _textureScaler = new D3D11VideoScaler(_d3dDevice!, srcWidth, srcHeight, _width, _height);
+        }
         _textureScalerSrcWidth = srcWidth;
         _textureScalerSrcHeight = srcHeight;
 
+        // Lanczos writes via UAV (compute shader), so the encoder input
+        // texture needs UnorderedAccess. The Video Processor writes via
+        // RenderTarget. Include both so either scaler works.
         var desc = new Texture2DDescription
         {
             Width = (uint)_width,
@@ -235,12 +248,13 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
             Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource | BindFlags.UnorderedAccess,
             CPUAccessFlags = CpuAccessFlags.None,
             MiscFlags = ResourceOptionFlags.None,
         };
         _encoderInputTexture = _d3dDevice!.CreateTexture2D(desc);
-        DebugLog.Write($"[mf] texture pipeline built {srcWidth}x{srcHeight} -> {_width}x{_height}");
+        var scalerName = _textureScaler is LanczosScaler ? "Lanczos" : "Bilinear";
+        DebugLog.Write($"[mf] texture pipeline built {srcWidth}x{srcHeight} -> {_width}x{_height} ({scalerName})");
     }
 
     /// <summary>

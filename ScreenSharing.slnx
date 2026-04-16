@@ -1,5 +1,8 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/ScreenSharing.Client.Windows/ScreenSharing.Client.Windows.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="src/ScreenSharing.Client/ScreenSharing.Client.csproj" />
     <Project Path="src/ScreenSharing.Desktop.Wpf/ScreenSharing.Desktop.Wpf.csproj">
       <Platform Project="x64" />

@@ -119,6 +119,12 @@ public partial class CaptureTestView : UserControl
                 var resolved = catalog.ResolveOrFallback(videoSettings.Codec);
                 var encoderFactory = resolved.encoderFactory;
                 var decoderFactory = resolved.decoderFactory;
+                // Apply the scaler mode from settings so the encoder
+                // picks Lanczos or bilinear at creation time.
+                if (encoderFactory is MediaFoundationH264EncoderFactory mfFactory)
+                {
+                    mfFactory.Scaler = videoSettings.Scaler;
+                }
                 _bridge = new EncodeDecodeBridge(_source, encoderFactory, decoderFactory, videoSettings);
                 await _source.StartAsync();
                 _bridge.Start();

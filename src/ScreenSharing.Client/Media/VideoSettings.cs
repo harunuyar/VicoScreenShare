@@ -54,14 +54,15 @@ public sealed class VideoSettings
     public double KeyframeIntervalSeconds { get; set; } = 2.0;
 
     /// <summary>
-    /// Scaling filter used when <see cref="TargetHeight"/> is smaller than
-    /// the source. Nearest is fastest but produces shimmering/stairstepped
-    /// text. Bilinear is the default — cheap on GPU, good enough for most
-    /// content. Bicubic and Lanczos give sharper text at a slightly higher
-    /// GPU cost; their availability depends on the Video Processor caps of
-    /// the host GPU, with automatic fallback to bilinear.
+    /// Downscale filter used when <see cref="TargetHeight"/> is smaller
+    /// than the source. <see cref="ScalerMode.Bilinear"/> is the default
+    /// — cheap on GPU, good for gaming and video. <see cref="ScalerMode.Lanczos"/>
+    /// uses a Lanczos3 compute shader that preserves sharp text edges
+    /// when downscaling (e.g. 1440p → 1080p) at the cost of more GPU
+    /// work per frame. Use Lanczos for code sessions where readability
+    /// matters more than frame rate.
     /// </summary>
-    public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
+    public ScalerMode Scaler { get; set; } = ScalerMode.Bilinear;
 
     /// <summary>
     /// How many frames the <see cref="TimestampedFrameQueue"/> on the
@@ -78,14 +79,15 @@ public sealed class VideoSettings
 }
 
 /// <summary>
-/// Downscale filter quality. Ordered cheapest-to-sharpest. The D3D11 Video
-/// Processor picks the best available filter on the host GPU and falls
-/// back to <see cref="Bilinear"/> if the requested mode is unsupported.
+/// Downscale filter mode for the encoder's capture → encode path.
 /// </summary>
-public enum ScalerQuality
+public enum ScalerMode
 {
-    Nearest = 0,
-    Bilinear = 1,
-    Bicubic = 2,
-    Lanczos = 3,
+    /// <summary>Fast GPU bilinear (D3D11 Video Processor). Good for
+    /// gaming and video content. Default.</summary>
+    Bilinear = 0,
+
+    /// <summary>Lanczos3 compute shader. Produces sharp text at the
+    /// cost of more GPU work per frame. Use for code sessions.</summary>
+    Lanczos = 1,
 }

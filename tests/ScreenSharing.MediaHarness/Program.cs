@@ -407,7 +407,7 @@ internal static class Program
             TargetFrameRate = fps,
             TargetBitrate = (int)(bitrateMbps * 1_000_000),
             Codec = VideoCodec.H264,
-            ScalerQuality = ScalerQuality.Bilinear,
+            Scaler = ScalerMode.Bilinear,
         };
 
         long encodedFrameCount = 0;
@@ -551,7 +551,7 @@ internal static class Program
             TargetFrameRate = fps,
             TargetBitrate = (int)(bitrateMbps * 1_000_000),
             Codec = VideoCodec.H264,
-            ScalerQuality = ScalerQuality.Bilinear,
+            Scaler = ScalerMode.Bilinear,
         };
 
         // Per-stage state. Encoded bytes are handed straight to the
@@ -740,7 +740,7 @@ internal static class Program
                 TargetFrameRate = fps,
                 TargetBitrate = (int)(bitrateMbps * 1_000_000),
                 Codec = VideoCodec.H264,
-                ScalerQuality = ScalerQuality.Bilinear,
+                Scaler = ScalerMode.Bilinear,
             },
             encoderFactory);
         streamer.Start();

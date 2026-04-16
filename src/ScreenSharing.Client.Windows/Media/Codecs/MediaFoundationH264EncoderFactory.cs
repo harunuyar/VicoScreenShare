@@ -1,3 +1,4 @@
+using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using Vortice.Direct3D11;
 
@@ -23,6 +24,13 @@ public sealed class MediaFoundationH264EncoderFactory : IVideoEncoderFactory
         _sharedDevice = sharedDevice;
     }
 
+    /// <summary>
+    /// The scaler mode to use when the encoder downscales captured
+    /// textures. Set from <see cref="VideoSettings.Scaler"/> before
+    /// the first encoder is created.
+    /// </summary>
+    public ScalerMode Scaler { get; set; } = ScalerMode.Bilinear;
+
     public VideoCodec Codec => VideoCodec.H264;
 
     public bool IsAvailable
@@ -34,14 +42,9 @@ public sealed class MediaFoundationH264EncoderFactory : IVideoEncoderFactory
         }
     }
 
-    /// <summary>
-    /// Texture input is supported whenever the factory was built against a
-    /// shared D3D11 device (the one the capture source also uses) AND the
-    /// runtime has at least one hardware MFT available. The negotiated
-    /// input format is BGRA; see <see cref="MediaFoundationH264Encoder"/>.
-    /// </summary>
     public bool SupportsTextureInput => _sharedDevice is not null && IsAvailable;
 
     public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) =>
-        new MediaFoundationH264Encoder(width, height, targetFps, targetBitrate, gopFrames, _sharedDevice);
+        new MediaFoundationH264Encoder(width, height, targetFps, targetBitrate, gopFrames,
+            useLanczos: Scaler == ScalerMode.Lanczos, externalDevice: _sharedDevice);
 }

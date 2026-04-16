@@ -21,7 +21,7 @@ namespace ScreenSharing.Client.Windows.Direct3D;
 /// texture; input views are built per-frame because WGC hands out a fresh
 /// surface each frame.
 /// </summary>
-public sealed class D3D11VideoScaler : IDisposable
+public sealed class D3D11VideoScaler : ITextureScaler
 {
     private readonly ID3D11VideoDevice _videoDevice;
     private readonly ID3D11VideoContext _videoContext;

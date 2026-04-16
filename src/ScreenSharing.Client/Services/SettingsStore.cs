@@ -101,7 +101,7 @@ public sealed class SettingsStore
         public int TargetFrameRate { get; set; } = 60;
         public int TargetBitrate { get; set; } = 12_000_000;
         public double KeyframeIntervalSeconds { get; set; } = 2.0;
-        public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
+        public ScalerMode Scaler { get; set; } = ScalerMode.Bilinear;
         public VideoCodec Codec { get; set; } = VideoCodec.H264;
         public int ReceiveBufferFrames { get; set; } = 5;
 
@@ -120,7 +120,7 @@ public sealed class SettingsStore
             TargetFrameRate = source.Video.TargetFrameRate,
             TargetBitrate = source.Video.TargetBitrate,
             KeyframeIntervalSeconds = source.Video.KeyframeIntervalSeconds,
-            ScalerQuality = source.Video.ScalerQuality,
+            Scaler = source.Video.Scaler,
             Codec = source.Video.Codec,
             ReceiveBufferFrames = source.Video.ReceiveBufferFrames,
         };
@@ -136,7 +136,7 @@ public sealed class SettingsStore
                     TargetFrameRate = TargetFrameRate,
                     TargetBitrate = TargetBitrate,
                     KeyframeIntervalSeconds = KeyframeIntervalSeconds,
-                    ScalerQuality = ScalerQuality,
+                    Scaler = Scaler,
                     Codec = Codec,
                     ReceiveBufferFrames = ReceiveBufferFrames > 0 && ReceiveBufferFrames <= 240 ? ReceiveBufferFrames : 5,
                 },

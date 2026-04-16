@@ -30,7 +30,7 @@ public class SettingsStoreTests : IDisposable
 
         settings.Video.TargetHeight.Should().Be(1080);
         settings.Video.TargetFrameRate.Should().Be(60);
-        settings.Video.ScalerQuality.Should().Be(ScalerQuality.Bilinear);
+        settings.Video.Scaler.Should().Be(ScalerMode.Bilinear);
         settings.ServerUri.Should().Be(new Uri("ws://localhost:5000/ws"));
         File.Exists(_settingsPath).Should().BeFalse("LoadOrCreate only persists on Save");
     }
@@ -48,7 +48,7 @@ public class SettingsStoreTests : IDisposable
                 TargetFrameRate = 120,
                 TargetBitrate = 25_000_000,
                 KeyframeIntervalSeconds = 1.0,
-                ScalerQuality = ScalerQuality.Bicubic,
+                Scaler = ScalerMode.Lanczos,
             },
         });
 
@@ -59,7 +59,7 @@ public class SettingsStoreTests : IDisposable
         loaded.Video.TargetFrameRate.Should().Be(120);
         loaded.Video.TargetBitrate.Should().Be(25_000_000);
         loaded.Video.KeyframeIntervalSeconds.Should().Be(1.0);
-        loaded.Video.ScalerQuality.Should().Be(ScalerQuality.Bicubic);
+        loaded.Video.Scaler.Should().Be(ScalerMode.Lanczos);
     }
 
     [Fact]

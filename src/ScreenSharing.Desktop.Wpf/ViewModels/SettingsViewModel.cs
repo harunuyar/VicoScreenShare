@@ -54,21 +54,19 @@ public sealed partial class SettingsViewModel : ViewModelBase
             new TargetHeightOption("360p", 360),
         };
 
-        ScalerQualityOptions = new[]
+        ScalerModeOptions = new[]
         {
-            new ScalerQualityOption("Nearest (fastest, shimmer)", ScalerQuality.Nearest),
-            new ScalerQualityOption("Bilinear (recommended)", ScalerQuality.Bilinear),
-            new ScalerQualityOption("Bicubic (sharper text)", ScalerQuality.Bicubic),
-            new ScalerQualityOption("Lanczos (sharpest)", ScalerQuality.Lanczos),
+            new ScalerModeOption("Bilinear (fast, recommended)", ScalerMode.Bilinear),
+            new ScalerModeOption("Lanczos (sharp text, slower)", ScalerMode.Lanczos),
         };
 
         QualityPresets = new[]
         {
-            new QualityPreset("Readable",  1080, 30,  8_000_000,  2.0, ScalerQuality.Bicubic),
-            new QualityPreset("Smooth",    1080, 60,  12_000_000, 2.0, ScalerQuality.Bilinear),
-            new QualityPreset("High FPS",  1440, 120, 25_000_000, 1.0, ScalerQuality.Bilinear),
-            new QualityPreset("4K Cinema", 2160, 30,  40_000_000, 2.0, ScalerQuality.Bicubic),
-            new QualityPreset("Potato",    720,  30,  3_000_000,  2.0, ScalerQuality.Bilinear),
+            new QualityPreset("Readable",  1080, 30,  8_000_000,  2.0, ScalerMode.Lanczos),
+            new QualityPreset("Smooth",    1080, 60,  12_000_000, 2.0, ScalerMode.Bilinear),
+            new QualityPreset("High FPS",  1440, 120, 25_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("4K Cinema", 2160, 30,  40_000_000, 2.0, ScalerMode.Lanczos),
+            new QualityPreset("Potato",    720,  30,  3_000_000,  2.0, ScalerMode.Bilinear),
         };
 
         var catalog = ClientHost.VideoCodecCatalog ?? new VideoCodecCatalog();
@@ -86,8 +84,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _bitrate = Math.Clamp(_settings.Video.TargetBitrate, MinBitrateBps, MaxBitrateBps);
         _bitrateSliderValue = BpsToSliderValue(_bitrate);
         _keyframeIntervalSeconds = Math.Clamp(_settings.Video.KeyframeIntervalSeconds, 0.5, 10.0);
-        _selectedScalerQuality = ScalerQualityOptions.FirstOrDefault(o => o.Quality == _settings.Video.ScalerQuality)
-            ?? ScalerQualityOptions[1];
+        _selectedScalerMode = ScalerModeOptions.FirstOrDefault(o => o.Mode == _settings.Video.Scaler)
+            ?? ScalerModeOptions[0];
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
         _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 240);
@@ -111,7 +109,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     }
 
     public IReadOnlyList<TargetHeightOption> TargetHeightOptions { get; }
-    public IReadOnlyList<ScalerQualityOption> ScalerQualityOptions { get; }
+    public IReadOnlyList<ScalerModeOption> ScalerModeOptions { get; }
     public IReadOnlyList<QualityPreset> QualityPresets { get; }
     public IReadOnlyList<CodecOption> CodecOptions { get; }
 
@@ -131,7 +129,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     private double _keyframeIntervalSeconds;
 
     [ObservableProperty]
-    private ScalerQualityOption _selectedScalerQuality;
+    private ScalerModeOption _selectedScalerMode;
 
     [ObservableProperty]
     private CodecOption _selectedCodec;
@@ -167,8 +165,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         FrameRate = preset.FrameRate;
         BitrateSliderValue = BpsToSliderValue(preset.Bitrate);
         KeyframeIntervalSeconds = preset.KeyframeIntervalSeconds;
-        SelectedScalerQuality = ScalerQualityOptions.FirstOrDefault(o => o.Quality == preset.Scaler)
-            ?? SelectedScalerQuality;
+        SelectedScalerMode = ScalerModeOptions.FirstOrDefault(o => o.Mode == preset.Scaler)
+            ?? SelectedScalerMode;
     }
 
     [RelayCommand]
@@ -184,7 +182,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.TargetFrameRate = FrameRate;
         _settings.Video.TargetBitrate = Bitrate;
         _settings.Video.KeyframeIntervalSeconds = KeyframeIntervalSeconds;
-        _settings.Video.ScalerQuality = SelectedScalerQuality.Quality;
+        _settings.Video.Scaler = SelectedScalerMode.Mode;
         _settings.Video.Codec = SelectedCodec.Codec;
         _settings.Video.ReceiveBufferFrames = ReceiveBufferFrames;
 
@@ -245,12 +243,12 @@ public sealed partial class SettingsViewModel : ViewModelBase
 }
 
 public sealed record TargetHeightOption(string DisplayName, int Height);
-public sealed record ScalerQualityOption(string DisplayName, ScalerQuality Quality);
+public sealed record ScalerModeOption(string DisplayName, ScalerMode Mode);
 public sealed record QualityPreset(
     string Name,
     int TargetHeight,
     int FrameRate,
     int Bitrate,
     double KeyframeIntervalSeconds,
-    ScalerQuality Scaler);
+    ScalerMode Scaler);
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);

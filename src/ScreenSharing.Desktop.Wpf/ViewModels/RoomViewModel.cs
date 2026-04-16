@@ -10,6 +10,7 @@ using ScreenSharing.Client.Diagnostics;
 using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
+using ScreenSharing.Client.Windows.Media.Codecs;
 using ScreenSharing.Client.Services;
 using ScreenSharing.Desktop.App.Services;
 using ScreenSharing.Protocol;
@@ -92,6 +93,10 @@ public sealed partial class RoomViewModel : ViewModelBase
         _sessionCodec = resolved.selected;
         _encoderFactory = resolved.encoderFactory;
         _decoderFactory = resolved.decoderFactory;
+        if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc)
+        {
+            mfEnc.Scaler = settings.Video.Scaler;
+        }
 
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
@@ -429,6 +434,10 @@ public sealed partial class RoomViewModel : ViewModelBase
         _sessionCodec = resolved.selected;
         _encoderFactory = resolved.encoderFactory;
         _decoderFactory = resolved.decoderFactory;
+        if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc2)
+        {
+            mfEnc2.Scaler = _settings.Video.Scaler;
+        }
 
         _negotiationStarted = false;
         _ = StartWebRtcAsync();
