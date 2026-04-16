@@ -39,8 +39,20 @@ namespace ScreenSharing.Client.Windows.Media.Codecs;
 ///   2. hardware sync — older driver variants
 ///   3. software sync (MSFT MSH264EncoderMFT) — universal fallback
 /// </summary>
-public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
+public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEncodedOutputSource
 {
+    // --- IAsyncEncodedOutputSource ---
+    private Action? _outputAvailable;
+    private bool _externalOutputDrain;
+
+    public event Action? OutputAvailable
+    {
+        add { _outputAvailable += value; _externalOutputDrain = true; }
+        remove { _outputAvailable -= value; _externalOutputDrain = (_outputAvailable != null); }
+    }
+
+    public bool TryDequeueEncoded(out EncodedFrame frame) => _outputQueue.TryDequeue(out frame);
+
     private readonly int _width;
     private readonly int _height;
     private readonly int _fps;
@@ -304,7 +316,10 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     {
         if (!_needInputSignal.Wait(50))
         {
-            return TryDequeueOutput();
+            // No NeedInput credit — pump is backed up. If an external
+            // subscriber is draining output via OutputAvailable, don't
+            // compete on the queue; just return null. Otherwise poll.
+            return _externalOutputDrain ? null : TryDequeueOutput();
         }
 
         lock (_processLock)
@@ -321,7 +336,10 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             }
         }
 
-        return TryDequeueOutput();
+        // When an external subscriber handles OutputAvailable, it
+        // drains the queue. Don't compete with it here — return null
+        // so CaptureStreamer knows to skip inline dispatch.
+        return _externalOutputDrain ? null : TryDequeueOutput();
     }
 
     private EncodedFrame? EncodeSyncSample(IMFSample sample, TimeSpan inputTimestamp)
@@ -400,7 +418,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 _loggedTimeouts++;
                 DebugLog.Write($"[mf] async EncodeAsync timeout #{_loggedTimeouts} — no NeedInput credit within 50ms");
             }
-            return TryDequeueOutput();
+            return _externalOutputDrain ? null : TryDequeueOutput();
         }
 
         var sample = CreateInputSample(bgraSource, bgraStride, inputTimestamp);
@@ -429,7 +447,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             sample.Dispose();
         }
 
-        return TryDequeueOutput();
+        return _externalOutputDrain ? null : TryDequeueOutput();
     }
 
     private EncodedFrame? EncodeSync(byte[] bgraSource, int bgraStride, TimeSpan inputTimestamp)
@@ -736,6 +754,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                             // pipeline depth.
                             var ts = TimeSpan.FromTicks(sampleTimeTicks);
                             _outputQueue.Enqueue(new EncodedFrame(output, ts));
+                            try { _outputAvailable?.Invoke(); } catch { }
                         }
                         else if (loggedEvents <= 8)
                         {

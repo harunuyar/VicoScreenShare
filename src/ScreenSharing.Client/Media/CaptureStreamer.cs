@@ -49,6 +49,7 @@ public sealed class CaptureStreamer : IDisposable
     private long _nextDeadlineTicks;
 
     private IVideoEncoder? _encoder;
+    private IAsyncEncodedOutputSource? _asyncOutput;
     private int _encoderWidth;
     private int _encoderHeight;
 
@@ -289,13 +290,15 @@ public sealed class CaptureStreamer : IDisposable
 
             if (_encoder is null || encWidth != _encoderWidth || encHeight != _encoderHeight)
             {
-                try { _encoder?.Dispose(); } catch { }
-                _encoder = _encoderFactory.CreateEncoder(encWidth, encHeight, _targetFps, _targetBitrate, _gopFrames);
-                _encoderWidth = encWidth;
-                _encoderHeight = encHeight;
+                ReplaceEncoder(encWidth, encHeight);
             }
 
-            encoded = _encoder.EncodeTexture(nativeTexture, sourceWidth, sourceHeight, timestamp);
+            encoded = _encoder!.EncodeTexture(nativeTexture, sourceWidth, sourceHeight, timestamp);
+
+            // If the encoder is async with an external output drain
+            // (OutputAvailable event), encoded output is dispatched
+            // from the pump thread, not here. Skip inline dispatch.
+            if (_asyncOutput is not null) encoded = null;
 
             if (encoded is null || encoded.Value.Bytes.Length == 0)
             {
@@ -467,17 +470,12 @@ public sealed class CaptureStreamer : IDisposable
             // tuple and the caller swaps them out on change.
             if (_encoder is null || width != _encoderWidth || height != _encoderHeight)
             {
-                try { _encoder?.Dispose(); } catch { }
-                _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate, _gopFrames);
-                _encoderWidth = width;
-                _encoderHeight = height;
+                ReplaceEncoder(width, height);
             }
 
-            // BGRA -> encoder's native pixel format (NV12 for H.264 / I420 for
-            // VP8) happens inside the encoder now — a single fused pass
-            // instead of the double conversion (BGRA -> I420 -> NV12) this
-            // hot path used to do on the capture thread.
-            encoded = _encoder.EncodeBgra(encoderInput, encoderStrideBytes, timestamp);
+            encoded = _encoder!.EncodeBgra(encoderInput, encoderStrideBytes, timestamp);
+
+            if (_asyncOutput is not null) encoded = null;
 
             if (encoded is null || encoded.Value.Bytes.Length == 0)
             {
@@ -513,6 +511,58 @@ public sealed class CaptureStreamer : IDisposable
         return (uint)rtpUnits;
     }
 
+    /// <summary>
+    /// Tear down the old encoder (if any) and build a new one at the
+    /// given dimensions. If the new encoder implements
+    /// <see cref="IAsyncEncodedOutputSource"/>, subscribe to its
+    /// <see cref="IAsyncEncodedOutputSource.OutputAvailable"/> event
+    /// so encoded frames are dispatched the instant the hardware
+    /// encoder produces them, not delayed until the next capture
+    /// callback polls the output queue.
+    /// </summary>
+    private void ReplaceEncoder(int width, int height)
+    {
+        // Unsubscribe from the old async source before disposing.
+        if (_asyncOutput is not null)
+        {
+            _asyncOutput.OutputAvailable -= OnAsyncEncoderOutput;
+            _asyncOutput = null;
+        }
+        try { _encoder?.Dispose(); } catch { }
+
+        _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate, _gopFrames);
+        _encoderWidth = width;
+        _encoderHeight = height;
+
+        if (_encoder is IAsyncEncodedOutputSource asyncSrc)
+        {
+            _asyncOutput = asyncSrc;
+            asyncSrc.OutputAvailable += OnAsyncEncoderOutput;
+        }
+    }
+
+    /// <summary>
+    /// Fires on the encoder's async event pump thread the instant a
+    /// new encoded frame is enqueued. Drains all available output and
+    /// dispatches via <see cref="_onEncoded"/> immediately — no waiting
+    /// for the next capture callback.
+    /// </summary>
+    private void OnAsyncEncoderOutput()
+    {
+        if (_disposed || _asyncOutput is null) return;
+
+        while (_asyncOutput.TryDequeueEncoded(out var frame))
+        {
+            if (frame.Bytes is null || frame.Bytes.Length == 0) continue;
+
+            EncodedFrameCount++;
+            EncodedByteCount += frame.Bytes.Length;
+
+            var duration = ComputeDurationRtpUnits(frame.Timestamp);
+            _onEncoded(duration, frame.Bytes, frame.Timestamp);
+        }
+    }
+
     public void Dispose()
     {
         Stop();
@@ -520,6 +570,11 @@ public sealed class CaptureStreamer : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            if (_asyncOutput is not null)
+            {
+                _asyncOutput.OutputAvailable -= OnAsyncEncoderOutput;
+                _asyncOutput = null;
+            }
             try { _encoder?.Dispose(); } catch { }
             _encoder = null;
         }

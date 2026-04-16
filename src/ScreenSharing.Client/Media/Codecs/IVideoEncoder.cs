@@ -59,3 +59,18 @@ public interface IVideoEncoder : IDisposable
     /// </summary>
     EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp);
 }
+
+/// <summary>
+/// Optional interface for async hardware encoders (NVENC, QSV, AMF).
+/// When implemented, <see cref="OutputAvailable"/> fires from the
+/// encoder's internal event pump the instant an encoded frame is ready,
+/// allowing the caller to dispatch it immediately instead of waiting
+/// for the next <see cref="IVideoEncoder.EncodeTexture"/> poll.
+/// Reduces enc-out → dispatch latency from ~16 ms (one capture
+/// interval) to ~0 ms.
+/// </summary>
+public interface IAsyncEncodedOutputSource
+{
+    event Action? OutputAvailable;
+    bool TryDequeueEncoded(out EncodedFrame frame);
+}
