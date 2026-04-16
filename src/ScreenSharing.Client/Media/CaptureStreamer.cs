@@ -233,7 +233,7 @@ public sealed class CaptureStreamer : IDisposable
     {
         var wallNow = Stopwatch.GetTimestamp();
         var frameTs = timestamp.Ticks;
-        if (_timingLogFrames < 10)
+        if (_timingLogFrames < 3)
         {
             if (_lastArrivalWallTicks != 0)
             {
@@ -251,7 +251,7 @@ public sealed class CaptureStreamer : IDisposable
             return;
         }
 
-        var timingStart = _timingLogFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
+        var timingStart = _timingLogFrames < 3 ? Stopwatch.GetTimestamp() : 0L;
 
         SourceWidth = width;
         SourceHeight = height;
@@ -339,7 +339,7 @@ public sealed class CaptureStreamer : IDisposable
         // rate or _frameLock contention with the preview path), not us.
         var wallNow = Stopwatch.GetTimestamp();
         var frameTs = frame.Timestamp.Ticks;
-        if (_timingLogFrames < 10)
+        if (_timingLogFrames < 3)
         {
             if (_lastArrivalWallTicks != 0)
             {
@@ -357,7 +357,7 @@ public sealed class CaptureStreamer : IDisposable
             return;
         }
 
-        var timingStart = _timingLogFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
+        var timingStart = _timingLogFrames < 3 ? Stopwatch.GetTimestamp() : 0L;
 
         // Source crop: even dimensions (libvpx chroma subsampling) and non-negative.
         SourceWidth = frame.Width;

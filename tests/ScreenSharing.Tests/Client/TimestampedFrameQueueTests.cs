@@ -90,21 +90,19 @@ public class TimestampedFrameQueueTests
     }
 
     [Fact]
-    public void Overflow_drops_oldest_and_admits_newest()
+    public void Skip_to_latest_keeps_newest_frames()
     {
-        // Capacity is 4x the threshold; threshold=2 → max=8.
-        var queue = new TimestampedFrameQueue(2);
-        for (var i = 0; i < 12; i++)
+        var queue = new TimestampedFrameQueue(3);
+        for (var i = 0; i < 20; i++)
         {
             queue.Push(MakeFrame(i * 10));
         }
+        queue.Count.Should().Be(20, "no automatic trim on push");
 
-        queue.Count.Should().Be(8, "queue is bounded at 4 * threshold");
-        queue.DroppedOverflowCount.Should().Be(4);
-
-        // The smallest remaining pts should be what was pushed at i=4
-        // because the first 4 were dropped.
-        queue.PeekNextTimestamp().Should().Be(TimeSpan.FromMilliseconds(40));
+        queue.SkipToLatest(3);
+        queue.Count.Should().Be(3);
+        // The 3 newest are pts 170, 180, 190.
+        queue.PeekNextTimestamp().Should().Be(TimeSpan.FromMilliseconds(170));
     }
 
     [Fact]

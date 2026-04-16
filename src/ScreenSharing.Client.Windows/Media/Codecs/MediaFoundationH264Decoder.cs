@@ -320,10 +320,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                 var outTs = TimeSpan.FromTicks(outSampleTimeTicks);
                 (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height, outTs));
 
-                if (_loggedDecodedFrames < 10)
-                {
-                    DebugLog.Write($"[ts-dec-out] pts={outTs.TotalMilliseconds:F2}ms count={results.Count} ({_width}x{_height}, path={(_useD3dPath ? "GPU" : "CPU")})");
-                }
                 if (_loggedDecodedFrames < 3)
                 {
                     _loggedDecodedFrames++;

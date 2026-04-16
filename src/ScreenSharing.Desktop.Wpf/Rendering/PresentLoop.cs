@@ -87,8 +87,12 @@ public sealed class PresentLoop : IDisposable
             long anchorWallTicks = 0;
             TimeSpan anchorPts = default;
 
+            // Drift threshold for the catch-up guard. 100 ms is ~6 frames
+            // at 60 fps — enough headroom for normal PTS jitter but
+            // tight enough that a visible backlog (cold-start, stall)
+            // gets caught quickly.
             var maxDriftSwTicks = StopwatchTicksFromTimespanTicks(
-                TimeSpan.FromMilliseconds(500).Ticks);
+                TimeSpan.FromMilliseconds(100).Ticks);
 
             while (!ct.IsCancellationRequested)
             {
@@ -119,14 +123,32 @@ public sealed class PresentLoop : IDisposable
                         StopwatchTicksFromTimespanTicks(ptsOffset);
                 }
 
-                // 3. Drift guard. If the schedule is more than 500 ms
-                //    away from the wall clock in either direction,
-                //    re-anchor to now. Prevents catch-up sprints after
-                //    source pauses, machine sleep, or long GC stalls.
+                // 3. Drift guard + latency catch-up. If the schedule
+                //    drifted behind the wall clock by more than a small
+                //    threshold, skip ahead in the queue to near-latest
+                //    content, then re-anchor. This handles cold-start
+                //    backlog (encoder init builds up 10+ frames before
+                //    the first paint) and mid-stream stalls (D3D
+                //    contention, GC pause) without the aggressive
+                //    depth-based trimming that drops frames during
+                //    normal operation. The threshold is generous enough
+                //    (~100 ms) that normal PTS jitter doesn't trigger
+                //    it, but tight enough that a visible stall gets
+                //    caught within a few frames.
                 {
                     var nowTicks = Stopwatch.GetTimestamp();
-                    if (Math.Abs(nowTicks - scheduledWallTicks) > maxDriftSwTicks)
+                    var driftSwTicks = nowTicks - scheduledWallTicks;
+                    if (driftSwTicks > maxDriftSwTicks || driftSwTicks < -maxDriftSwTicks)
                     {
+                        // Skip the queue to near-latest so we resume
+                        // painting fresh content, not a stale backlog.
+                        _queue.SkipToLatest(_queue.InitialPlayoutBufferFrames);
+                        // Re-dequeue: the frame we're holding might have
+                        // been trimmed or is now stale. Get the freshest.
+                        if (_queue.TryDequeue(out var fresher))
+                        {
+                            current = fresher;
+                        }
                         anchorWallTicks = nowTicks;
                         anchorPts = current.Timestamp;
                         scheduledWallTicks = nowTicks;

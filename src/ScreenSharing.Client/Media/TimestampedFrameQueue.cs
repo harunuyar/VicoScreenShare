@@ -52,10 +52,13 @@ public sealed class TimestampedFrameQueue
     public TimestampedFrameQueue(int initialPlayoutBufferFrames)
     {
         _initialPlayoutBufferFrames = Math.Clamp(initialPlayoutBufferFrames, 1, 240);
-        // Bounded capacity at 4x the target depth. Reaches underflow before
-        // going into runaway; beyond this we drop oldest so memory doesn't
-        // grow without bound if the present loop stalls.
-        _maxCapacity = Math.Max(4, _initialPlayoutBufferFrames * 4);
+        // Bounded capacity: large enough that normal operation never
+        // overflows, small enough that a stalled present loop doesn't
+        // accumulate minutes of backlog. The floor of 60 ensures that
+        // even with InitialPlayoutBufferFrames=1 (minimum-latency mode)
+        // the queue can hold a full second of 60 fps content without
+        // dropping.
+        _maxCapacity = Math.Max(60, _initialPlayoutBufferFrames * 4);
         _frames = new List<DecodedVideoFrame>(_maxCapacity);
     }
 
@@ -172,6 +175,26 @@ public sealed class TimestampedFrameQueue
         {
             if (_frames.Count == 0) return null;
             return _frames[0].Timestamp;
+        }
+    }
+
+    /// <summary>
+    /// Discard old frames to reduce the queue depth to approximately
+    /// <paramref name="keepCount"/>. Called by the present loop when it
+    /// detects it has fallen behind (drift re-anchor). Only the newest
+    /// <paramref name="keepCount"/> frames survive; older ones are
+    /// silently discarded. The present loop re-anchors its schedule
+    /// after calling this so the remaining frames paint from a fresh
+    /// baseline instead of chasing a stale clock.
+    /// </summary>
+    public void SkipToLatest(int keepCount)
+    {
+        lock (_lock)
+        {
+            while (_frames.Count > keepCount)
+            {
+                _frames.RemoveAt(0);
+            }
         }
     }
 

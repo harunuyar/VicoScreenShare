@@ -350,7 +350,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     {
         if (_disposed) return null;
 
-        var timingStart = _loggedTimingFrames < 10 ? Stopwatch.GetTimestamp() : 0L;
+        var timingStart = _loggedTimingFrames < 3 ? Stopwatch.GetTimestamp() : 0L;
 
         // Two paths:
         //
@@ -736,10 +736,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                             // pipeline depth.
                             var ts = TimeSpan.FromTicks(sampleTimeTicks);
                             _outputQueue.Enqueue(new EncodedFrame(output, ts));
-                            if (_loggedEncodedFrames < 10)
-                            {
-                                DebugLog.Write($"[ts-enc-out] pts={ts.TotalMilliseconds:F2}ms bytes={output.Length}");
-                            }
                         }
                         else if (loggedEvents <= 8)
                         {
