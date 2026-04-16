@@ -140,12 +140,30 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             DebugLog.Write($"[recv] incoming packet after {gap.TotalSeconds:F1}s gap — stream restarted");
         }
 
+        // Convert the RTP 90 kHz clock to a TimeSpan and hand it to the
+        // decoder. The decoder propagates this through MF SampleTime so
+        // each DecodedVideoFrame.Timestamp is authoritative — not
+        // something we reconstruct per frame here. When the decoder yields
+        // multiple outputs in one call (buffered older frame plus a new
+        // one) each output carries its OWN original timestamp.
+        var rtpInputTs = TimeSpan.FromTicks((long)timestamp * TimeSpan.TicksPerMillisecond / 90);
+
         lock (_decodeLock)
         {
             if (_disposed) return;
             FramesReceived++;
             EncodedByteCount += encodedSample.Length;
-            frames = _decoder.Decode(encodedSample);
+            try
+            {
+                frames = _decoder.Decode(encodedSample, rtpInputTs);
+            }
+            catch (Exception ex)
+            {
+                // Decoder error mid-stream (packet loss, malformed SPS, etc.)
+                // should not tear down the receive path. Log and skip.
+                DebugLog.Write($"[recv] decoder threw: {ex.Message}");
+                return;
+            }
         }
 
         if (frames.Count == 0) return;
@@ -167,7 +185,7 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
                 decoded.Height,
                 strideBytes: decoded.Width * 4,
                 format: CaptureFramePixelFormat.Bgra8,
-                timestamp: TimeSpan.FromTicks((long)timestamp * TimeSpan.TicksPerMillisecond / 90));
+                timestamp: decoded.Timestamp);
             FrameArrived?.Invoke(in frame);
         }
     }

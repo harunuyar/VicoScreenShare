@@ -45,6 +45,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly int _height;
     private readonly int _fps;
     private readonly long _bitrate;
+    private readonly int _gopFrames;
     private readonly IMFTransform _transform;
     private readonly bool _isAsync;
     private readonly IMFMediaEventGenerator? _events;
@@ -52,7 +53,22 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly IMFDXGIDeviceManager? _dxgiManager;
     private readonly bool _ownsD3dDevice;
     private D3D11VideoScaler? _textureScaler;
-    private ID3D11Texture2D? _encoderInputTexture;
+    // Ring buffer of encoder input textures. NVENC reads asynchronously
+    // from the texture wrapped in the input sample — if we used a single
+    // texture, the next EncodeTexture call's scaler blit would overwrite
+    // the pixels while NVENC is still reading, producing identical or
+    // corrupted frames. With 3 textures the write always targets a
+    // different slot than the 1-2 NVENC has in flight.
+    // NVENC holds input textures across its async pipeline depth. The
+    // HaveOutput event for frame N fires long after ProcessInput(N)
+    // returned — during that interval the texture must not be
+    // overwritten. Empirically (2560x1392 BGRA on NVIDIA) the pipeline
+    // depth is ~5-6 frames, producing a 5-duplicate pattern with a
+    // ring of 3. 16 slots guarantee the ring never cycles back into a
+    // texture NVENC is still reading.
+    private const int EncoderInputRingSize = 16;
+    private readonly ID3D11Texture2D?[] _encoderInputRing = new ID3D11Texture2D?[EncoderInputRingSize];
+    private int _encoderInputRingIndex;
     private int _textureScalerSrcWidth;
     private int _textureScalerSrcHeight;
     private readonly bool _inputIsBgra; // true = ARGB32, false = NV12
@@ -60,18 +76,17 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     private readonly Thread? _pumpThread;
     private readonly CancellationTokenSource _pumpCts = new();
     private readonly SemaphoreSlim _needInputSignal = new(0, int.MaxValue);
-    private readonly ConcurrentQueue<byte[]> _outputQueue = new();
+    private readonly ConcurrentQueue<EncodedFrame> _outputQueue = new();
     private readonly object _processLock = new();
     private readonly byte[] _nv12Buffer;
-    private long _frameIndex;
     private long _loggedEncodedFrames;
     private long _loggedProcessInputs;
     private long _loggedTimeouts;
     private int _loggedTimingFrames;
     private bool _disposed;
 
-    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate)
-        : this(width, height, fps, bitrate, externalDevice: null)
+    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames)
+        : this(width, height, fps, bitrate, gopFrames, externalDevice: null)
     {
     }
 
@@ -82,12 +97,13 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     /// no shared-handle dance. The caller retains ownership; Dispose leaves
     /// the device alone in this mode.
     /// </summary>
-    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, ID3D11Device? externalDevice)
+    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, ID3D11Device? externalDevice)
     {
         _width = width;
         _height = height;
         _fps = Math.Max(1, fps);
         _bitrate = Math.Max(500_000, bitrate);
+        _gopFrames = Math.Max(1, gopFrames);
 
         // Create (or wrap) a D3D11 device and DXGI device manager for the
         // encoder MFT BEFORE we hand it any media types. NVENC's MFT routes
@@ -106,7 +122,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             _ownsD3dDevice = true;
         }
 
-        var (transform, isAsync, pickedLabel, inputIsBgra) = CreateEncoder(width, height, _fps, _bitrate, _dxgiManager);
+        var (transform, isAsync, pickedLabel, inputIsBgra) = CreateEncoder(width, height, _fps, _bitrate, _gopFrames, _dxgiManager);
         _transform = transform;
         _isAsync = isAsync;
         _inputIsBgra = inputIsBgra;
@@ -170,7 +186,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     /// invoking (the capture source does this inside its TextureArrived
     /// dispatch); our local wrapper <c>using var</c> disposes it to balance.
     /// </summary>
-    public byte[]? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight)
+    public EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp)
     {
         if (_disposed || _d3dDevice is null || !_inputIsBgra) return null;
         if (nativeTexture == IntPtr.Zero) return null;
@@ -180,7 +196,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         try
         {
             EnsureTextureScaler(sourceWidth, sourceHeight);
-            _textureScaler!.Process(sourceTexture, _encoderInputTexture!);
         }
         catch (Exception ex)
         {
@@ -188,7 +203,27 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             return null;
         }
 
-        return EncodeTexture(_encoderInputTexture!);
+        // Pick the next encoder input texture from the ring buffer.
+        // NVENC reads asynchronously from the texture wrapped in the
+        // MF input sample — using a single texture means the NEXT
+        // EncodeTexture call's scaler blit overwrites the pixels while
+        // NVENC is still reading the PREVIOUS call's content. The ring
+        // ensures each in-flight input sample points to a different
+        // texture so there's no overwrite race.
+        var inputTexture = _encoderInputRing[_encoderInputRingIndex]!;
+        _encoderInputRingIndex = (_encoderInputRingIndex + 1) % EncoderInputRingSize;
+
+        try
+        {
+            _textureScaler!.Process(sourceTexture, inputTexture);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] texture scaler threw: {ex.Message}");
+            return null;
+        }
+
+        return EncodeTexture(inputTexture, inputTimestamp);
     }
 
     /// <summary>
@@ -201,13 +236,18 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         if (_textureScaler is not null
             && _textureScalerSrcWidth == srcWidth
             && _textureScalerSrcHeight == srcHeight
-            && _encoderInputTexture is not null)
+            && _encoderInputRing[0] is not null)
         {
             return;
         }
 
         _textureScaler?.Dispose();
-        _encoderInputTexture?.Dispose();
+        for (var i = 0; i < EncoderInputRingSize; i++)
+        {
+            _encoderInputRing[i]?.Dispose();
+            _encoderInputRing[i] = null;
+        }
+        _encoderInputRingIndex = 0;
 
         _textureScaler = new D3D11VideoScaler(_d3dDevice!, srcWidth, srcHeight, _width, _height);
         _textureScalerSrcWidth = srcWidth;
@@ -226,7 +266,10 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             CPUAccessFlags = CpuAccessFlags.None,
             MiscFlags = ResourceOptionFlags.None,
         };
-        _encoderInputTexture = _d3dDevice!.CreateTexture2D(desc);
+        for (var i = 0; i < EncoderInputRingSize; i++)
+        {
+            _encoderInputRing[i] = _d3dDevice!.CreateTexture2D(desc);
+        }
         DebugLog.Write($"[mf] texture pipeline built {srcWidth}x{srcHeight} -> {_width}x{_height}");
     }
 
@@ -242,7 +285,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     /// Returns encoded bytes (caller owns) or null if the encoder hasn't
     /// produced output yet (async warmup, etc).
     /// </summary>
-    public byte[]? EncodeTexture(ID3D11Texture2D texture)
+    public EncodedFrame? EncodeTexture(ID3D11Texture2D texture, TimeSpan inputTimestamp)
     {
         if (_disposed) return null;
         if (_d3dDevice is null)
@@ -251,14 +294,14 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             return null;
         }
 
-        var sample = CreateD3DInputSample(texture);
+        var sample = CreateD3DInputSample(texture, inputTimestamp);
         try
         {
             if (_isAsync)
             {
-                return EncodeAsyncSample(sample);
+                return EncodeAsyncSample(sample, inputTimestamp);
             }
-            return EncodeSyncSample(sample);
+            return EncodeSyncSample(sample, inputTimestamp);
         }
         finally
         {
@@ -266,7 +309,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         }
     }
 
-    private IMFSample CreateD3DInputSample(ID3D11Texture2D texture)
+    private IMFSample CreateD3DInputSample(ID3D11Texture2D texture, TimeSpan inputTimestamp)
     {
         var iidTexture = typeof(ID3D11Texture2D).GUID;
         // MFCreateDXGISurfaceBuffer wraps a D3D11 texture as an
@@ -285,16 +328,21 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         var sample = MediaFactory.MFCreateSample();
         sample.AddBuffer(buffer);
 
+        // Stamp the input sample with the real content timestamp. The MFT
+        // copies this through to the matching output sample, which the
+        // event pump reads back and enqueues onto _outputQueue. That is
+        // what carries the capture-side clock across the encoder pipeline
+        // — without this, the async pump has no way to tell which input
+        // produced a given output byte stream.
         var duration = 10_000_000L / _fps;
-        sample.SampleTime = _frameIndex * duration;
+        sample.SampleTime = inputTimestamp.Ticks;
         sample.SampleDuration = duration;
-        _frameIndex++;
 
         buffer.Dispose();
         return sample;
     }
 
-    private byte[]? EncodeAsyncSample(IMFSample sample)
+    private EncodedFrame? EncodeAsyncSample(IMFSample sample, TimeSpan inputTimestamp)
     {
         if (!_needInputSignal.Wait(50))
         {
@@ -318,7 +366,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         return TryDequeueOutput();
     }
 
-    private byte[]? EncodeSyncSample(IMFSample sample)
+    private EncodedFrame? EncodeSyncSample(IMFSample sample, TimeSpan inputTimestamp)
     {
         lock (_processLock)
         {
@@ -332,11 +380,15 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 DebugLog.Write($"[mf] sync H264 EncodeTexture ProcessInput threw: {ex.Message}");
                 return null;
             }
-            return DrainOutputLocked();
+            // Sync MFTs produce output inline for the input we just fed, so
+            // the bytes correspond exactly to inputTimestamp. No event pump
+            // means no SampleTime readback needed.
+            var bytes = DrainOutputLocked();
+            return bytes is null ? null : new EncodedFrame(bytes, inputTimestamp);
         }
     }
 
-    public byte[]? EncodeBgra(byte[] bgra, int stride)
+    public EncodedFrame? EncodeBgra(byte[] bgra, int stride, TimeSpan inputTimestamp)
     {
         if (_disposed) return null;
 
@@ -359,7 +411,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
         var convertEnd = timingStart != 0 ? Stopwatch.GetTimestamp() : 0L;
 
-        var encoded = _isAsync ? EncodeAsync(bgra, stride) : EncodeSync(bgra, stride);
+        var encoded = _isAsync ? EncodeAsync(bgra, stride, inputTimestamp) : EncodeSync(bgra, stride, inputTimestamp);
 
         if (timingStart != 0)
         {
@@ -373,15 +425,15 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             DebugLog.Write($"[mf-timing #{_loggedTimingFrames}] {label}={convertMs:F1}ms encode={encodeMs:F1}ms total={totalMs:F1}ms");
         }
 
-        if (encoded is { Length: > 0 } && _loggedEncodedFrames < 3)
+        if (encoded is { Bytes.Length: > 0 } && _loggedEncodedFrames < 3)
         {
             _loggedEncodedFrames++;
-            DebugLog.Write($"[mf] H264 encoder produced frame {_loggedEncodedFrames} ({encoded.Length} bytes)");
+            DebugLog.Write($"[mf] H264 encoder produced frame {_loggedEncodedFrames} ({encoded.Value.Bytes.Length} bytes, pts={encoded.Value.Timestamp.TotalMilliseconds:F2}ms)");
         }
         return encoded;
     }
 
-    private byte[]? EncodeAsync(byte[] bgraSource, int bgraStride)
+    private EncodedFrame? EncodeAsync(byte[] bgraSource, int bgraStride, TimeSpan inputTimestamp)
     {
         if (!_needInputSignal.Wait(50))
         {
@@ -393,7 +445,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             return TryDequeueOutput();
         }
 
-        var sample = CreateInputSample(bgraSource, bgraStride);
+        var sample = CreateInputSample(bgraSource, bgraStride, inputTimestamp);
         try
         {
             lock (_processLock)
@@ -422,9 +474,9 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         return TryDequeueOutput();
     }
 
-    private byte[]? EncodeSync(byte[] bgraSource, int bgraStride)
+    private EncodedFrame? EncodeSync(byte[] bgraSource, int bgraStride, TimeSpan inputTimestamp)
     {
-        var sample = CreateInputSample(bgraSource, bgraStride);
+        var sample = CreateInputSample(bgraSource, bgraStride, inputTimestamp);
         try
         {
             lock (_processLock)
@@ -446,16 +498,20 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
             sample.Dispose();
         }
 
-        return DrainOutputLocked();
+        var bytes = DrainOutputLocked();
+        return bytes is null ? null : new EncodedFrame(bytes, inputTimestamp);
     }
 
     /// <summary>
     /// Build an IMFSample backed by a system-memory IMFMediaBuffer. In ARGB32
     /// mode the source bytes are the caller's BGRA frame copied row-by-row
     /// in case the source stride is wider than width*4. In NV12 mode they're
-    /// the converted contents of <see cref="_nv12Buffer"/>.
+    /// the converted contents of <see cref="_nv12Buffer"/>. The returned
+    /// sample's <c>SampleTime</c> is stamped with <paramref name="inputTimestamp"/>
+    /// so the MFT can propagate the content clock to the matching output
+    /// sample.
     /// </summary>
-    private IMFSample CreateInputSample(byte[] bgraSource, int bgraStride)
+    private IMFSample CreateInputSample(byte[] bgraSource, int bgraStride, TimeSpan inputTimestamp)
     {
         var buffer = MediaFactory.MFCreateMemoryBuffer(_inputBufferSize);
         buffer.Lock(out nint ptr, out int maxLen, out _);
@@ -494,25 +550,29 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         var sample = MediaFactory.MFCreateSample();
         sample.AddBuffer(buffer);
 
+        // Stamp with the real content clock. Propagation through the MFT
+        // is what carries the capture-side PTS across the encoder pipeline
+        // so the event pump can recover it on output.
         var duration = 10_000_000L / _fps;
-        sample.SampleTime = _frameIndex * duration;
+        sample.SampleTime = inputTimestamp.Ticks;
         sample.SampleDuration = duration;
-        _frameIndex++;
 
         buffer.Dispose();
         return sample;
     }
 
-    private byte[]? TryDequeueOutput()
+    private EncodedFrame? TryDequeueOutput()
     {
-        if (_outputQueue.TryDequeue(out var bytes)) return bytes;
+        if (_outputQueue.TryDequeue(out var frame)) return frame;
         return null;
     }
 
     /// <summary>
     /// Sync-mode output drain: loop <see cref="IMFTransform.ProcessOutput"/>
     /// until the MFT says it needs more input. The encode lock is held by
-    /// the caller.
+    /// the caller. Sync mode is 1-in/1-out so the caller tags the returned
+    /// bytes with the input timestamp directly — no SampleTime readback
+    /// needed.
     /// </summary>
     private byte[]? DrainOutputLocked()
     {
@@ -520,7 +580,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
         while (true)
         {
-            var output = PullSingleOutput(out var result);
+            var output = PullSingleOutput(out var result, out _);
             if (result is DrainResult.NeedMoreInput or DrainResult.Failure)
             {
                 return accumulator?.ToArray();
@@ -541,10 +601,16 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     /// Pull one encoded sample from the MFT. Handles both the "client
     /// provides output sample" path (software MFTs) and the "MFT provides
     /// output sample" path (NVENC / most hardware MFTs) by checking the
-    /// PROVIDES_SAMPLES flag on the output stream.
+    /// PROVIDES_SAMPLES flag on the output stream. Returns the raw bytes
+    /// AND the sample's propagated <c>SampleTime</c> so the async event
+    /// pump can tag the output with the right content timestamp before
+    /// enqueueing. The timestamp is copied by the underlying MFT from the
+    /// input sample that actually produced this output — NOT necessarily
+    /// the most recently submitted input.
     /// </summary>
-    private byte[]? PullSingleOutput(out DrainResult result)
+    private byte[]? PullSingleOutput(out DrainResult result, out long sampleTimeTicks)
     {
+        sampleTimeTicks = 0;
         var streamInfo = _transform.GetOutputStreamInfo(0);
         var mftProvidesSamples = (streamInfo.Flags & MftOutputStreamProvidesSamples) != 0;
 
@@ -593,6 +659,13 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 result = DrainResult.Failure;
                 return null;
             }
+
+            // Read the propagated SampleTime BEFORE disposing the sample.
+            // Any conformant MFT (including NVENC) copies SampleTime from
+            // the input that produced a given output; buffered inputs
+            // keep their original timestamps even when the pipeline lags.
+            try { sampleTimeTicks = readSample.SampleTime; }
+            catch { sampleTimeTicks = 0; }
 
             // ConvertToContiguousBuffer flattens multi-buffer samples into a
             // single IMFMediaBuffer, which is the safe way to read encoded
@@ -685,10 +758,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                     else if (type == MediaEventTypes.TransformHaveOutput)
                     {
                         byte[]? output;
+                        long sampleTimeTicks;
                         lock (_processLock)
                         {
                             if (_disposed) return;
-                            output = PullSingleOutput(out var result);
+                            output = PullSingleOutput(out var result, out sampleTimeTicks);
                             if (result == DrainResult.Failure)
                             {
                                 DebugLog.Write("[mf] async pump PullSingleOutput returned Failure");
@@ -696,7 +770,18 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                         }
                         if (output is { Length: > 0 })
                         {
-                            _outputQueue.Enqueue(output);
+                            // SampleTime on the output was copied by the MFT
+                            // from the input sample that actually produced
+                            // this bitstream, NOT the most recently fed
+                            // input. Enqueueing it verbatim preserves the
+                            // per-frame content clock across the async
+                            // pipeline depth.
+                            var ts = TimeSpan.FromTicks(sampleTimeTicks);
+                            _outputQueue.Enqueue(new EncodedFrame(output, ts));
+                            if (_loggedEncodedFrames < 10)
+                            {
+                                DebugLog.Write($"[ts-enc-out] pts={ts.TotalMilliseconds:F2}ms bytes={output.Length}");
+                            }
                         }
                         else if (loggedEvents <= 8)
                         {
@@ -737,7 +822,10 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         try { _events?.Dispose(); } catch { }
         try { _transform.Dispose(); } catch { }
         try { _textureScaler?.Dispose(); } catch { }
-        try { _encoderInputTexture?.Dispose(); } catch { }
+        for (var i = 0; i < EncoderInputRingSize; i++)
+        {
+            try { _encoderInputRing[i]?.Dispose(); } catch { }
+        }
         try { _dxgiManager?.Dispose(); } catch { }
         // Only dispose the D3D device when we created it ourselves. External
         // devices are owned by the capture pipeline and must outlive this
@@ -752,28 +840,28 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
     // --- Encoder enumeration + type negotiation ---
 
-    private static (IMFTransform transform, bool isAsync, string label, bool inputIsBgra) CreateEncoder(int width, int height, int fps, long bitrate, IMFDXGIDeviceManager? dxgiManager)
+    private static (IMFTransform transform, bool isAsync, string label, bool inputIsBgra) CreateEncoder(int width, int height, int fps, long bitrate, int gopFrames, IMFDXGIDeviceManager? dxgiManager)
     {
         // Try async hardware MFTs first — NVENC / QSV / VCE. Passing both
         // HARDWARE and ASYNCMFT flags returns async hardware encoders, which
         // we unlock individually before touching them.
         var async = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager);
+            width, height, fps, bitrate, gopFrames, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager);
         if (async.transform is not null) return (async.transform, true, "hardware async", async.inputIsBgra);
 
         // Fall back to sync hardware MFTs — rare on modern drivers but they
         // exist (e.g. older Intel QSV builds).
         var sync = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager);
+            width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager);
         if (sync.transform is not null) return (sync.transform, false, "hardware sync", sync.inputIsBgra);
 
         // Last resort: Microsoft's software H.264 encoder. Always available.
         // Software encoder doesn't need the D3D manager, pass null.
         var software = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null);
+            width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null);
         if (software.transform is not null) return (software.transform, false, "software", software.inputIsBgra);
 
         throw new InvalidOperationException("Media Foundation has no usable H.264 encoder on this machine");
@@ -858,6 +946,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
         int height,
         int fps,
         long bitrate,
+        int gopFrames,
         bool tryAsync,
         bool tryHardware,
         string label,
@@ -929,7 +1018,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
                 // NVENC uses its quality preset with B-frames and lookahead,
                 // which adds 2-3 seconds of encode latency — unusable for
                 // realtime streaming.
-                ApplyCodecApiAttributes(transform, bitrate, friendlyName);
+                ApplyCodecApiAttributes(transform, bitrate, gopFrames, friendlyName);
 
                 var (typesOk, inputIsBgra) = TrySetTypes(transform, width, height, fps, bitrate, $"{label} [{friendlyName}]");
                 if (!typesOk)
@@ -1027,6 +1116,9 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     // attribute store.
     private static readonly Guid CodecApiAVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
     private static readonly Guid CodecApiAVEncCommonMeanBitRate = new("f7222374-2144-4815-b550-a37f8e1b1083");
+    private static readonly Guid CodecApiAVEncCommonMaxBitRate = new("9651632c-a5ea-4830-88a0-5e64f2e66fe1");
+    private static readonly Guid CodecApiAVEncCommonBufferSize = new("0db96574-b6a4-4c8b-8106-3773de0313cd");
+    private static readonly Guid CodecApiAVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
     private static readonly Guid CodecApiAVEncCommonLowLatency = new("9c27891a-ed7a-40e1-88e8-b22727a024ee");
     private static readonly Guid CodecApiAVEncMPVGOPSize = new("95f31b26-95a4-4f58-9ba5-4c1eb9e1f04b");
     private const uint RateControlModeCbr = 0;
@@ -1036,10 +1128,28 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
     /// transform. All of these are advisory — if the MFT doesn't recognize
     /// a particular key, <see cref="IMFAttributes.Set(Guid, uint)"/> either
     /// silently succeeds or throws, which we swallow. NVENC is the main
-    /// consumer of LowLatency; the Microsoft software encoder also honors
-    /// MeanBitRate and RateControlMode.
+    /// consumer of LowLatency + the full CBR triple (MeanBitRate +
+    /// MaxBitRate + BufferSize); the Microsoft software encoder honors
+    /// MeanBitRate + RateControlMode + GopSize.
+    ///
+    /// LowLatency=1 is load-bearing: without it the encoder runs its
+    /// quality preset with B-frames and lookahead, adding 2-3 seconds of
+    /// pipeline lag and unusable for real-time streaming.
+    ///
+    /// Full CBR triple (MeanBitRate / MaxBitRate / BufferSize) is required
+    /// for NVENC to actually hit the target bitrate in CBR mode. Without
+    /// MaxBitRate + a one-second VBV, NVENC undershoots by 40-60% on
+    /// low-motion content and produces visible chroma artifacts on
+    /// solid backgrounds.
+    ///
+    /// QualityVsSpeed=70 is well inside NVENC's real-time budget and
+    /// avoids the aggressive speed default that also contributes to the
+    /// undershoot.
+    ///
+    /// GopSize comes from VideoSettings.KeyframeIntervalSeconds * fps so
+    /// the user can trade off keyframe bitrate vs mid-stream join latency.
     /// </summary>
-    private static void ApplyCodecApiAttributes(IMFTransform transform, long bitrate, string friendlyName)
+    private static void ApplyCodecApiAttributes(IMFTransform transform, long bitrate, int gopFrames, string friendlyName)
     {
         void TrySet(Guid key, uint value, string name)
         {
@@ -1052,11 +1162,13 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder
 
         TrySet(CodecApiAVEncCommonLowLatency, 1u, "LowLatency");
         TrySet(CodecApiAVEncCommonRateControlMode, RateControlModeCbr, "RateControlMode=CBR");
-        TrySet(CodecApiAVEncCommonMeanBitRate, (uint)Math.Min(bitrate, uint.MaxValue), "MeanBitRate");
-        // 2-second GOP is the WebRTC convention — small enough that a new
-        // viewer joining mid-stream gets a keyframe quickly, large enough
-        // that we don't waste bitrate on redundant IDR frames.
-        TrySet(CodecApiAVEncMPVGOPSize, 120u, "GopSize");
+
+        var clamped = (uint)Math.Min(bitrate, uint.MaxValue);
+        TrySet(CodecApiAVEncCommonMeanBitRate, clamped, "MeanBitRate");
+        TrySet(CodecApiAVEncCommonMaxBitRate, clamped, "MaxBitRate");
+        TrySet(CodecApiAVEncCommonBufferSize, clamped, "VBVBufferSize=1s");
+        TrySet(CodecApiAVEncCommonQualityVsSpeed, 70u, "QualityVsSpeed");
+        TrySet(CodecApiAVEncMPVGOPSize, (uint)Math.Max(1, gopFrames), "GopSize");
     }
 
     private static string TryGetFriendlyName(IMFActivate activate)

@@ -64,15 +64,17 @@ public sealed class VideoSettings
     public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
 
     /// <summary>
-    /// How many frames the receiver buffers before starting to paint and
-    /// after every underflow. Each frame of buffer adds one frame's worth
-    /// of latency (16.67 ms at 60 fps) but absorbs that much network or
-    /// decoder jitter. 3 frames = ~50 ms latency at 60 fps, which is a
-    /// reasonable default for a low-RTT LAN/loopback session. Bump this
-    /// up for high-jitter networks; drop to 1 if you want minimum latency
-    /// and the network is rock solid.
+    /// How many frames the <see cref="TimestampedFrameQueue"/> on the
+    /// receiver holds before the <see cref="PresentLoop"/> begins painting.
+    /// Also the target steady-state depth the homeostasis feedback keeps
+    /// the queue near. Each frame of buffer adds one frame's worth of
+    /// latency (16.67 ms at 60 fps) but absorbs that much network or
+    /// decoder jitter. Default 5 frames ≈ 83 ms latency at 60 fps, which
+    /// is the standard low-latency WebRTC jitter buffer size. Range is
+    /// <c>[1, 240]</c>: 1 = minimum latency for rock-solid LAN, 240 =
+    /// high-jitter network or huge pre-roll for scrubby playback.
     /// </summary>
-    public int ReceiveBufferFrames { get; set; } = 3;
+    public int ReceiveBufferFrames { get; set; } = 5;
 }
 
 /// <summary>

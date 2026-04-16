@@ -116,7 +116,7 @@ internal static class Program
             return 2;
         }
 
-        var encoder = factory.CreateEncoder(width, height, fps, bitrate);
+        var encoder = factory.CreateEncoder(width, height, fps, bitrate, gopFrames: fps * 2);
         Console.WriteLine($"# encoder created: {encoder.GetType().Name} codec={encoder.Codec}");
 
         var stride = width * 4;
@@ -135,10 +135,11 @@ internal static class Program
         // Spin a small warmup so the first encode (NVENC priming, JIT) doesn't
         // skew the average. Encoder may also return null for the first few
         // calls while async pump fills its NeedInput credits.
+        var harnessClock = Stopwatch.StartNew();
         for (var w = 0; w < 5; w++)
         {
             MutatePattern(bgra, w, width);
-            _ = encoder.EncodeBgra(bgra, stride);
+            _ = encoder.EncodeBgra(bgra, stride, harnessClock.Elapsed);
         }
 
         var benchSw = Stopwatch.StartNew();
@@ -150,7 +151,7 @@ internal static class Program
             MutatePattern(bgra, iteration + 100, width);
 
             var encStart = Stopwatch.GetTimestamp();
-            var encoded = encoder.EncodeBgra(bgra, stride);
+            var encoded = encoder.EncodeBgra(bgra, stride, harnessClock.Elapsed);
             var encEnd = Stopwatch.GetTimestamp();
 
             var encodeMs = (encEnd - encStart) * 1000.0 / Stopwatch.Frequency;
@@ -158,10 +159,10 @@ internal static class Program
             if (encodeMs > encodeMsMax) encodeMsMax = encodeMs;
             if (encodeMs < encodeMsMin) encodeMsMin = encodeMs;
 
-            if (encoded is { Length: > 0 })
+            if (encoded is { Bytes.Length: > 0 })
             {
                 frameCount++;
-                totalBytes += encoded.Length;
+                totalBytes += encoded.Value.Bytes.Length;
             }
 
             iteration++;
@@ -229,7 +230,7 @@ internal static class Program
             return 2;
         }
 
-        var encoder = new MediaFoundationH264Encoder(width, height, fps, bitrate);
+        var encoder = new MediaFoundationH264Encoder(width, height, fps, bitrate, gopFrames: fps * 2);
         Console.WriteLine($"# encoder created codec={encoder.Codec}");
 
         if (encoder.D3D11Device is null)
@@ -283,9 +284,10 @@ internal static class Program
         var frameInterval = Stopwatch.Frequency / fps;
 
         // Warmup
+        var harnessClock = Stopwatch.StartNew();
         for (var w = 0; w < 5; w++)
         {
-            _ = encoder.EncodeTexture(nv12Texture);
+            _ = encoder.EncodeTexture(nv12Texture, harnessClock.Elapsed);
         }
 
         var benchSw = Stopwatch.StartNew();
@@ -295,7 +297,7 @@ internal static class Program
         while (totalSw.ElapsedTicks - startTicks < endTicks)
         {
             var encStart = Stopwatch.GetTimestamp();
-            var encoded = encoder.EncodeTexture(nv12Texture);
+            var encoded = encoder.EncodeTexture(nv12Texture, harnessClock.Elapsed);
             var encEnd = Stopwatch.GetTimestamp();
 
             var encodeMs = (encEnd - encStart) * 1000.0 / Stopwatch.Frequency;
@@ -303,10 +305,10 @@ internal static class Program
             if (encodeMs > encodeMsMax) encodeMsMax = encodeMs;
             if (encodeMs < encodeMsMin) encodeMsMin = encodeMs;
 
-            if (encoded is { Length: > 0 })
+            if (encoded is { Bytes.Length: > 0 })
             {
                 frameCount++;
-                totalBytes += encoded.Length;
+                totalBytes += encoded.Value.Bytes.Length;
             }
 
             iteration++;
@@ -432,7 +434,7 @@ internal static class Program
 
         var streamer = new CaptureStreamer(
             captureSource,
-            onEncoded: (duration, payload) =>
+            onEncoded: (duration, payload, _) =>
             {
                 Interlocked.Increment(ref encodedFrameCount);
                 Interlocked.Add(ref encodedByteCount, payload.Length);
@@ -571,14 +573,14 @@ internal static class Program
 
         var streamer = new CaptureStreamer(
             captureSource,
-            onEncoded: (rtpDuration, encodedPayload) =>
+            onEncoded: (rtpDuration, encodedPayload, contentTs) =>
             {
                 var encodeEnd = Stopwatch.GetTimestamp();
                 Interlocked.Increment(ref encodedCount);
                 Interlocked.Add(ref encodedBytes, encodedPayload.Length);
 
                 var decodeStart = Stopwatch.GetTimestamp();
-                var decoded = decoder.Decode(encodedPayload);
+                var decoded = decoder.Decode(encodedPayload, contentTs);
                 var decodeEnd = Stopwatch.GetTimestamp();
 
                 var decodeMs = (decodeEnd - decodeStart) * 1000.0 / Stopwatch.Frequency;
@@ -731,7 +733,7 @@ internal static class Program
         await using var synthetic = new SyntheticFrameSource(width, height, fps);
         using var streamer = new CaptureStreamer(
             synthetic,
-            onEncoded: (rtpDuration, payload) => senderRtc.PeerConnection.SendVideo(rtpDuration, payload),
+            onEncoded: (rtpDuration, payload, _) => senderRtc.PeerConnection.SendVideo(rtpDuration, payload),
             new VideoSettings
             {
                 TargetHeight = height,

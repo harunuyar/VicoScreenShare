@@ -36,13 +36,14 @@ namespace ScreenSharing.Client.Media;
 public sealed class CaptureStreamer : IDisposable
 {
     private readonly ICaptureSource _source;
-    private readonly Action<uint, byte[]> _onEncoded;
+    private readonly Action<uint, byte[], TimeSpan> _onEncoded;
     private readonly IVideoEncoderFactory _encoderFactory;
     private readonly object _encodeLock = new();
 
     private readonly int _targetHeight;
     private readonly int _targetFps;
     private readonly int _targetBitrate;
+    private readonly int _gopFrames;
     private readonly long _frameGapTicks;
     private readonly long _frameGapToleranceTicks;
     private long _nextDeadlineTicks;
@@ -61,14 +62,14 @@ public sealed class CaptureStreamer : IDisposable
     private bool _attached;
     private bool _disposed;
 
-    public CaptureStreamer(ICaptureSource source, Action<uint, byte[]> onEncoded, VideoSettings settings)
+    public CaptureStreamer(ICaptureSource source, Action<uint, byte[], TimeSpan> onEncoded, VideoSettings settings)
         : this(source, onEncoded, settings, new VpxEncoderFactory())
     {
     }
 
     public CaptureStreamer(
         ICaptureSource source,
-        Action<uint, byte[]> onEncoded,
+        Action<uint, byte[], TimeSpan> onEncoded,
         VideoSettings settings,
         IVideoEncoderFactory encoderFactory)
     {
@@ -79,6 +80,11 @@ public sealed class CaptureStreamer : IDisposable
         _targetHeight = settings.TargetHeight <= 0 ? 0 : Math.Max(2, settings.TargetHeight);
         _targetFps = Math.Clamp(settings.TargetFrameRate, 1, 240);
         _targetBitrate = Math.Max(500_000, settings.TargetBitrate);
+        // GOP frames = keyframeIntervalSeconds * fps, rounded. Default 2s
+        // @ 60fps = 120. Controls how often the encoder emits an IDR so a
+        // mid-stream viewer has a decodable starting point.
+        var keyframeSec = settings.KeyframeIntervalSeconds <= 0 ? 2.0 : settings.KeyframeIntervalSeconds;
+        _gopFrames = Math.Max(1, (int)Math.Round(keyframeSec * _targetFps));
         var fps = _targetFps;
         // Phase-locked throttle: we keep a monotonic deadline and accept any
         // frame whose timestamp (+ a small tolerance for jitter) reaches the
@@ -274,7 +280,7 @@ public sealed class CaptureStreamer : IDisposable
                 $"[send-gpu] src {sourceWidth}x{sourceHeight} -> enc {encWidth}x{encHeight}");
         }
 
-        byte[]? encoded;
+        EncodedFrame? encoded;
         lock (_encodeLock)
         {
             if (_disposed) return;
@@ -284,25 +290,31 @@ public sealed class CaptureStreamer : IDisposable
             if (_encoder is null || encWidth != _encoderWidth || encHeight != _encoderHeight)
             {
                 try { _encoder?.Dispose(); } catch { }
-                _encoder = _encoderFactory.CreateEncoder(encWidth, encHeight, _targetFps, _targetBitrate);
+                _encoder = _encoderFactory.CreateEncoder(encWidth, encHeight, _targetFps, _targetBitrate, _gopFrames);
                 _encoderWidth = encWidth;
                 _encoderHeight = encHeight;
             }
 
-            encoded = _encoder.EncodeTexture(nativeTexture, sourceWidth, sourceHeight);
+            encoded = _encoder.EncodeTexture(nativeTexture, sourceWidth, sourceHeight, timestamp);
 
-            if (encoded is null || encoded.Length == 0)
+            if (encoded is null || encoded.Value.Bytes.Length == 0)
             {
                 LogGpuTiming(timingStart);
                 return;
             }
 
             EncodedFrameCount++;
-            EncodedByteCount += encoded.Length;
+            EncodedByteCount += encoded.Value.Bytes.Length;
         }
 
-        var duration = ComputeDurationRtpUnits(timestamp);
-        _onEncoded(duration, encoded);
+        // Use the timestamp the encoder propagated through its pipeline,
+        // not the timestamp of the input we just submitted. With async
+        // hardware encoders the bytes coming out of the pump correspond
+        // to an earlier input, so the encoder's propagated SampleTime is
+        // what the receiver's PTS-based pacer actually needs.
+        var contentTs = encoded.Value.Timestamp;
+        var duration = ComputeDurationRtpUnits(contentTs);
+        _onEncoded(duration, encoded.Value.Bytes, contentTs);
 
         LogGpuTiming(timingStart);
     }
@@ -441,7 +453,7 @@ public sealed class CaptureStreamer : IDisposable
 
     private void EncodeAndEmit(byte[] encoderInput, int encoderStrideBytes, int width, int height, TimeSpan timestamp)
     {
-        byte[]? encoded;
+        EncodedFrame? encoded;
         lock (_encodeLock)
         {
             if (_disposed) return;
@@ -456,7 +468,7 @@ public sealed class CaptureStreamer : IDisposable
             if (_encoder is null || width != _encoderWidth || height != _encoderHeight)
             {
                 try { _encoder?.Dispose(); } catch { }
-                _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate);
+                _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate, _gopFrames);
                 _encoderWidth = width;
                 _encoderHeight = height;
             }
@@ -465,19 +477,20 @@ public sealed class CaptureStreamer : IDisposable
             // VP8) happens inside the encoder now — a single fused pass
             // instead of the double conversion (BGRA -> I420 -> NV12) this
             // hot path used to do on the capture thread.
-            encoded = _encoder.EncodeBgra(encoderInput, encoderStrideBytes);
+            encoded = _encoder.EncodeBgra(encoderInput, encoderStrideBytes, timestamp);
 
-            if (encoded is null || encoded.Length == 0)
+            if (encoded is null || encoded.Value.Bytes.Length == 0)
             {
                 return;
             }
 
             EncodedFrameCount++;
-            EncodedByteCount += encoded.Length;
+            EncodedByteCount += encoded.Value.Bytes.Length;
         }
 
-        var duration = ComputeDurationRtpUnits(timestamp);
-        _onEncoded(duration, encoded);
+        var contentTs = encoded.Value.Timestamp;
+        var duration = ComputeDurationRtpUnits(contentTs);
+        _onEncoded(duration, encoded.Value.Bytes, contentTs);
     }
 
     private uint ComputeDurationRtpUnits(TimeSpan frameTimestamp)

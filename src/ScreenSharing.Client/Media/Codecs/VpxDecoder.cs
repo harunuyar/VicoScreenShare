@@ -31,7 +31,7 @@ internal sealed class VpxDecoder : IVideoDecoder
 
     public VideoCodec Codec => VideoCodec.Vp8;
 
-    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample)
+    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp)
     {
         if (_disposed || encodedSample is null || encodedSample.Length == 0)
         {
@@ -79,7 +79,10 @@ internal sealed class VpxDecoder : IVideoDecoder
                 }
             }
 
-            results.Add(new DecodedVideoFrame(bgra, width, height));
+            // VP8 is sync and 1-in/1-out, so every decoded frame corresponds
+            // exactly to the encodedSample we just submitted. Echo the
+            // caller's content timestamp verbatim.
+            results.Add(new DecodedVideoFrame(bgra, width, height, inputTimestamp));
         }
 
         return results;

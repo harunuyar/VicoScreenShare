@@ -33,10 +33,10 @@ internal sealed class VpxEncoder : IVideoEncoder
 
     public bool SupportsTextureInput => false;
 
-    public byte[]? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight) =>
+    public EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp) =>
         throw new NotSupportedException("libvpx VP8 is a CPU-only encoder and has no texture ingest path.");
 
-    public byte[]? EncodeBgra(byte[] bgra, int stride)
+    public EncodedFrame? EncodeBgra(byte[] bgra, int stride, TimeSpan inputTimestamp)
     {
         if (_disposed) return null;
 
@@ -50,9 +50,10 @@ internal sealed class VpxEncoder : IVideoEncoder
         }
         BgraToI420.Convert(bgra.AsSpan(0, _height * stride), _width, _height, stride, _i420Buffer);
 
+        byte[]? bytes;
         try
         {
-            return _encoder.EncodeVideo(
+            bytes = _encoder.EncodeVideo(
                 _width,
                 _height,
                 _i420Buffer,
@@ -63,6 +64,12 @@ internal sealed class VpxEncoder : IVideoEncoder
         {
             return null;
         }
+
+        // VP8 is sync — whatever bytes come back correspond exactly to the
+        // input we just submitted, so the content timestamp is the caller's
+        // value verbatim.
+        if (bytes is null || bytes.Length == 0) return null;
+        return new EncodedFrame(bytes, inputTimestamp);
     }
 
     public void Dispose()

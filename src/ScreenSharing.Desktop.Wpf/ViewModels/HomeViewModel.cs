@@ -130,6 +130,15 @@ public sealed partial class HomeViewModel : ViewModelBase
     }
 
     [RelayCommand]
+    private void ShowCaptureTest()
+    {
+        var captureVm = new CaptureTestViewModel(
+            _navigation,
+            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider));
+        _navigation.NavigateTo(captureVm);
+    }
+
+    [RelayCommand]
     private Task CreateRoomAsync()
     {
         if (!ValidateDisplayName()) return Task.CompletedTask;

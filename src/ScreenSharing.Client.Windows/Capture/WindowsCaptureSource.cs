@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using ScreenSharing.Client.Media;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Windows.Direct3D;
 using Vortice.Direct3D11;
@@ -26,8 +27,6 @@ public sealed class WindowsCaptureSource : ICaptureSource
     private readonly GraphicsCaptureItem _item;
     private readonly D3D11DeviceManager _devices;
     private readonly int _targetFrameRate;
-    private readonly Stopwatch _timer = Stopwatch.StartNew();
-
     // Preview CPU readback is throttled to this rate so the encoder (which
     // runs through TextureArrived) doesn't get capped to the preview rate.
     // 30 fps is more than enough for a self-view of what you're sharing;
@@ -53,44 +52,56 @@ public sealed class WindowsCaptureSource : ICaptureSource
     private bool _closed;
     private bool _disposed;
 
-    // === Sender pace ===
-    // The capture rate (WGC fires) is irregular: bursts of frames followed
-    // by gaps because DWM acquires surfaces on its own schedule. The
-    // encoder needs to receive frames at a regular cadence so the receiver
-    // can replay them on a regular cadence — irregular wire timestamps
-    // bake jitter into the receiver's playback that no jitter buffer can
-    // unwind.
-    //
-    // The fix: the WGC callback writes the freshest frame into a
-    // persistent slot texture (CopyResource) and a separate pace thread
-    // dispatches TextureArrived at exactly the configured target frame
-    // rate. The pace thread's PTS is monotonic at 1/fps spacing — not
-    // derived from any wall clock — so the receiver gets metronome-regular
-    // RTP timestamps regardless of how WGC actually delivered the source
-    // frames. Capture jitter dies in the slot.
-    private readonly object _slotLock = new();
-    private ID3D11Texture2D? _slotTexture;
-    private int _slotWidth;
-    private int _slotHeight;
-    private bool _slotHasContent;
-    private Thread? _paceThread;
-    private CancellationTokenSource? _paceCts;
+    // Event-driven rate admission. Every WGC frame goes through the
+    // pacer; admitted frames are dispatched inline (TextureArrived on
+    // the callback thread) carrying frame.SystemRelativeTime verbatim.
+    private readonly FrameRatePacer _pacer;
 
-    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
-    private static extern uint TimeBeginPeriod(uint period);
-    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
-    private static extern uint TimeEndPeriod(uint period);
+    // Persistent snapshot texture. Every admitted WGC frame is
+    // CopyResource'd into this texture BEFORE firing TextureArrived.
+    // Without the copy, the handler's downstream GPU work (encoder
+    // scaler blit, readback) would race with the WGC framepool
+    // recycling the surface for the next capture — DWM overwrites the
+    // surface the moment we dispose the frame, and any pending GPU
+    // reads see the NEXT capture's content instead of this one.
+    // CopyResource on the immediate context is queue-ordered: it
+    // completes (in the GPU command stream) before any subsequent
+    // command the handler queues, so the handler always reads a stable
+    // snapshot.
+    private readonly object _snapshotLock = new();
+    private ID3D11Texture2D? _snapshotTexture;
+    private int _snapshotWidth;
+    private int _snapshotHeight;
+
+    // Diagnostic counters the capture-test stats panel reads.
+    private long _wgcFrameCount;
+    private long _dispatchedFrameCount;
+
+    /// <summary>Total WGC framepool callbacks since construction. The
+    /// delta between two reads gives the raw WGC arrival rate before the
+    /// pacer drops the stream to <c>targetFrameRate</c>.</summary>
+    public long WgcFrameCount => Interlocked.Read(ref _wgcFrameCount);
+
+    /// <summary>Total admitted frames dispatched to subscribers. In
+    /// steady state this approaches <c>targetFrameRate</c> × elapsed
+    /// seconds.</summary>
+    public long DispatchedFrameCount => Interlocked.Read(ref _dispatchedFrameCount);
 
     /// <summary>
-    /// Construct a WGC-backed capture source that emits frames at exactly
-    /// <paramref name="targetFrameRate"/> Hz to subscribers via a slot +
-    /// pace-thread architecture (see <see cref="PaceLoop"/>).
+    /// Construct a WGC-backed capture source. Each WGC frame is admitted
+    /// by a <see cref="FrameRatePacer"/> against the configured
+    /// <paramref name="targetFrameRate"/>, and admitted frames fire
+    /// <see cref="TextureArrived"/> / <see cref="FrameArrived"/> inline
+    /// on the WGC callback thread. The timestamp propagated downstream
+    /// is <see cref="Direct3D11CaptureFrame.SystemRelativeTime"/> from
+    /// WGC — the capture clock, verbatim.
     /// </summary>
     public WindowsCaptureSource(GraphicsCaptureItem item, D3D11DeviceManager devices, int targetFrameRate)
     {
         _item = item;
         _devices = devices;
         _targetFrameRate = Math.Clamp(targetFrameRate, 1, 240);
+        _pacer = new FrameRatePacer(_targetFrameRate);
         DisplayName = item.DisplayName;
         _item.Closed += OnItemClosed;
     }
@@ -179,21 +190,7 @@ public sealed class WindowsCaptureSource : ICaptureSource
         }
 
         _session.StartCapture();
-
-        // Start the sender pace thread. It blocks until the slot has its
-        // first frame, then dispatches TextureArrived on a 1/_targetFrameRate
-        // cadence with monotonic pace PTSes.
-        _paceCts = new CancellationTokenSource();
-        _paceThread = new Thread(PaceLoop)
-        {
-            IsBackground = true,
-            Name = $"WGC-Pace-{_targetFrameRate}fps",
-            // AboveNormal so the encoder dispatch hits its tick deadline
-            // even under GC / encoder thread contention.
-            Priority = ThreadPriority.AboveNormal,
-        };
-        _paceThread.Start();
-
+        _pacer.Reset();
         return Task.CompletedTask;
     }
 
@@ -208,16 +205,6 @@ public sealed class WindowsCaptureSource : ICaptureSource
             _framePool.FrameArrived -= OnFrameArrived;
         }
 
-        // Stop the pace thread BEFORE disposing the framepool / slot so
-        // the dispatch loop doesn't try to AddRef a slot texture that
-        // we're about to free.
-        _paceCts?.Cancel();
-        var paceThread = _paceThread;
-        _paceThread = null;
-        try { paceThread?.Join(TimeSpan.FromSeconds(2)); } catch { }
-        _paceCts?.Dispose();
-        _paceCts = null;
-
         lock (_frameLock)
         {
             _session?.Dispose();
@@ -225,6 +212,7 @@ public sealed class WindowsCaptureSource : ICaptureSource
             _framePool?.Dispose();
             _framePool = null;
         }
+        _pacer.Reset();
         return Task.CompletedTask;
     }
 
@@ -238,12 +226,8 @@ public sealed class WindowsCaptureSource : ICaptureSource
             _disposed = true;
             _stagingTexture?.Dispose();
             _stagingTexture = null;
-        }
-        lock (_slotLock)
-        {
-            _slotTexture?.Dispose();
-            _slotTexture = null;
-            _slotHasContent = false;
+            _snapshotTexture?.Dispose();
+            _snapshotTexture = null;
         }
         _item.Closed -= OnItemClosed;
     }
@@ -277,6 +261,24 @@ public sealed class WindowsCaptureSource : ICaptureSource
         var height = frame.ContentSize.Height;
         if (width <= 0 || height <= 0) return;
 
+        Interlocked.Increment(ref _wgcFrameCount);
+
+        // Content timestamp: use frame.SystemRelativeTime directly.
+        // That's DWM's composition time for the captured surface — the
+        // capture clock — and we propagate it end-to-end through the
+        // encoder SampleTime, decoder SampleTime, and the receiver
+        // playout loop.
+        var contentTimestamp = frame.SystemRelativeTime;
+
+        // Rate admission. The pacer holds a running accepted count and
+        // admits each frame only if (ts - firstTs) >= count * (1/fps).
+        // Source slower than target → pass-through. Source faster than
+        // target → caps to target fps. First frame always admits.
+        if (!_pacer.ShouldAccept(contentTimestamp))
+        {
+            return;
+        }
+
         // On content resize: rebuild both the staging texture AND the framepool.
         // Per Microsoft's Windows Graphics Capture guidance, the framepool must
         // be Recreate'd when the frame buffer size changes — skipping it keeps
@@ -302,47 +304,54 @@ public sealed class WindowsCaptureSource : ICaptureSource
         if (texPtr == IntPtr.Zero) return;
         using var sourceTexture = new ID3D11Texture2D(texPtr);
 
-        var timestamp = _timer.Elapsed;
+        // Snapshot the WGC surface into a persistent texture BEFORE
+        // firing TextureArrived. The WGC framepool recycles the surface
+        // the moment we dispose `frame` at the end of this callback —
+        // DWM overwrites it for the next capture. Any GPU work the
+        // handler queues (encoder scaler blit, readback CopyResource)
+        // would race with that overwrite and read the NEXT capture's
+        // content instead of this one. CopyResource on the immediate
+        // context is queue-ordered: it completes in the GPU command
+        // stream before any command the handler queues later, so the
+        // snapshot is stable for the entire handler lifetime.
+        EnsureSnapshotTexture(width, height);
+        if (_snapshotTexture is null) return;
+        _devices.Context.CopyResource(_snapshotTexture, sourceTexture);
 
-        // Update the persistent slot texture with the freshest captured
-        // frame. The pace thread reads this slot at exactly 1/_targetFrameRate
-        // and dispatches TextureArrived to the encoder, so the WGC
-        // burstiness never reaches the wire.
-        //
-        // The lock prevents the pace thread from reading the slot mid-copy
-        // (the AddRef+dispatch on the pace thread is also under this
-        // lock). D3D11 multithread protection serializes the underlying
-        // immediate-context calls, so a concurrent encoder Process+
-        // CopyResource is safe at the GPU level — the lock is purely to
-        // protect the slot texture *reference* from being torn down while
-        // the pace thread is using it.
-        lock (_slotLock)
+        var textureHandler = TextureArrived;
+        if (textureHandler is not null)
         {
-            if (_slotTexture is null || _slotWidth != width || _slotHeight != height)
+            // AddRef the snapshot so the handler can wrap it as
+            // `using var` and Release on dispose without dropping
+            // our ref.
+            _snapshotTexture.AddRef();
+            var handlerTookOwnership = false;
+            try
             {
-                RecreateSlotTextureLocked(width, height);
+                textureHandler(_snapshotTexture.NativePointer, width, height, contentTimestamp);
+                handlerTookOwnership = true;
+                Interlocked.Increment(ref _dispatchedFrameCount);
             }
-            if (_slotTexture is not null)
+            catch (Exception ex)
             {
-                _devices.Context.CopyResource(_slotTexture, sourceTexture);
-                _slotHasContent = true;
+                ScreenSharing.Client.Diagnostics.DebugLog.Write($"[capture] TextureArrived handler threw: {ex.Message}");
+            }
+            if (!handlerTookOwnership)
+            {
+                _snapshotTexture.Release();
             }
         }
 
-        // CPU readback for the local preview renderer. Two throttles:
-        //   1. Skip entirely when there's no CPU subscriber (encoder on
-        //      the texture path, no preview wired) — 5–8 ms per frame of
-        //      GPU→staging→Map→memcpy disappears.
-        //   2. When there IS a preview subscriber, rate-limit the readback
-        //      to PreviewReadbackFps so we don't cap the framepool's
-        //      delivery rate to the preview rate. The texture path fired
-        //      above is not affected and keeps running at full rate.
+        // CPU readback path for subscribers that want BGRA bytes. Still
+        // rate-limited to PreviewReadbackFps so the self-preview tile
+        // doesn't steal budget from the texture-side encode path, but
+        // the texture handler above is unaffected.
         if (FrameArrived is null)
         {
             return;
         }
 
-        var nowTicks = timestamp.Ticks;
+        var nowTicks = contentTimestamp.Ticks;
         if (_lastPreviewReadbackTicks != long.MinValue &&
             nowTicks - _lastPreviewReadbackTicks < _previewReadbackGapTicks)
         {
@@ -350,7 +359,9 @@ public sealed class WindowsCaptureSource : ICaptureSource
         }
         _lastPreviewReadbackTicks = nowTicks;
 
-        _devices.Context.CopyResource(_stagingTexture!, sourceTexture);
+        // Read from the snapshot (not the WGC surface which may be
+        // recycled by the time the GPU processes this CopyResource).
+        _devices.Context.CopyResource(_stagingTexture!, _snapshotTexture!);
 
         var mapped = _devices.Context.Map(_stagingTexture!, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
         try
@@ -384,7 +395,7 @@ public sealed class WindowsCaptureSource : ICaptureSource
                 height,
                 rowBytes,
                 CaptureFramePixelFormat.Bgra8,
-                timestamp);
+                contentTimestamp);
             FrameArrived?.Invoke(in data);
         }
         finally
@@ -414,15 +425,13 @@ public sealed class WindowsCaptureSource : ICaptureSource
         _stagingHeight = height;
     }
 
-    /// <summary>
-    /// Allocate (or grow) the persistent slot texture that mirrors the
-    /// most recent captured frame. Default usage + ShaderResource bind so
-    /// the encoder's GPU pipeline can sample it directly. Caller must
-    /// hold <see cref="_slotLock"/>.
-    /// </summary>
-    private void RecreateSlotTextureLocked(int width, int height)
+    private void EnsureSnapshotTexture(int width, int height)
     {
-        _slotTexture?.Dispose();
+        if (_snapshotTexture is not null && _snapshotWidth == width && _snapshotHeight == height)
+        {
+            return;
+        }
+        _snapshotTexture?.Dispose();
         var desc = new Texture2DDescription
         {
             Width = (uint)width,
@@ -432,144 +441,12 @@ public sealed class WindowsCaptureSource : ICaptureSource
             Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
-            CPUAccessFlags = CpuAccessFlags.None,
             BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+            CPUAccessFlags = CpuAccessFlags.None,
             MiscFlags = ResourceOptionFlags.None,
         };
-        _slotTexture = _devices.Device.CreateTexture2D(desc);
-        _slotWidth = width;
-        _slotHeight = height;
-        _slotHasContent = false;
-    }
-
-    /// <summary>
-    /// Sender pace thread. Ticks at exactly <c>1/_targetFrameRate</c>
-    /// seconds, reads whatever is in the slot, and dispatches
-    /// <see cref="TextureArrived"/> with a monotonic pace PTS
-    /// (<c>tickIndex * intervalSeconds</c>). Burstiness on the WGC side
-    /// never reaches subscribers — only this thread's metronome does.
-    /// </summary>
-    private void PaceLoop()
-    {
-        // Drop the system timer slice from ~15.6 ms to 1 ms so
-        // Thread.Sleep / spin-wait can hit sub-frame deadlines.
-        TimeBeginPeriod(1);
-        try
-        {
-            var ct = _paceCts?.Token ?? CancellationToken.None;
-            var sw = Stopwatch.StartNew();
-            var ticksPerSecond = (double)Stopwatch.Frequency;
-            var ticksPerMs = ticksPerSecond / 1000.0;
-            var intervalSeconds = 1.0 / _targetFrameRate;
-            var intervalStopwatchTicks = (long)(intervalSeconds * ticksPerSecond);
-            var ptsTicksPerInterval = TimeSpan.TicksPerSecond / (double)_targetFrameRate;
-
-            long tickIndex = 0;
-            long deadline = sw.ElapsedTicks;
-
-            // Wait for the first WGC frame so we have something to
-            // dispatch. Without this, the very first tick would hit
-            // an empty slot and silently skip, the second tick would
-            // be a full interval later, and the receiver would see a
-            // 1-interval startup gap before any frames arrived.
-            while (!ct.IsCancellationRequested)
-            {
-                bool ready;
-                lock (_slotLock) ready = _slotHasContent;
-                if (ready) break;
-                Thread.Sleep(1);
-            }
-
-            while (!ct.IsCancellationRequested)
-            {
-                // Sleep + spin-tail to the next tick deadline.
-                while (true)
-                {
-                    long remaining = deadline - sw.ElapsedTicks;
-                    if (remaining <= 0) break;
-                    var remainingMs = remaining / ticksPerMs;
-                    if (remainingMs > 2.0)
-                    {
-                        Thread.Sleep((int)(remainingMs - 1));
-                    }
-                    else
-                    {
-                        while (sw.ElapsedTicks < deadline) Thread.SpinWait(64);
-                        break;
-                    }
-                }
-                if (ct.IsCancellationRequested) break;
-
-                // Compute the pace PTS for this tick. tick 0 → 0,
-                // tick N → N × interval. Monotonic, exact.
-                var pts = TimeSpan.FromTicks((long)(tickIndex * ptsTicksPerInterval));
-                tickIndex++;
-
-                // Snapshot slot reference under the lock and dispatch
-                // OUTSIDE the lock so a slow encoder doesn't block a
-                // concurrent WGC fire from updating the slot for a
-                // future tick. The AddRef keeps the slot texture alive
-                // for the duration of the dispatch even if RecreateSlot
-                // fires on another thread (which would Dispose the
-                // managed wrapper but the COM object stays alive until
-                // the handler's Release).
-                ID3D11Texture2D? snapshot = null;
-                int snapW = 0, snapH = 0;
-                lock (_slotLock)
-                {
-                    if (_slotTexture is not null && _slotHasContent)
-                    {
-                        snapshot = _slotTexture;
-                        snapW = _slotWidth;
-                        snapH = _slotHeight;
-                        snapshot.AddRef();
-                    }
-                }
-
-                if (snapshot is not null)
-                {
-                    var handler = TextureArrived;
-                    if (handler is not null)
-                    {
-                        try
-                        {
-                            handler(snapshot.NativePointer, snapW, snapH, pts);
-                        }
-                        catch (Exception ex)
-                        {
-                            ScreenSharing.Client.Diagnostics.DebugLog.Write(
-                                $"[pace] TextureArrived handler threw: {ex.Message}");
-                            // Handler didn't take ownership — release
-                            // the AddRef ourselves so we don't leak.
-                            snapshot.Release();
-                        }
-                    }
-                    else
-                    {
-                        snapshot.Release();
-                    }
-                }
-
-                deadline += intervalStopwatchTicks;
-                // If we're more than one whole interval past the
-                // intended deadline (long encoder stall, GC pause),
-                // reanchor instead of trying to catch up — catch-up
-                // would burst paints back-to-back which the receiver
-                // would interpret as a sudden frame rate spike.
-                long nowTicks = sw.ElapsedTicks;
-                if (nowTicks - deadline > intervalStopwatchTicks)
-                {
-                    deadline = nowTicks + intervalStopwatchTicks;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            ScreenSharing.Client.Diagnostics.DebugLog.Write($"[pace] loop fatal: {ex.Message}");
-        }
-        finally
-        {
-            TimeEndPeriod(1);
-        }
+        _snapshotTexture = _devices.Device.CreateTexture2D(desc);
+        _snapshotWidth = width;
+        _snapshotHeight = height;
     }
 }

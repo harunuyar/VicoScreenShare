@@ -57,6 +57,7 @@ public sealed class ViewModelToPageConverter : IValueConverter
         [typeof(HomeViewModel)] = vm => new HomeView { DataContext = vm },
         [typeof(RoomViewModel)] = vm => new RoomView { DataContext = vm },
         [typeof(SettingsViewModel)] = vm => new SettingsView { DataContext = vm },
+        [typeof(CaptureTestViewModel)] = vm => new CaptureTestView { DataContext = vm },
     };
 
     public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)

@@ -141,9 +141,9 @@
                                 <TextBlock Grid.Column="1" Text="{Binding ReceiveBufferFrames, StringFormat={}{0} frames}"
                                            Opacity="0.9" FontSize="12" FontFamily="Cascadia Mono, Consolas" />
                             </Grid>
-                            <Slider Minimum="1" Maximum="10" TickFrequency="1" IsSnapToTickEnabled="True"
+                            <Slider Minimum="1" Maximum="240" TickFrequency="1" IsSnapToTickEnabled="True"
                                     Value="{Binding ReceiveBufferFrames}" Margin="0,4,0,0" />
-                            <TextBlock Text="More frames = smoother under network jitter, more latency. 3 is a good default."
+                            <TextBlock Text="More frames = smoother under network jitter, more latency. 5 is a good default."
                                        Opacity="0.5" FontSize="11" Margin="0,4,0,0" />
                         </StackPanel>
                     </StackPanel>

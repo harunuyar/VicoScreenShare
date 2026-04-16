@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using ScreenSharing.Client.Media;
+using ScreenSharing.Client.Media.Codecs;
 using ScreenSharing.Client.Platform;
 using ScreenSharing.Client.Windows.Direct3D;
 using Vortice;
@@ -36,19 +37,26 @@ public sealed class D3DImageVideoRenderer : HwndHost
 {
     public D3DImageVideoRenderer()
     {
-        _jitterBuffer = new JitterBufferQueue(PaintPaced, App.ReceiveBufferFrames);
+        _playoutQueue = new TimestampedFrameQueue(App.ReceiveBufferFrames);
+        _presentLoop = new PresentLoop(_playoutQueue, PaintFromQueue);
     }
 
+    // The receiver DP is typed as ICaptureSource so anything that
+    // produces BGRA frames (StreamReceiver from the network path, or
+    // the capture-test encode/decode bridge that wraps CaptureStreamer
+    // + a local decoder) can plug in here unchanged. StreamReceiver
+    // implements ICaptureSource so RoomView's existing binding to a
+    // StreamReceiver instance keeps working.
     public static readonly DependencyProperty ReceiverProperty =
         DependencyProperty.Register(
             nameof(Receiver),
-            typeof(StreamReceiver),
+            typeof(ICaptureSource),
             typeof(D3DImageVideoRenderer),
             new PropertyMetadata(null, OnReceiverChanged));
 
-    public StreamReceiver? Receiver
+    public ICaptureSource? Receiver
     {
-        get => (StreamReceiver?)GetValue(ReceiverProperty);
+        get => (ICaptureSource?)GetValue(ReceiverProperty);
         set => SetValue(ReceiverProperty, value);
     }
 
@@ -93,10 +101,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static void OnNominalFrameRateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is D3DImageVideoRenderer self && e.NewValue is int fps)
-        {
-            self._jitterBuffer.SetNominalFrameRate(fps);
-        }
+        // The present loop is now driven entirely by content timestamps
+        // (anchorWall + pts - anchorPts), not a target fps. This hook
+        // is retained for API compatibility with existing XAML bindings
+        // but has no runtime effect.
     }
 
     private const int WS_CHILD = 0x40000000;
@@ -158,7 +166,7 @@ public sealed class D3DImageVideoRenderer : HwndHost
     private int _uploadHeight;
     private int _swapChainWidth;
     private int _swapChainHeight;
-    private StreamReceiver? _attachedReceiver;
+    private ICaptureSource? _attachedReceiver;
     private ICaptureSource? _attachedLocalSource;
     private readonly object _renderLock = new();
     private bool _disposed;
@@ -168,7 +176,8 @@ public sealed class D3DImageVideoRenderer : HwndHost
     // per tick (tick = 1/NominalFrameRate) and calls PaintPaced. The
     // self-preview path bypasses the buffer entirely (it's not the path
     // the user actually watches).
-    private readonly JitterBufferQueue _jitterBuffer;
+    private readonly TimestampedFrameQueue _playoutQueue;
+    private readonly PresentLoop _presentLoop;
 
     // Diagnostics for the stats overlay. Tracks both sides of the coin:
     //   InputFrameCount    — every frame that reached OnFrameArrived from
@@ -217,20 +226,20 @@ public sealed class D3DImageVideoRenderer : HwndHost
         // before WPF has laid the element out. InitD3D runs lazily on
         // the first OnFrameArrived call, when we know both the window
         // size (via Arrange) and the frame size.
-        _jitterBuffer.Start();
+        _presentLoop.Start();
         RefreshActiveFrameSource();
         return new HandleRef(this, _hwnd);
     }
 
     protected override void DestroyWindowCore(HandleRef hwnd)
     {
-        // Stop the jitter buffer's render thread BEFORE tearing D3D
-        // state. The render thread calls PaintPaced → upload+scale+
-        // Present which touches _swapChain / _scaler / _uploadTexture;
-        // disposing those while the thread is mid-paint would race.
-        // JitterBufferQueue.Dispose joins the thread so the D3D
-        // teardown below is unopposed.
-        _jitterBuffer.Dispose();
+        // Stop the present loop BEFORE tearing D3D state. The loop calls
+        // PaintFromQueue → upload + scale + Present which touches
+        // _swapChain / _scaler / _uploadTexture; disposing those while
+        // the thread is mid-paint would race. PresentLoop.Dispose joins
+        // the thread so the D3D teardown below is unopposed.
+        _presentLoop.Dispose();
+        _playoutQueue.Clear();
         lock (_renderLock)
         {
             _disposed = true;
@@ -385,11 +394,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
         }
     }
 
-    private void AttachReceiver(StreamReceiver receiver)
+    private void AttachReceiver(ICaptureSource receiver)
     {
         _attachedReceiver = receiver;
         receiver.FrameArrived += OnFrameArrived;
-        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] subscribed to StreamReceiver.FrameArrived");
+        ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] subscribed to FrameArrived (receiver={receiver.GetType().Name})");
     }
 
     private void DetachReceiver()
@@ -397,7 +406,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
         if (_attachedReceiver is null) return;
         try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch { }
         _attachedReceiver = null;
-        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed StreamReceiver.FrameArrived");
+        // Drop any queued frames so a fresh attach doesn't play back
+        // stale content from the previous stream.
+        _playoutQueue.Clear();
+        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed FrameArrived");
     }
 
     private void AttachLocalSource(ICaptureSource source)
@@ -424,15 +436,14 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
         // Two routes from here:
         //
-        //   - Remote stream path: enqueue into the jitter buffer. The
-        //     buffer's render thread paces paints at NominalFrameRate
-        //     and calls PaintPaced for each tick. This is the path
-        //     watchers actually look at.
-        //   - Local self-preview path: paint inline. The user said
-        //     they don't actually watch the self-preview tile; it's
-        //     just there so the streamer can confirm the right window
-        //     is being shared. Bypassing the jitter buffer keeps it
-        //     responsive and avoids needing two sender clocks.
+        //   - Remote stream path: copy the BGRA bytes into a
+        //     DecodedVideoFrame, push onto the TimestampedFrameQueue.
+        //     The PresentLoop pops on the content-timestamp schedule
+        //     and calls PaintFromQueue.
+        //   - Local self-preview path: paint inline on whatever thread
+        //     the source fires on. Self-preview is a confirmation tile,
+        //     not a smooth-playout feed, so the simpler inline path is
+        //     the right shape.
         //
         // Wrapped in try/catch: a throw here would propagate through
         // StreamReceiver's FrameArrived?.Invoke and kill the RTP
@@ -446,7 +457,14 @@ public sealed class D3DImageVideoRenderer : HwndHost
             }
             if (_attachedReceiver is not null)
             {
-                _jitterBuffer.Submit(in frame);
+                // The receiver path goes through the queue → present
+                // loop. Copy the rented span into a DecodedVideoFrame so
+                // the queue can hold onto it across threads.
+                var bgraSize = frame.Height * frame.StrideBytes;
+                var bytes = new byte[bgraSize];
+                frame.Pixels.Slice(0, bgraSize).CopyTo(bytes);
+                var decoded = new DecodedVideoFrame(bytes, frame.Width, frame.Height, frame.Timestamp);
+                _playoutQueue.Push(in decoded);
             }
             else
             {
@@ -466,15 +484,30 @@ public sealed class D3DImageVideoRenderer : HwndHost
     }
 
     /// <summary>
-    /// Jitter-buffer render-thread entry point. Same paint sequence as
-    /// the inline path, minus the InputFrameCount bookkeeping which is
-    /// already handled in <see cref="OnFrameArrived"/>.
+    /// PresentLoop paint callback. Runs on the present thread after the
+    /// loop has slept to the next frame's due time. Shares the same
+    /// D3D11 upload + scale + Present sequence as the inline self-preview
+    /// path.
     /// </summary>
-    private void PaintPaced(in CaptureFrameData frame)
+    private void PaintFromQueue(in DecodedVideoFrame frame)
     {
+        if (frame.Bgra is null || frame.Width <= 0 || frame.Height <= 0) return;
+
+        // Wrap the decoded frame as a CaptureFrameData so we can reuse
+        // OnFrameArrivedCore's upload + scale + present sequence — that
+        // keeps the paint path identical between the self-preview
+        // inline route and the receiver queue route.
+        var strideBytes = frame.Width * 4;
+        var data = new CaptureFrameData(
+            frame.Bgra.AsSpan(0, frame.Height * strideBytes),
+            frame.Width,
+            frame.Height,
+            strideBytes,
+            CaptureFramePixelFormat.Bgra8,
+            frame.Timestamp);
         try
         {
-            OnFrameArrivedCore(in frame);
+            OnFrameArrivedCore(in data);
         }
         catch (Exception ex)
         {
@@ -482,7 +515,7 @@ public sealed class D3DImageVideoRenderer : HwndHost
             if (count <= 5 || count % 60 == 0)
             {
                 ScreenSharing.Client.Diagnostics.DebugLog.Write(
-                    $"[renderer] PaintPaced threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+                    $"[renderer] PaintFromQueue threw (#{count}): {ex.GetType().Name}: {ex.Message}");
             }
         }
     }

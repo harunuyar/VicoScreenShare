@@ -103,7 +103,7 @@ public sealed class SettingsStore
         public double KeyframeIntervalSeconds { get; set; } = 2.0;
         public ScalerQuality ScalerQuality { get; set; } = ScalerQuality.Bilinear;
         public VideoCodec Codec { get; set; } = VideoCodec.H264;
-        public int ReceiveBufferFrames { get; set; } = 3;
+        public int ReceiveBufferFrames { get; set; } = 5;
 
         // Legacy fields kept so existing settings.json files migrate instead
         // of silently dropping back to defaults. Only read on load — never
@@ -138,7 +138,7 @@ public sealed class SettingsStore
                     KeyframeIntervalSeconds = KeyframeIntervalSeconds,
                     ScalerQuality = ScalerQuality,
                     Codec = Codec,
-                    ReceiveBufferFrames = ReceiveBufferFrames > 0 ? ReceiveBufferFrames : 3,
+                    ReceiveBufferFrames = ReceiveBufferFrames > 0 && ReceiveBufferFrames <= 240 ? ReceiveBufferFrames : 5,
                 },
             };
             if (!string.IsNullOrWhiteSpace(ServerUri) && Uri.TryCreate(ServerUri, UriKind.Absolute, out var uri))

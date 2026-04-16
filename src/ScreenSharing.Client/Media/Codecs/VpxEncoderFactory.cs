@@ -13,5 +13,5 @@ public sealed class VpxEncoderFactory : IVideoEncoderFactory
 
     public bool SupportsTextureInput => false;
 
-    public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate) => new VpxEncoder(width, height);
+    public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) => new VpxEncoder(width, height);
 }

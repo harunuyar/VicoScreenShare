@@ -22,13 +22,13 @@ public partial class App : Application
     public static D3D11DeviceManager? SharedDevices { get; private set; }
 
     /// <summary>
-    /// Receive-side jitter buffer prebuffer depth, in frames. Read by
+    /// Receive-side playout queue depth, in frames. Read by
     /// <see cref="Rendering.D3DImageVideoRenderer"/> when it constructs
-    /// its <see cref="Rendering.JitterBufferQueue"/>. Set from
+    /// its <see cref="Rendering.TimestampedFrameQueue"/>. Set from
     /// <c>VideoSettings.ReceiveBufferFrames</c> at startup; updates
     /// require a renderer re-mount (next room join) to take effect.
     /// </summary>
-    public static int ReceiveBufferFrames { get; set; } = 3;
+    public static int ReceiveBufferFrames { get; set; } = 5;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -54,7 +54,7 @@ public partial class App : Application
         try
         {
             var s = new ScreenSharing.Client.Services.SettingsStore().LoadOrCreate();
-            ReceiveBufferFrames = Math.Max(1, s.Video.ReceiveBufferFrames);
+            ReceiveBufferFrames = Math.Clamp(s.Video.ReceiveBufferFrames, 1, 240);
         }
         catch { /* fall back to default */ }
 

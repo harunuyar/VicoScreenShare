@@ -30,6 +30,15 @@ namespace ScreenSharing.Client.Windows.Media.Codecs;
 /// </summary>
 internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 {
+    // Same GUID as the encoder's AVEncCommonLowLatency. The decoder MFT's
+    // default is "wait for a full H.264 reorder group before releasing any
+    // output" — on a low-latency no-B-frame stream that produces a ~20
+    // frame startup bubble AND a permanent 20-frame pipeline lag, both of
+    // which kill real-time playback. Forcing LowLatencyMode=1 tells the
+    // MFT there are no B-frames so it can release each frame as soon as
+    // it's decoded.
+    private static readonly Guid CodecApiAVLowLatencyMode = new("9c27891a-ed7a-40e1-88e8-b22727a024ee");
+
     private const uint MF_E_TRANSFORM_STREAM_CHANGE = 0xC00D6D61u;
     private const uint MF_E_TRANSFORM_NEED_MORE_INPUT = 0xC00D6D72u;
     private const uint MF_E_TRANSFORM_TYPE_NOT_SET = 0xC00D6D60u;
@@ -48,6 +57,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     private int _width;
     private int _height;
     private bool _outputTypeNegotiated;
+
     private long _loggedDecodedFrames;
     private bool _disposed;
 
@@ -71,6 +81,23 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         _transform = CreateDecoder()
                      ?? throw new InvalidOperationException("No H.264 decoder MFT is available from Media Foundation");
 
+        // Force the decoder into low-latency mode BEFORE any type
+        // negotiation. Without this the MF H.264 decoder waits for a full
+        // reorder group (~20 frames) before producing anything, which on
+        // a low-latency stream with no B-frames is pure pipeline lag.
+        try
+        {
+            _transform.Attributes.Set(CodecApiAVLowLatencyMode, 1u);
+            DebugLog.Write("[mf] H264 decoder LowLatencyMode=1 applied");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] H264 decoder LowLatencyMode rejected: {ex.Message}");
+        }
+
+        // Attach the DXGI device manager BEFORE type negotiation so the
+        // MFT's output types are the D3D11-aware ones (textures, not
+        // sysmem NV12).
         // Attach the DXGI device manager BEFORE type negotiation so the
         // MFT's output types are the D3D11-aware ones (textures, not
         // sysmem NV12).
@@ -139,7 +166,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
     public VideoCodec Codec => VideoCodec.H264;
 
-    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample)
+    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp)
     {
         if (_disposed || encodedSample is null || encodedSample.Length == 0)
         {
@@ -154,6 +181,14 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
         var inputSample = MediaFactory.MFCreateSample();
         inputSample.AddBuffer(inputBuffer);
+
+        // Stamp with the content clock so the MFT propagates it to the
+        // output sample. DrainOutput then reads the output SampleTime and
+        // attaches it to each DecodedVideoFrame — when the decoder yields
+        // multiple outputs at once (or a buffered older frame alongside a
+        // new one) each carries its OWN original input's timestamp, not
+        // the current call's value.
+        inputSample.SampleTime = inputTimestamp.Ticks;
 
         try
         {
@@ -249,6 +284,15 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
                 if (!_outputTypeNegotiated || _width <= 0 || _height <= 0 || outSample is null) continue;
 
+                // Read the propagated SampleTime BEFORE we flatten / free
+                // the sample. The MFT copies this from the input sample
+                // that ACTUALLY produced this output, so a buffered older
+                // frame released alongside a newer one carries its own
+                // original timestamp, not the current Decode() call's.
+                long outSampleTimeTicks;
+                try { outSampleTimeTicks = outSample.SampleTime; }
+                catch { outSampleTimeTicks = 0; }
+
                 byte[]? bgra;
                 if (_useD3dPath)
                 {
@@ -273,12 +317,16 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
                 if (bgra is null) continue;
 
-                (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height));
+                var outTs = TimeSpan.FromTicks(outSampleTimeTicks);
+                (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height, outTs));
 
+                if (_loggedDecodedFrames < 10)
+                {
+                    DebugLog.Write($"[ts-dec-out] pts={outTs.TotalMilliseconds:F2}ms count={results.Count} ({_width}x{_height}, path={(_useD3dPath ? "GPU" : "CPU")})");
+                }
                 if (_loggedDecodedFrames < 3)
                 {
                     _loggedDecodedFrames++;
-                    DebugLog.Write($"[mf] H264 decoder produced frame {_loggedDecodedFrames} ({_width}x{_height}, path={(_useD3dPath ? "GPU" : "CPU")})");
                 }
             }
             finally
@@ -299,37 +347,31 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     /// </summary>
     private byte[]? DecodeSampleToBgraViaGpu(IMFSample sample)
     {
-        // Unwrap the sample's buffer -> IMFDXGIBuffer -> ID3D11Texture2D.
         using var buffer = sample.ConvertToContiguousBuffer();
         IMFDXGIBuffer? dxgiBuffer;
-        try
-        {
-            dxgiBuffer = buffer.QueryInterface<IMFDXGIBuffer>();
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Write($"[mf] decoder buffer is not IMFDXGIBuffer: {ex.Message}");
-            return null;
-        }
+        try { dxgiBuffer = buffer.QueryInterface<IMFDXGIBuffer>(); }
+        catch { return null; }
 
         ID3D11Texture2D? sourceTexture = null;
         try
         {
-            var iidTex = typeof(ID3D11Texture2D).GUID;
-            var ptr = dxgiBuffer.GetResource(iidTex);
-            if (ptr == IntPtr.Zero)
-            {
-                DebugLog.Write("[mf] IMFDXGIBuffer.GetResource returned null");
-                return null;
-            }
+            var ptr = dxgiBuffer.GetResource(typeof(ID3D11Texture2D).GUID);
+            if (ptr == IntPtr.Zero) return null;
             sourceTexture = new ID3D11Texture2D(ptr);
 
+            // DXVA decoders output into a texture ARRAY — each DPB
+            // (decoded picture buffer) slot is a different array slice.
+            // The SubresourceIndex from IMFDXGIBuffer tells us which
+            // slice this frame's NV12 data lives in. We must pass it
+            // to the scaler so the VideoProcessorBlt input view reads
+            // from the correct slice, not always slice 0 (which holds
+            // stale data from an earlier decode).
+            uint arraySlice = 0;
+            try { arraySlice = dxgiBuffer.SubresourceIndex; }
+            catch { }
+
             EnsureScalerAndStaging(_width, _height);
-            // VP blt can only write to a texture with BIND_RENDER_TARGET,
-            // so the scaler's destination is the DEFAULT texture _bgraDest.
-            // ReadbackBgra then CopyResource's it into _bgraStaging and
-            // maps the staging texture for CPU read.
-            _scaler!.Process(sourceTexture, _bgraDest!);
+            _scaler!.Process(sourceTexture, _bgraDest!, arraySlice);
             return ReadbackBgra();
         }
         finally
@@ -338,6 +380,7 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
             dxgiBuffer.Dispose();
         }
     }
+
 
     /// <summary>
     /// Build (or rebuild) the scaler, destination BGRA texture, and CPU

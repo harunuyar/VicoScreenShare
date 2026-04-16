@@ -90,7 +90,10 @@ public sealed class D3D11VideoScaler : IDisposable
     public int DestHeight => _destHeight;
 
     public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture)
-        => Process(sourceTexture, destTexture, null);
+        => Process(sourceTexture, destTexture, null, 0);
+
+    public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture, uint sourceArraySlice)
+        => Process(sourceTexture, destTexture, null, sourceArraySlice);
 
     /// <summary>
     /// Scale <paramref name="sourceTexture"/> into <paramref name="destTexture"/>.
@@ -104,15 +107,26 @@ public sealed class D3D11VideoScaler : IDisposable
     /// tile has a different aspect.
     /// </summary>
     public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture, RawRect? destRect)
+        => Process(sourceTexture, destTexture, destRect, 0);
+
+    /// <summary>
+    /// Scale <paramref name="sourceTexture"/> into <paramref name="destTexture"/>.
+    /// <paramref name="sourceArraySlice"/> selects which array slice of the
+    /// source texture to read from — DXVA decoders output into texture arrays
+    /// where each DPB slot is a different slice. Pass the value from
+    /// <c>IMFDXGIBuffer.SubresourceIndex</c>.
+    /// </summary>
+    public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture, RawRect? destRect, uint sourceArraySlice)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(D3D11VideoScaler));
 
-        // Input view — per-call because WGC hands out a fresh surface each frame.
+        // Input view — per-call because the source texture (and its
+        // array slice) changes every frame.
         var inputViewDesc = new VideoProcessorInputViewDescription
         {
             FourCC = 0,
             ViewDimension = VideoProcessorInputViewDimension.Texture2D,
-            Texture2D = new Texture2DVideoProcessorInputView { MipSlice = 0, ArraySlice = 0 },
+            Texture2D = new Texture2DVideoProcessorInputView { MipSlice = 0, ArraySlice = sourceArraySlice },
         };
         using var inputView = _videoDevice.CreateVideoProcessorInputView(sourceTexture, _enumerator, inputViewDesc);
 

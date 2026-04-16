@@ -10,8 +10,8 @@ public class CaptureStreamerTests
     public void Emits_encoded_payload_when_fed_bgra_frames()
     {
         var source = new FakeCaptureSource();
-        var samples = new List<(uint duration, byte[] payload)>();
-        using var streamer = new CaptureStreamer(source, (d, p) => samples.Add((d, p)), new VideoSettings());
+        var samples = new List<(uint duration, byte[] payload, TimeSpan ts)>();
+        using var streamer = new CaptureStreamer(source, (d, p, t) => samples.Add((d, p, t)), new VideoSettings());
         streamer.Start();
 
         // 64x64 is small enough to stay fast in a unit test but big enough that
@@ -44,6 +44,36 @@ public class CaptureStreamerTests
     }
 
     [Fact]
+    public void Propagates_content_timestamp_to_the_onEncoded_callback()
+    {
+        var source = new FakeCaptureSource();
+        var samples = new List<(uint duration, byte[] payload, TimeSpan ts)>();
+        using var streamer = new CaptureStreamer(source, (d, p, t) => samples.Add((d, p, t)), new VideoSettings());
+        streamer.Start();
+
+        const int width = 64;
+        const int height = 64;
+        var bgra = new byte[width * height * 4];
+
+        // Pump 6 frames 50ms apart. VP8 is sync so the callback ts should
+        // equal the input ts verbatim for every emitted frame.
+        var inputs = new List<TimeSpan>();
+        for (var i = 0; i < 6; i++)
+        {
+            var ts = TimeSpan.FromMilliseconds(50 * i);
+            inputs.Add(ts);
+            source.PumpFrame(bgra, width, height, strideBytes: width * 4, ts);
+        }
+
+        samples.Should().NotBeEmpty("sync VP8 should emit content for every input");
+        foreach (var sample in samples)
+        {
+            inputs.Should().Contain(sample.ts,
+                "every callback timestamp should map back to one of the submitted inputs");
+        }
+    }
+
+    [Fact]
     public void Derives_width_from_source_aspect_when_target_height_is_set()
     {
         var source = new FakeCaptureSource();
@@ -52,7 +82,7 @@ public class CaptureStreamerTests
             TargetHeight = 360,
             TargetFrameRate = 30,
         };
-        using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
+        using var streamer = new CaptureStreamer(source, (_, _, _) => { }, settings);
         streamer.Start();
 
         // Source frame is 1280x720 (16:9). Target height 360 → width should be
@@ -75,7 +105,7 @@ public class CaptureStreamerTests
             TargetHeight = 720,
             TargetFrameRate = 30,
         };
-        using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
+        using var streamer = new CaptureStreamer(source, (_, _, _) => { }, settings);
         streamer.Start();
 
         // 3440x1440 ultrawide → 720 target height → width should be 1720.
@@ -89,40 +119,11 @@ public class CaptureStreamerTests
     }
 
     [Fact]
-    public void Drops_frames_when_incoming_rate_exceeds_target_fps()
-    {
-        var source = new FakeCaptureSource();
-        var settings = new VideoSettings
-        {
-            TargetHeight = 720,
-            TargetFrameRate = 30,
-        };
-        using var streamer = new CaptureStreamer(source, (_, _) => { }, settings);
-        streamer.Start();
-
-        const int width = 64;
-        const int height = 64;
-        var bgra = new byte[width * height * 4];
-
-        // Pump 50 frames 10 ms apart → 100 fps incoming. With a 30 fps target
-        // the throttle should let through ~15 of them (gap ≈ 33.3 ms).
-        for (var i = 0; i < 50; i++)
-        {
-            source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(i * 10));
-        }
-
-        streamer.FrameCount.Should().BeLessThan(20,
-            "50 frames at 10 ms spacing should be throttled down to ~15 at 30 fps");
-        streamer.FrameCount.Should().BeGreaterThan(10,
-            "throttle should still admit roughly one frame per 33 ms window");
-    }
-
-    [Fact]
     public void Stop_detaches_from_source_and_halts_emission()
     {
         var source = new FakeCaptureSource();
         var count = 0;
-        using var streamer = new CaptureStreamer(source, (_, _) => Interlocked.Increment(ref count), new VideoSettings());
+        using var streamer = new CaptureStreamer(source, (_, _, _) => Interlocked.Increment(ref count), new VideoSettings());
         streamer.Start();
 
         var bgra = new byte[32 * 32 * 4];

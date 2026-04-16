@@ -22,5 +22,12 @@ public interface IVideoEncoderFactory
     /// </summary>
     bool SupportsTextureInput { get; }
 
-    IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate);
+    /// <summary>
+    /// Build an encoder at the given target dimensions and bitrate. The
+    /// <paramref name="gopFrames"/> argument is the number of frames
+    /// between keyframes (IDR), typically <c>round(keyframeIntervalSec *
+    /// targetFps)</c>. Encoders that don't honor a configurable GOP
+    /// (libvpx VP8 uses its own heuristics) accept the value and ignore it.
+    /// </summary>
+    IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames);
 }

@@ -8,15 +8,14 @@ namespace ScreenSharing.Client.Diagnostics;
 /// a <c>WinExe</c> and detaches from the parent console at startup, so plain
 /// <c>Console.WriteLine</c> calls vanish when the app is launched from a
 /// terminal. This writer appends lines to
-/// <c>%TEMP%/screensharing-debug.log</c> and flushes every write so users can
-/// just open the file and paste the contents when we ask for diagnostic data.
+/// <c>%TEMP%/screensharing/debug.log</c> (resolved via <see cref="TempPaths"/>)
+/// and flushes every write so users can just open the file and paste the
+/// contents when we ask for diagnostic data.
 /// </summary>
 public static class DebugLog
 {
     private static readonly object Gate = new();
-    private static readonly string Path = System.IO.Path.Combine(
-        System.IO.Path.GetTempPath(),
-        "screensharing-debug.log");
+    private static readonly string Path = TempPaths.Combine("debug.log");
 
     public static string FilePath => Path;
 

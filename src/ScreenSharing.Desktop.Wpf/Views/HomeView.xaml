@@ -82,6 +82,17 @@
                            IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBool}}"
                            HorizontalAlignment="Stretch" />
 
+                <!-- Diagnostic capture test — opens a page that runs the
+                     production capture/encode/decode/render pipeline
+                     against a locally-picked window or monitor with no
+                     network. Same shell navigation as everything else. -->
+                <ui:Button Appearance="Transparent"
+                           Content="Capture test"
+                           Icon="{ui:SymbolIcon Symbol=Bug24}"
+                           Command="{Binding ShowCaptureTestCommand}"
+                           HorizontalAlignment="Center"
+                           Margin="0,12,0,0" />
+
                 <ui:InfoBar Title="Heads up"
                             Message="{Binding StatusMessage}"
                             Severity="Warning"

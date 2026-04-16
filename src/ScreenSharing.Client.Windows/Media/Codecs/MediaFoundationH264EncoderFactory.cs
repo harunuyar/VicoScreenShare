@@ -42,6 +42,6 @@ public sealed class MediaFoundationH264EncoderFactory : IVideoEncoderFactory
     /// </summary>
     public bool SupportsTextureInput => _sharedDevice is not null && IsAvailable;
 
-    public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate) =>
-        new MediaFoundationH264Encoder(width, height, targetFps, targetBitrate, _sharedDevice);
+    public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) =>
+        new MediaFoundationH264Encoder(width, height, targetFps, targetBitrate, gopFrames, _sharedDevice);
 }

@@ -90,7 +90,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
             ?? ScalerQualityOptions[1];
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
-        _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 10);
+        _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 240);
 
         // Dirty tracking: any change to a bound setting flips IsDirty to
         // true so the floating Save pill becomes visible. Save() resets

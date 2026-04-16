@@ -3,6 +3,19 @@ using System;
 namespace ScreenSharing.Client.Media.Codecs;
 
 /// <summary>
+/// One encoded video frame with the **content** timestamp it was captured
+/// at — i.e. <see cref="Timestamp"/> identifies the moment the picture
+/// inside <see cref="Bytes"/> was on the screen, not the moment the
+/// encoder happened to finish producing it. Async encoders are pipelined
+/// (NVENC keeps several frames in flight) so the bytes coming out of any
+/// given <c>EncodeTexture</c> call are usually for an *earlier* input
+/// frame, not the one whose call returned them. Carrying the source
+/// timestamp through the encoder + decoder + pacer is what keeps the
+/// receiver's paint cadence aligned with the actual motion content.
+/// </summary>
+public readonly record struct EncodedFrame(byte[] Bytes, TimeSpan Timestamp);
+
+/// <summary>
 /// One-shot video encoder bound to a fixed output resolution. Callers build a
 /// new instance via <see cref="IVideoEncoderFactory.CreateEncoder"/> whenever
 /// the encoder target dimensions change — libvpx and Media Foundation both
@@ -25,26 +38,24 @@ public interface IVideoEncoder : IDisposable
     bool SupportsTextureInput { get; }
 
     /// <summary>
-    /// Encode one packed BGRA frame. Returns the encoded payload (caller owns
-    /// the bytes) or null / empty when the codec produced no output for this
-    /// input (e.g. the encoder swallowed a frame for rate control, or an
-    /// async hardware MFT hasn't handed back output yet).
+    /// Encode one packed BGRA frame tagged with the capture-side content
+    /// timestamp. Returns the encoded payload (caller owns the bytes) plus
+    /// the propagated content timestamp, or null when the codec produced no
+    /// output for this input (rate-control swallow, async pump warmup, etc).
     ///
-    /// The encoder implementation is responsible for any color-space
-    /// conversion — VP8 wants planar I420 internally, NVENC wants NV12, and
-    /// the caller shouldn't have to know which. Taking BGRA here matches
-    /// what the capture path produces, so the hottest single-pass conversion
-    /// can happen inside the encoder on its own schedule.
+    /// For async hardware encoders the returned <see cref="EncodedFrame.Timestamp"/>
+    /// may be for an *earlier* input than the one this call submitted, because
+    /// the encoder pipeline is pipelined and the event pump reads SampleTime
+    /// off whichever output sample is ready. Sync encoders echo
+    /// <paramref name="inputTimestamp"/> verbatim.
     /// </summary>
-    byte[]? EncodeBgra(byte[] bgra, int stride);
+    EncodedFrame? EncodeBgra(byte[] bgra, int stride, TimeSpan inputTimestamp);
 
     /// <summary>
-    /// Encode one BGRA texture on the encoder's D3D11 device. This is the
-    /// zero-copy fast path: the capture source hands us its framepool
-    /// texture and the encoder downscales (via the D3D11 Video Processor)
-    /// and color-converts on the GPU internally, with no CPU roundtrip and
-    /// no compact pass. Throws <see cref="NotSupportedException"/> when
+    /// Encode one BGRA texture on the encoder's D3D11 device. Same timestamp
+    /// contract as <see cref="EncodeBgra"/>. Throws
+    /// <see cref="NotSupportedException"/> when
     /// <see cref="SupportsTextureInput"/> is false.
     /// </summary>
-    byte[]? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight);
+    EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp);
 }
