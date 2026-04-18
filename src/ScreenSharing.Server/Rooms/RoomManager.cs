@@ -76,7 +76,7 @@ public sealed class RoomManager
 
         return add.Status switch
         {
-            AddPeerStatus.Ok => JoinRoomResult.Success(room, add.HostPeerId, add.SnapshotAfterAdd),
+            AddPeerStatus.Ok => JoinRoomResult.Success(room, add.SnapshotAfterAdd),
             AddPeerStatus.Full => JoinRoomResult.Full(),
             AddPeerStatus.AlreadyIn => JoinRoomResult.AlreadyIn(),
             _ => JoinRoomResult.NotFound(),
@@ -189,7 +189,7 @@ public sealed class RoomManager
     {
         if (!_rooms.TryGetValue(roomId, out var room))
         {
-            return new RemovePeerOutcome(false, false, null, 0, false);
+            return new RemovePeerOutcome(false, 0, false);
         }
         var result = room.RemovePeer(peerId);
         var roomDeleted = false;
@@ -211,8 +211,6 @@ public sealed class RoomManager
         }
         return new RemovePeerOutcome(
             Found: result.Found,
-            WasHost: result.WasHost,
-            NewHostPeerId: result.NewHostPeerId,
             PeerCountAfter: result.PeerCountAfter,
             RoomDeleted: roomDeleted);
     }
@@ -258,20 +256,17 @@ public enum JoinRoomStatus
 public readonly record struct JoinRoomResult(
     JoinRoomStatus Status,
     Room? Room,
-    Guid HostPeerId,
     IReadOnlyList<RoomPeer> SnapshotAfterJoin)
 {
-    public static JoinRoomResult Success(Room room, Guid hostPeerId, IReadOnlyList<RoomPeer> snapshot) =>
-        new(JoinRoomStatus.Success, room, hostPeerId, snapshot);
-    public static JoinRoomResult NotFound() => new(JoinRoomStatus.NotFound, null, Guid.Empty, Array.Empty<RoomPeer>());
-    public static JoinRoomResult Full() => new(JoinRoomStatus.Full, null, Guid.Empty, Array.Empty<RoomPeer>());
-    public static JoinRoomResult AlreadyIn() => new(JoinRoomStatus.AlreadyIn, null, Guid.Empty, Array.Empty<RoomPeer>());
+    public static JoinRoomResult Success(Room room, IReadOnlyList<RoomPeer> snapshot) =>
+        new(JoinRoomStatus.Success, room, snapshot);
+    public static JoinRoomResult NotFound() => new(JoinRoomStatus.NotFound, null, Array.Empty<RoomPeer>());
+    public static JoinRoomResult Full() => new(JoinRoomStatus.Full, null, Array.Empty<RoomPeer>());
+    public static JoinRoomResult AlreadyIn() => new(JoinRoomStatus.AlreadyIn, null, Array.Empty<RoomPeer>());
 }
 
 public readonly record struct RemovePeerOutcome(
     bool Found,
-    bool WasHost,
-    Guid? NewHostPeerId,
     int PeerCountAfter,
     bool RoomDeleted);
 

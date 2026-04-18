@@ -43,6 +43,8 @@
                           Content="Run through encode/decode"
                           Margin="20,0,0,0"
                           VerticalAlignment="Center"
+                          Checked="EncodeDecodeBox_CheckedChanged"
+                          Unchecked="EncodeDecodeBox_CheckedChanged"
                           ToolTip="When checked, frames go through the real production CaptureStreamer + H.264 encoder + decoder, and the renderer's Receiver path (jitter buffer + paced paints). Unchecked uses the LocalPreviewSource texture-direct path." />
                 <TextBlock x:Name="StatusText" Margin="20,0,0,0"
                            VerticalAlignment="Center" Opacity="0.75" />

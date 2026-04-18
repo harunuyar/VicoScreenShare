@@ -18,6 +18,16 @@ public sealed partial class NavigationService : ObservableObject, INavigationHos
     [ObservableProperty]
     private object? _current;
 
+    /// <summary>
+    /// The active in-window overlay (e.g. Settings dialog), or null when no
+    /// overlay is open. MainWindow binds an overlay layer to this: visible
+    /// when non-null, hidden otherwise. Underlying <see cref="Current"/> page
+    /// stays mounted so capture sessions, room media pipelines, etc. keep
+    /// running while the overlay is up.
+    /// </summary>
+    [ObservableProperty]
+    private object? _activeOverlay;
+
     public bool CanGoBack => false;
 
     public void NavigateTo(object viewModel)
@@ -25,4 +35,12 @@ public sealed partial class NavigationService : ObservableObject, INavigationHos
         if (viewModel is null) throw new ArgumentNullException(nameof(viewModel));
         Current = viewModel;
     }
+
+    public void ShowOverlay(object overlayViewModel)
+    {
+        if (overlayViewModel is null) throw new ArgumentNullException(nameof(overlayViewModel));
+        ActiveOverlay = overlayViewModel;
+    }
+
+    public void CloseOverlay() => ActiveOverlay = null;
 }

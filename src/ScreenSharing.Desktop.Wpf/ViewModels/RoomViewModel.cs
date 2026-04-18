@@ -118,11 +118,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             initial.Peers.Select(p => new PeerViewModel(
                 p.PeerId,
                 p.DisplayName,
-                p.IsHost,
                 p.PeerId == initial.YourPeerId)));
-
-        HostPeerId = Peers.FirstOrDefault(p => p.IsHost)?.PeerId;
-        UpdateYouAreHost();
 
         Tiles.CollectionChanged += (_, _) =>
         {
@@ -174,8 +170,6 @@ public sealed partial class RoomViewModel : ViewModelBase
     [ObservableProperty] private string _roomId;
     [ObservableProperty] private string _copyButtonText = "Copy";
     [ObservableProperty] private Guid _yourPeerId;
-    [ObservableProperty] private Guid? _hostPeerId;
-    [ObservableProperty] private bool _youAreHost;
     [ObservableProperty] private string? _statusMessage;
 
     /// <summary>
@@ -233,8 +227,6 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void CloseStatsPanel() => IsStatsPanelOpen = false;
 
     public bool CanShareScreen => _captureProvider is not null;
-
-    private void UpdateYouAreHost() => YouAreHost = HostPeerId == YourPeerId;
 
     private async Task StartWebRtcAsync()
     {
@@ -406,13 +398,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     [RelayCommand]
     private void ShowSettings()
     {
-        var settingsVm = new SettingsViewModel(
-            _settings,
-            _settingsStore,
-            _navigation,
-            () => this,
-            onSaved: () => _ = RebuildMediaGraphAsync());
-        _navigation.NavigateTo(settingsVm);
+        Views.SettingsDialog.Show(_settings, _settingsStore, onSaved: () => _ = RebuildMediaGraphAsync());
     }
 
     public void OnRoomIdCopied()
@@ -519,11 +505,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         _dispatcher.BeginInvoke(new Action(() =>
         {
             if (Peers.Any(p => p.PeerId == peer.PeerId)) return;
-            Peers.Add(new PeerViewModel(peer.PeerId, peer.DisplayName, peer.IsHost, peer.PeerId == YourPeerId));
+            Peers.Add(new PeerViewModel(peer.PeerId, peer.DisplayName, peer.PeerId == YourPeerId));
         }));
     }
 
-    private void OnPeerLeft(Guid peerId, Guid? newHostPeerId)
+    private void OnPeerLeft(Guid peerId)
     {
         _dispatcher.BeginInvoke(new Action(async () =>
         {
@@ -534,14 +520,6 @@ public sealed partial class RoomViewModel : ViewModelBase
             await DisposeTileAsync(peerId).ConfigureAwait(true);
 
             _announcedFrameRates.Remove(peerId);
-
-            if (newHostPeerId.HasValue)
-            {
-                HostPeerId = newHostPeerId;
-                foreach (var p in Peers) p.IsHost = p.PeerId == newHostPeerId.Value;
-                UpdateYouAreHost();
-                if (YouAreHost) StatusMessage = "Previous host left. You are now the host.";
-            }
         }));
     }
 
@@ -924,7 +902,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             var vm = Peers.FirstOrDefault(p => p.PeerId == info.PeerId);
             if (vm is null)
             {
-                Peers.Add(new PeerViewModel(info.PeerId, info.DisplayName, info.IsHost, info.PeerId == YourPeerId)
+                Peers.Add(new PeerViewModel(info.PeerId, info.DisplayName, info.PeerId == YourPeerId)
                 {
                     IsStreaming = info.IsStreaming,
                     IsConnected = info.IsConnected,
@@ -933,7 +911,6 @@ public sealed partial class RoomViewModel : ViewModelBase
             else
             {
                 vm.DisplayName = info.DisplayName;
-                vm.IsHost = info.IsHost;
                 vm.IsStreaming = info.IsStreaming;
                 vm.IsConnected = info.IsConnected;
             }
@@ -947,9 +924,6 @@ public sealed partial class RoomViewModel : ViewModelBase
                 Peers.RemoveAt(i);
             }
         }
-
-        HostPeerId = Peers.FirstOrDefault(p => p.IsHost)?.PeerId;
-        UpdateYouAreHost();
     }
 
     /// <summary>

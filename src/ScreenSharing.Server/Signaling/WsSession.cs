@@ -359,7 +359,7 @@ public sealed class WsSession
         _currentRoomId = room.Id;
 
         await SendAsync(MessageType.RoomCreated, new RoomCreated(room.Id), envelope.CorrelationId).ConfigureAwait(false);
-        await SendRoomJoinedAsync(room, join.HostPeerId, join.SnapshotAfterJoin, peer.ResumeToken ?? string.Empty).ConfigureAwait(false);
+        await SendRoomJoinedAsync(room, join.SnapshotAfterJoin, peer.ResumeToken ?? string.Empty).ConfigureAwait(false);
 
         // Attach the subscriber-offer pump so the server can drive SdpOffers
         // for this viewer whenever anyone in the room starts publishing. The
@@ -407,8 +407,7 @@ public sealed class WsSession
                 // Send a new RoomJoined (with a fresh roster snapshot + rotated
                 // token) so the client can re-seed all its state from the
                 // authoritative server view.
-                var hostId = room.HostPeerId ?? PeerId;
-                await SendRoomJoinedAsync(room, hostId, room.SnapshotPeers(), outcome.NewResumeToken ?? string.Empty)
+                await SendRoomJoinedAsync(room, room.SnapshotPeers(), outcome.NewResumeToken ?? string.Empty)
                     .ConfigureAwait(false);
 
                 // Announce to the other peers that we're back.
@@ -467,8 +466,8 @@ public sealed class WsSession
         {
             case JoinRoomStatus.Success:
                 _currentRoomId = result.Room!.Id;
-                await SendRoomJoinedAsync(result.Room, result.HostPeerId, result.SnapshotAfterJoin, peer.ResumeToken ?? string.Empty).ConfigureAwait(false);
-                await BroadcastPeerJoinedAsync(result.Room, result.HostPeerId, peer).ConfigureAwait(false);
+                await SendRoomJoinedAsync(result.Room, result.SnapshotAfterJoin, peer.ResumeToken ?? string.Empty).ConfigureAwait(false);
+                await BroadcastPeerJoinedAsync(result.Room, peer).ConfigureAwait(false);
 
                 // Auto-subscribe the joiner to every already-live publisher.
                 var sfu = _rooms.GetSfuSession(_currentRoomId);
@@ -490,10 +489,10 @@ public sealed class WsSession
         }
     }
 
-    private Task SendRoomJoinedAsync(Room room, Guid hostPeerId, IReadOnlyList<RoomPeer> peers, string resumeToken)
+    private Task SendRoomJoinedAsync(Room room, IReadOnlyList<RoomPeer> peers, string resumeToken)
     {
         var peerInfos = peers
-            .Select(p => new PeerInfo(p.PeerId, p.DisplayName, p.PeerId == hostPeerId, p.IsStreaming, p.IsConnected))
+            .Select(p => new PeerInfo(p.PeerId, p.DisplayName, p.IsStreaming, p.IsConnected))
             .ToArray();
         var joined = new RoomJoined(
             RoomId: room.Id,
@@ -505,10 +504,10 @@ public sealed class WsSession
         return SendAsync(MessageType.RoomJoined, joined);
     }
 
-    private async Task BroadcastPeerJoinedAsync(Room room, Guid hostPeerId, RoomPeer newPeer)
+    private async Task BroadcastPeerJoinedAsync(Room room, RoomPeer newPeer)
     {
         var message = new PeerJoined(new PeerInfo(
-            newPeer.PeerId, newPeer.DisplayName, newPeer.PeerId == hostPeerId, newPeer.IsStreaming, newPeer.IsConnected));
+            newPeer.PeerId, newPeer.DisplayName, newPeer.IsStreaming, newPeer.IsConnected));
         await BroadcastToRoomAsync(room, MessageType.PeerJoined, message, excludePeer: newPeer.PeerId)
             .ConfigureAwait(false);
     }
@@ -853,7 +852,7 @@ public sealed class WsSession
                 .ConfigureAwait(false);
         }
 
-        var message = new PeerLeft(PeerId, outcome.WasHost ? outcome.NewHostPeerId : null);
+        var message = new PeerLeft(PeerId);
         await BroadcastToRoomAsync(room, MessageType.PeerLeft, message, excludePeer: null)
             .ConfigureAwait(false);
     }

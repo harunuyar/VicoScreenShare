@@ -29,6 +29,18 @@ public sealed class NullToCollapsedConverter : IValueConverter
         => throw new NotSupportedException();
 }
 
+/// <summary>
+/// True when the source is non-null, false otherwise. Used to drive a
+/// <c>Popup.IsOpen</c> from a nullable view-model reference.
+/// </summary>
+public sealed class NonNullToBoolConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is not null && !(value is string s && string.IsNullOrEmpty(s));
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 public sealed class BoolToVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
@@ -115,8 +127,8 @@ public sealed class ViewModelToPageConverter : IValueConverter
     {
         [typeof(HomeViewModel)] = vm => new HomeView { DataContext = vm },
         [typeof(RoomViewModel)] = vm => new RoomView { DataContext = vm },
-        [typeof(SettingsViewModel)] = vm => new SettingsView { DataContext = vm },
         [typeof(CaptureTestViewModel)] = vm => new CaptureTestView { DataContext = vm },
+        [typeof(SettingsViewModel)] = vm => new SettingsView { DataContext = vm },
     };
 
     public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)

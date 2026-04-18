@@ -48,6 +48,13 @@ namespace ScreenSharing.Desktop.App.Views;
 /// </summary>
 public partial class CaptureTestView : UserControl
 {
+    // Session-persistent default for the encode/decode checkbox. The test
+    // page is rebuilt on every navigation (shell → back → here, or settings
+    // round-trip), so holding the flag on the VM wouldn't survive. Defaults
+    // to true because the encode/decode path matches what a real room does,
+    // and that's the mode most users want this harness to exercise.
+    private static bool s_encodeDecodeChecked = true;
+
     private WindowsCaptureSource? _source;
     private EncodeDecodeBridge? _bridge;
     private NoCodecCpuReadbackAdapter? _noCodecAdapter;
@@ -63,6 +70,7 @@ public partial class CaptureTestView : UserControl
     public CaptureTestView()
     {
         InitializeComponent();
+        Loaded += OnLoaded;
         Unloaded += OnUnloaded;
 
         _statsTimer = new DispatcherTimer
@@ -71,6 +79,19 @@ public partial class CaptureTestView : UserControl
         };
         _statsTimer.Tick += OnStatsTick;
         _statsTimer.Start();
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        // Restore the user's last choice on every mount so a settings round
+        // trip (or back-navigation and re-entry) doesn't silently flip the
+        // mode back to a default they didn't pick.
+        EncodeDecodeBox.IsChecked = s_encodeDecodeChecked;
+    }
+
+    private void EncodeDecodeBox_CheckedChanged(object sender, RoutedEventArgs e)
+    {
+        s_encodeDecodeChecked = EncodeDecodeBox.IsChecked == true;
     }
 
     private async void PickButton_Click(object sender, RoutedEventArgs e)
@@ -168,42 +189,15 @@ public partial class CaptureTestView : UserControl
     }
 
     /// <summary>
-    /// Settings gear — navigates the main window to the existing
-    /// SettingsView via the same code path the home view's gear uses,
-    /// and wires the back factory so the user returns to a fresh
-    /// capture-test page.
+    /// Settings gear — opens the Settings window as a modal dialog so the
+    /// capture-test page stays mounted underneath. Nothing in the navigation
+    /// stack changes; Back still takes the user Home.
     /// </summary>
     private void OpenSettings_Click(object sender, RoutedEventArgs e)
     {
-        var mainWindow = Application.Current.MainWindow;
-        if (mainWindow?.DataContext is NavigationService nav &&
-            nav.Current is CaptureTestViewModel)
-        {
-            var settingsStore = new SettingsStore();
-            var clientSettings = settingsStore.LoadOrCreate();
-            var settingsVm = new SettingsViewModel(
-                clientSettings,
-                settingsStore,
-                nav,
-                () => new CaptureTestViewModel(nav, () => CreateHomeViewModel(nav)));
-            nav.NavigateTo(settingsVm);
-        }
-    }
-
-    /// <summary>
-    /// Best-effort lookup of an existing HomeViewModel so the settings
-    /// back navigation from capture-test lands on a real home. In
-    /// normal flow this hits the cached home VM from the shell.
-    /// </summary>
-    private static ViewModelBase CreateHomeViewModel(INavigationHost nav)
-    {
-        if (Application.Current.MainWindow?.DataContext is NavigationService current
-            && current.Current is HomeViewModel existing)
-        {
-            return existing;
-        }
-        throw new InvalidOperationException(
-            "Cannot rebuild HomeViewModel from CaptureTestView — opening settings from the test page requires the home VM to still be reachable.");
+        var settingsStore = new SettingsStore();
+        var clientSettings = settingsStore.LoadOrCreate();
+        SettingsDialog.Show(clientSettings, settingsStore);
     }
 
     private async Task DetachSourceAsync()

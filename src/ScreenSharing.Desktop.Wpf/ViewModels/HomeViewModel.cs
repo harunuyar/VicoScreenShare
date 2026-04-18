@@ -121,12 +121,7 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private void ShowSettings()
     {
-        var settingsVm = new SettingsViewModel(
-            _settings,
-            _settingsStore,
-            _navigation,
-            () => new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider));
-        _navigation.NavigateTo(settingsVm);
+        Views.SettingsDialog.Show(_settings, _settingsStore);
     }
 
     [RelayCommand]

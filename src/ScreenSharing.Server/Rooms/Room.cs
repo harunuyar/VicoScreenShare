@@ -32,15 +32,6 @@ public sealed class Room
         lock (_lock) return _peers.ToArray();
     }
 
-    /// <summary>Host is always the oldest peer; null when the room is empty.</summary>
-    public Guid? HostPeerId
-    {
-        get
-        {
-            lock (_lock) return _peers.Count == 0 ? null : _peers[0].PeerId;
-        }
-    }
-
     public AddPeerResult TryAddPeer(RoomPeer peer, int maxCapacity)
     {
         lock (_lock)
@@ -54,9 +45,8 @@ public sealed class Room
                 return AddPeerResult.AlreadyIn;
             }
             _peers.Add(peer);
-            var hostId = _peers[0].PeerId;
             var snapshot = _peers.ToArray();
-            return AddPeerResult.Ok(hostId, snapshot);
+            return AddPeerResult.Ok(snapshot);
         }
     }
 
@@ -119,12 +109,10 @@ public sealed class Room
             var idx = _peers.FindIndex(p => p.PeerId == peerId);
             if (idx < 0)
             {
-                return new RemovePeerResult(false, false, null, _peers.Count);
+                return new RemovePeerResult(false, _peers.Count);
             }
-            var wasHost = idx == 0;
             _peers.RemoveAt(idx);
-            var newHostId = _peers.Count == 0 ? (Guid?)null : _peers[0].PeerId;
-            return new RemovePeerResult(true, wasHost, newHostId, _peers.Count);
+            return new RemovePeerResult(true, _peers.Count);
         }
     }
 }
@@ -138,17 +126,14 @@ public enum AddPeerStatus
 
 public readonly record struct AddPeerResult(
     AddPeerStatus Status,
-    Guid HostPeerId,
     IReadOnlyList<RoomPeer> SnapshotAfterAdd)
 {
-    public static AddPeerResult Full { get; } = new(AddPeerStatus.Full, Guid.Empty, Array.Empty<RoomPeer>());
-    public static AddPeerResult AlreadyIn { get; } = new(AddPeerStatus.AlreadyIn, Guid.Empty, Array.Empty<RoomPeer>());
-    public static AddPeerResult Ok(Guid hostPeerId, IReadOnlyList<RoomPeer> snapshot) =>
-        new(AddPeerStatus.Ok, hostPeerId, snapshot);
+    public static AddPeerResult Full { get; } = new(AddPeerStatus.Full, Array.Empty<RoomPeer>());
+    public static AddPeerResult AlreadyIn { get; } = new(AddPeerStatus.AlreadyIn, Array.Empty<RoomPeer>());
+    public static AddPeerResult Ok(IReadOnlyList<RoomPeer> snapshot) =>
+        new(AddPeerStatus.Ok, snapshot);
 }
 
 public readonly record struct RemovePeerResult(
     bool Found,
-    bool WasHost,
-    Guid? NewHostPeerId,
     int PeerCountAfter);

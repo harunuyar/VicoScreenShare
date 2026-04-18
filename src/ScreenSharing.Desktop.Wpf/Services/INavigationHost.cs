@@ -9,4 +9,14 @@ public interface INavigationHost
 {
     void NavigateTo(object viewModel);
     bool CanGoBack { get; }
+
+    /// <summary>
+    /// Mount a view model as a modal overlay on top of the current view. The
+    /// shell renders it centered with a dimmed background — the underlying
+    /// page stays mounted but is not interactive. Pass null or call
+    /// <see cref="CloseOverlay"/> to dismiss.
+    /// </summary>
+    void ShowOverlay(object overlayViewModel);
+
+    void CloseOverlay();
 }

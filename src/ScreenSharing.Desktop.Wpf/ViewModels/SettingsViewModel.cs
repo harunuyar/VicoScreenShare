@@ -18,21 +18,22 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     private readonly ClientSettings _settings;
     private readonly SettingsStore _store;
-    private readonly INavigationHost _navigation;
-    private readonly Func<ViewModelBase> _backFactory;
     private readonly Action? _onSaved;
+
+    /// <summary>
+    /// Fired when the user asks to dismiss the Settings dialog (clicks the
+    /// back/close chevron). The hosting <c>SettingsWindow</c> listens and
+    /// calls <see cref="System.Windows.Window.Close"/>.
+    /// </summary>
+    public event Action? CloseRequested;
 
     public SettingsViewModel(
         ClientSettings settings,
         SettingsStore store,
-        INavigationHost navigation,
-        Func<ViewModelBase> backFactory,
         Action? onSaved = null)
     {
         _settings = settings;
         _store = store;
-        _navigation = navigation;
-        _backFactory = backFactory;
         _onSaved = onSaved;
 
         TargetHeightOptions = new[]
@@ -206,10 +207,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     }
 
     [RelayCommand]
-    private void GoBack()
-    {
-        _navigation.NavigateTo(_backFactory());
-    }
+    private void Close() => CloseRequested?.Invoke();
 
     private static CodecOption BuildCodecOption(VideoCodec codec, string label, HashSet<VideoCodec> available)
     {

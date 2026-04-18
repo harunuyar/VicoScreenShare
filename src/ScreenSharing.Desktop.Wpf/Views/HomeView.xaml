@@ -9,13 +9,20 @@
              mc:Ignorable="d">
 
     <Grid>
-        <!-- Settings gear docked to the top-right corner. Nothing else to
-             put up there — keeps the hero card visually centered. -->
-        <ui:Button Appearance="Secondary"
-                   Icon="{ui:SymbolIcon Symbol=Settings24}"
-                   Command="{Binding ShowSettingsCommand}"
-                   HorizontalAlignment="Right" VerticalAlignment="Top"
-                   Margin="0,16,24,0" />
+        <!-- Top-right action cluster: Capture test next to Settings. Both
+             docked to the corner so the hero card stays visually centered. -->
+        <StackPanel Orientation="Horizontal"
+                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="0,16,24,0">
+            <ui:Button Appearance="Secondary"
+                       Icon="{ui:SymbolIcon Symbol=Bug24}"
+                       ToolTip="Capture test (diagnostic pipeline)"
+                       Command="{Binding ShowCaptureTestCommand}"
+                       Margin="0,0,8,0" />
+            <ui:Button Appearance="Secondary"
+                       Icon="{ui:SymbolIcon Symbol=Settings24}"
+                       Command="{Binding ShowSettingsCommand}" />
+        </StackPanel>
 
         <ui:Card MaxWidth="440" Padding="28"
                  HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -81,17 +88,6 @@
                            Command="{Binding CreateRoomCommand}"
                            IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBool}}"
                            HorizontalAlignment="Stretch" />
-
-                <!-- Diagnostic capture test — opens a page that runs the
-                     production capture/encode/decode/render pipeline
-                     against a locally-picked window or monitor with no
-                     network. Same shell navigation as everything else. -->
-                <ui:Button Appearance="Transparent"
-                           Content="Capture test"
-                           Icon="{ui:SymbolIcon Symbol=Bug24}"
-                           Command="{Binding ShowCaptureTestCommand}"
-                           HorizontalAlignment="Center"
-                           Margin="0,12,0,0" />
 
                 <ui:InfoBar Title="Heads up"
                             Message="{Binding StatusMessage}"

@@ -64,7 +64,6 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         var hostJoined = await ExpectAsync(host, MessageType.RoomJoined, cts.Token);
         var hostJoinPayload = hostJoined.Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
         hostJoinPayload.Peers.Should().HaveCount(1);
-        hostJoinPayload.Peers[0].IsHost.Should().BeTrue();
 
         // Second client joins.
         var viewer = await ConnectAsync("Bob", cts.Token);
@@ -74,8 +73,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         var viewerPayload = viewerJoined.Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
         viewerPayload.RoomId.Should().Be(roomId);
         viewerPayload.Peers.Should().HaveCount(2);
-        viewerPayload.Peers.Single(p => p.DisplayName == "Alice").IsHost.Should().BeTrue();
-        viewerPayload.Peers.Single(p => p.DisplayName == "Bob").IsHost.Should().BeFalse();
+        viewerPayload.Peers.Select(p => p.DisplayName).Should().Contain(new[] { "Alice", "Bob" });
 
         // Host observes the peer-joined broadcast.
         var broadcast = await ExpectAsync(host, MessageType.PeerJoined, cts.Token);
@@ -101,35 +99,36 @@ public sealed class SignalingE2ETests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Host_disconnect_promotes_next_peer_and_broadcasts_new_host()
+    public async Task Peer_disconnect_broadcasts_PeerConnectionState_then_PeerLeft_after_grace()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var host = await ConnectAsync("Alice", cts.Token);
-        await SendAsync(host, MessageType.CreateRoom, new CreateRoom(), cts.Token);
-        var roomId = (await ExpectAsync(host, MessageType.RoomCreated, cts.Token))
+        var alice = await ConnectAsync("Alice", cts.Token);
+        await SendAsync(alice, MessageType.CreateRoom, new CreateRoom(), cts.Token);
+        var roomId = (await ExpectAsync(alice, MessageType.RoomCreated, cts.Token))
             .Payload.Deserialize<RoomCreated>(ProtocolJson.Options)!.RoomId;
-        await ExpectAsync(host, MessageType.RoomJoined, cts.Token);
-
-        var viewer = await ConnectAsync("Bob", cts.Token);
-        await SendAsync(viewer, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
-        var viewerJoin = (await ExpectAsync(viewer, MessageType.RoomJoined, cts.Token))
+        var aliceJoin = (await ExpectAsync(alice, MessageType.RoomJoined, cts.Token))
             .Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
-        await ExpectAsync(host, MessageType.PeerJoined, cts.Token);
 
-        await CleanCloseAsync(host);
+        var bob = await ConnectAsync("Bob", cts.Token);
+        await SendAsync(bob, MessageType.JoinRoom, new JoinRoom(roomId), cts.Token);
+        await ExpectAsync(bob, MessageType.RoomJoined, cts.Token);
+        await ExpectAsync(alice, MessageType.PeerJoined, cts.Token);
 
-        // Host's WS drop puts them into the grace window first. Other peers
-        // see a PeerConnectionState(IsConnected=false) before the hard-eviction
+        await CleanCloseAsync(alice);
+
+        // Alice's WS drop puts her into the grace window first. Bob sees a
+        // PeerConnectionState(IsConnected=false) before the hard-eviction
         // PeerLeft arrives once the grace timer fires.
-        var disconnectEnv = await ExpectAsync(viewer, MessageType.PeerConnectionState, cts.Token);
+        var disconnectEnv = await ExpectAsync(bob, MessageType.PeerConnectionState, cts.Token);
         var disconnect = disconnectEnv.Payload.Deserialize<PeerConnectionState>(ProtocolJson.Options)!;
+        disconnect.PeerId.Should().Be(aliceJoin.YourPeerId);
         disconnect.IsConnected.Should().BeFalse();
 
-        var peerLeftEnvelope = await ExpectAsync(viewer, MessageType.PeerLeft, cts.Token);
+        var peerLeftEnvelope = await ExpectAsync(bob, MessageType.PeerLeft, cts.Token);
         var peerLeft = peerLeftEnvelope.Payload.Deserialize<PeerLeft>(ProtocolJson.Options)!;
-        peerLeft.NewHostPeerId.Should().Be(viewerJoin.YourPeerId);
+        peerLeft.PeerId.Should().Be(aliceJoin.YourPeerId);
 
-        await CleanCloseAsync(viewer);
+        await CleanCloseAsync(bob);
     }
 
     [Fact]

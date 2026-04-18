@@ -5,11 +5,10 @@ namespace ScreenSharing.Desktop.App.ViewModels;
 
 public sealed partial class PeerViewModel : ObservableObject
 {
-    public PeerViewModel(Guid peerId, string displayName, bool isHost, bool isSelf)
+    public PeerViewModel(Guid peerId, string displayName, bool isSelf)
     {
         PeerId = peerId;
         _displayName = displayName;
-        _isHost = isHost;
         IsSelf = isSelf;
     }
 
@@ -18,9 +17,6 @@ public sealed partial class PeerViewModel : ObservableObject
 
     [ObservableProperty]
     private string _displayName;
-
-    [ObservableProperty]
-    private bool _isHost;
 
     /// <summary>
     /// True when this peer is currently streaming. Drives the "●"

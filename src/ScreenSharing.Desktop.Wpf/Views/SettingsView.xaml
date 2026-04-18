@@ -8,45 +8,50 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d">
 
+    <!-- Three-row layout tuned for the side-panel popup: a compact sticky
+         header, the scrollable settings body, and a docked footer with the
+         Save button that's always visible (disabled until something changes).
+         The old floating Save pill needed 100 px of dead bottom padding to
+         avoid occluding content — this layout gets that space back. -->
     <Grid>
-        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header: Close + title. Smaller than the old 28 pt page-hero
+             heading so it fits the panel chrome. -->
+        <Grid Grid.Row="0" Margin="16,16,16,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <ui:Button Grid.Column="0"
+                       Appearance="Transparent"
+                       Icon="{ui:SymbolIcon Symbol=Dismiss24}"
+                       Command="{Binding CloseCommand}"
+                       ToolTip="Close"
+                       VerticalAlignment="Center" />
+            <TextBlock Grid.Column="1" Text="Settings"
+                       FontSize="18" FontWeight="SemiBold"
+                       VerticalAlignment="Center" Margin="12,0,0,0" />
+        </Grid>
+
+        <!-- Scrollable body. Cards stack vertically with Stretch so none
+             of them exceed the panel width. -->
+        <ScrollViewer Grid.Row="1"
+                      HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
-                      Padding="0,0,0,100">
-            <Grid MaxWidth="720" HorizontalAlignment="Center" Margin="24,24,24,24">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
+                      Padding="16,0,16,16">
+            <StackPanel>
 
-                <!-- Header: Back chevron + title stack. -->
-                <Grid Grid.Row="0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <ui:Button Grid.Column="0"
-                               Appearance="Secondary"
-                               Icon="{ui:SymbolIcon Symbol=ArrowLeft24}"
-                               Command="{Binding GoBackCommand}"
-                               VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center">
-                        <TextBlock Text="Settings" FontSize="28" FontWeight="Bold" />
-                        <TextBlock Text="Quality changes take effect the next time you start sharing."
-                                   Opacity="0.6" FontSize="13" />
-                    </StackPanel>
-                </Grid>
-
-                <!-- Presets card. Click any preset to fill the sliders
-                     below; the dirty tracker catches the property changes
-                     and lights up the Save pill. -->
-                <ui:Card Grid.Row="1" Margin="0,24,0,0" Padding="20">
+                <ui:Card Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                     <StackPanel>
-                        <TextBlock Text="Presets" FontSize="16" FontWeight="SemiBold" />
+                        <TextBlock Text="Presets" FontSize="14" FontWeight="SemiBold" />
                         <TextBlock Text="Click a preset to fill the sliders below."
-                                   Opacity="0.5" FontSize="12" Margin="0,4,0,12" />
+                                   Opacity="0.55" FontSize="11" Margin="0,2,0,10" />
                         <ItemsControl ItemsSource="{Binding QualityPresets}">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
@@ -59,75 +64,77 @@
                                                Content="{Binding Name}"
                                                Command="{Binding DataContext.ApplyPresetCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                                CommandParameter="{Binding}"
-                                               Margin="0,0,8,8" />
+                                               Margin="0,0,6,6" />
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
                     </StackPanel>
                 </ui:Card>
 
-                <!-- Video card: resolution / fps / bitrate / keyframe / scaler. -->
-                <ui:Card Grid.Row="2" Margin="0,16,0,0" Padding="20">
+                <ui:Card Margin="0,12,0,0" Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                     <StackPanel>
-                        <TextBlock Text="Video" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,16" />
+                        <TextBlock Text="Video" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,12" />
 
-                        <StackPanel Margin="0,0,0,16">
-                            <TextBlock Text="Target resolution" Opacity="0.7" FontSize="12" />
+                        <StackPanel Margin="0,0,0,12">
+                            <TextBlock Text="Target resolution" Opacity="0.7" FontSize="11" />
                             <ComboBox ItemsSource="{Binding TargetHeightOptions}"
                                       SelectedItem="{Binding SelectedTargetHeight}"
                                       DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
                                       Margin="0,4,0,0" />
                         </StackPanel>
 
-                        <StackPanel Margin="0,0,0,16">
+                        <StackPanel Margin="0,0,0,12">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Frame rate" Opacity="0.7" FontSize="12" />
+                                <TextBlock Grid.Column="0" Text="Frame rate" Opacity="0.7" FontSize="11" />
                                 <TextBlock Grid.Column="1" Text="{Binding FrameRate, StringFormat={}{0} fps}"
-                                           Opacity="0.9" FontSize="12" FontFamily="Cascadia Mono, Consolas" />
+                                           Opacity="0.9" FontSize="11" FontFamily="Cascadia Mono, Consolas" />
                             </Grid>
                             <Slider Minimum="10" Maximum="240" TickFrequency="5" IsSnapToTickEnabled="True"
                                     Value="{Binding FrameRate}" Margin="0,4,0,0" />
                         </StackPanel>
 
-                        <StackPanel Margin="0,0,0,16">
+                        <StackPanel Margin="0,0,0,12">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Bitrate" Opacity="0.7" FontSize="12" />
+                                <TextBlock Grid.Column="0" Text="Bitrate" Opacity="0.7" FontSize="11" />
                                 <TextBlock Grid.Column="1" Text="{Binding BitrateDisplay}"
-                                           Opacity="0.9" FontSize="12" FontFamily="Cascadia Mono, Consolas" />
+                                           Opacity="0.9" FontSize="11" FontFamily="Cascadia Mono, Consolas" />
                             </Grid>
                             <Slider Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="True"
                                     Value="{Binding BitrateSliderValue}" Margin="0,4,0,0" />
                             <TextBlock Text="Logarithmic 500 Kbps – 100 Mbps."
-                                       Opacity="0.5" FontSize="11" Margin="0,4,0,0" />
+                                       Opacity="0.5" FontSize="10" Margin="0,3,0,0" />
                         </StackPanel>
 
-                        <StackPanel Margin="0,0,0,16">
+                        <StackPanel Margin="0,0,0,12">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Keyframe interval" Opacity="0.7" FontSize="12" />
+                                <TextBlock Grid.Column="0" Text="Keyframe interval" Opacity="0.7" FontSize="11" />
                                 <TextBlock Grid.Column="1" Text="{Binding KeyframeIntervalSeconds, StringFormat={}{0:0.0} s}"
-                                           Opacity="0.9" FontSize="12" FontFamily="Cascadia Mono, Consolas" />
+                                           Opacity="0.9" FontSize="11" FontFamily="Cascadia Mono, Consolas" />
                             </Grid>
                             <Slider Minimum="0.5" Maximum="10" TickFrequency="0.5" IsSnapToTickEnabled="True"
                                     Value="{Binding KeyframeIntervalSeconds}" Margin="0,4,0,0" />
                         </StackPanel>
 
-                        <StackPanel Margin="0,0,0,16">
-                            <TextBlock Text="Downscale filter" Opacity="0.7" FontSize="12" />
+                        <StackPanel Margin="0,0,0,12">
+                            <TextBlock Text="Downscale filter" Opacity="0.7" FontSize="11" />
                             <ComboBox ItemsSource="{Binding ScalerModeOptions}"
                                       SelectedItem="{Binding SelectedScalerMode}"
                                       DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
                                       Margin="0,4,0,0" />
                         </StackPanel>
 
@@ -137,47 +144,52 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Receive buffer (jitter absorption)" Opacity="0.7" FontSize="12" />
+                                <TextBlock Grid.Column="0" Text="Receive buffer" Opacity="0.7" FontSize="11" />
                                 <TextBlock Grid.Column="1" Text="{Binding ReceiveBufferFrames, StringFormat={}{0} frames}"
-                                           Opacity="0.9" FontSize="12" FontFamily="Cascadia Mono, Consolas" />
+                                           Opacity="0.9" FontSize="11" FontFamily="Cascadia Mono, Consolas" />
                             </Grid>
                             <Slider Minimum="1" Maximum="240" TickFrequency="1" IsSnapToTickEnabled="True"
                                     Value="{Binding ReceiveBufferFrames}" Margin="0,4,0,0" />
-                            <TextBlock Text="More frames = smoother under network jitter, more latency. 5 is a good default."
-                                       Opacity="0.5" FontSize="11" Margin="0,4,0,0" />
+                            <TextBlock Text="More frames = smoother under jitter, more latency."
+                                       Opacity="0.5" FontSize="10" Margin="0,3,0,0" />
                         </StackPanel>
                     </StackPanel>
                 </ui:Card>
 
-                <!-- Codec card. -->
-                <ui:Card Grid.Row="3" Margin="0,16,0,0" Padding="20">
+                <ui:Card Margin="0,12,0,0" Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                     <StackPanel>
-                        <TextBlock Text="Codec" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock Text="Codec" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" />
                         <ComboBox ItemsSource="{Binding CodecOptions}"
                                   SelectedItem="{Binding SelectedCodec}"
-                                  DisplayMemberPath="DisplayName" />
+                                  DisplayMemberPath="DisplayName"
+                                  HorizontalAlignment="Stretch" />
                     </StackPanel>
                 </ui:Card>
 
-                <ui:InfoBar Grid.Row="4"
-                            Title="Settings"
+                <ui:InfoBar Title="Settings"
                             Message="{Binding StatusMessage}"
                             Severity="Informational"
                             IsClosable="True"
                             IsOpen="{Binding StatusMessage, Converter={StaticResource NullToCollapsed}, FallbackValue=False}"
-                            Margin="0,16,0,0" />
-            </Grid>
+                            Margin="0,12,0,0" />
+            </StackPanel>
         </ScrollViewer>
 
-        <!-- Floating Save pill. Only visible when something changed —
-             the dirty bit flips on any bound property change and resets
-             on a successful save. -->
-        <ui:Button Appearance="Primary"
-                   Content="Save changes"
-                   Icon="{ui:SymbolIcon Symbol=Save24}"
-                   Command="{Binding SaveCommand}"
-                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                   Margin="0,0,32,32" Padding="20,10"
-                   Visibility="{Binding IsDirty, Converter={StaticResource BoolToVisibility}}" />
+        <!-- Docked footer: thin separator + right-aligned Save button. The
+             button is always mounted but only enabled when IsDirty is true,
+             so the user always knows where it is and save is one click away.
+             No floating pill, no reserved bottom padding. -->
+        <Border Grid.Row="2"
+                BorderThickness="0,1,0,0"
+                BorderBrush="{DynamicResource ControlElevationBorderBrush}"
+                Padding="16,12">
+            <ui:Button Appearance="Primary"
+                       Content="Save changes"
+                       Icon="{ui:SymbolIcon Symbol=Save24}"
+                       Command="{Binding SaveCommand}"
+                       IsEnabled="{Binding IsDirty}"
+                       HorizontalAlignment="Right" />
+        </Border>
     </Grid>
 </UserControl>

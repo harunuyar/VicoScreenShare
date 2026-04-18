@@ -32,7 +32,44 @@
 
         <!-- NavigationService.Current is the active view model;
              ViewModelToPageConverter maps it to a UserControl. -->
-        <ContentControl Grid.Row="1"
+        <ContentControl x:Name="PageHost" Grid.Row="1"
                         Content="{Binding Current, Converter={StaticResource VmToPage}}" />
+
+        <!-- In-window Settings panel. Lives in a Popup so its own top-level
+             HWND sits above the page's child HwndHost renderers — the video
+             keeps playing underneath, full color, no dimming. Anchored to
+             the top-right (near the Settings button that opens it) and
+             stretches vertically with a 16px margin from window chrome.
+             The transparent backdrop still catches click-outside-to-dismiss. -->
+        <Popup IsOpen="{Binding ActiveOverlay, Converter={StaticResource NonNullToBool}}"
+               StaysOpen="True"
+               AllowsTransparency="True"
+               Placement="Center"
+               PlacementTarget="{Binding ElementName=PageHost}"
+               Width="{Binding ActualWidth, ElementName=PageHost}"
+               Height="{Binding ActualHeight, ElementName=PageHost}">
+            <!-- Background alpha 1/255: invisible but hit-testable. A fully
+                 transparent Background lets clicks fall through the
+                 AllowsTransparency popup to the page underneath, so neither
+                 StaysOpen=False nor our manual handler would ever see them. -->
+            <Grid Background="#01000000" Focusable="True"
+                  KeyDown="OnOverlayKeyDown"
+                  MouseDown="OnOverlayBackdropMouseDown">
+                <Border Width="460"
+                        Margin="0,64,16,16"
+                        Background="{DynamicResource ApplicationBackgroundBrush}"
+                        CornerRadius="8"
+                        BorderThickness="1"
+                        BorderBrush="{DynamicResource ControlElevationBorderBrush}"
+                        HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                        ClipToBounds="True"
+                        MouseDown="OnOverlayCardMouseDown">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.35" />
+                    </Border.Effect>
+                    <ContentControl Content="{Binding ActiveOverlay, Converter={StaticResource VmToPage}}" />
+                </Border>
+            </Grid>
+        </Popup>
     </Grid>
 </ui:FluentWindow>

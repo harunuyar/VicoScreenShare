@@ -44,7 +44,7 @@ public sealed class SignalingClient : IAsyncDisposable
     public event Action<string>? RoomCreated;
     public event Action<RoomJoined>? RoomJoined;
     public event Action<PeerInfo>? PeerJoined;
-    public event Action<Guid, Guid?>? PeerLeft;
+    public event Action<Guid>? PeerLeft;
     public event Action<ErrorCode, string>? ServerError;
     public event Action<string?>? ConnectionLost;
     /// <summary>
@@ -272,7 +272,7 @@ public sealed class SignalingClient : IAsyncDisposable
 
             case MessageType.PeerLeft:
                 var pl = envelope.Payload.Deserialize<PeerLeft>(ProtocolJson.Options);
-                if (pl is not null) PeerLeft?.Invoke(pl.PeerId, pl.NewHostPeerId);
+                if (pl is not null) PeerLeft?.Invoke(pl.PeerId);
                 break;
 
             case MessageType.Error:

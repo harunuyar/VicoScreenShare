@@ -31,8 +31,8 @@ public class ProtocolJsonRoundtripTests
             YourPeerId: peerId,
             Peers: new[]
             {
-                new PeerInfo(peerId, "Alice", IsHost: true, IsStreaming: false),
-                new PeerInfo(Guid.NewGuid(), "Bob", IsHost: false, IsStreaming: false),
+                new PeerInfo(peerId, "Alice", IsStreaming: false),
+                new PeerInfo(Guid.NewGuid(), "Bob", IsStreaming: false),
             },
             IceServers: Array.Empty<IceServerConfig>());
 

@@ -297,7 +297,7 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                             YourPeerId: peerId,
                             Peers: new[]
                             {
-                                new ScreenSharing.Protocol.PeerInfo(peerId, "Alice", IsHost: true, IsStreaming: false),
+                                new ScreenSharing.Protocol.PeerInfo(peerId, "Alice", IsStreaming: false),
                             },
                             IceServers: Array.Empty<ScreenSharing.Protocol.Messages.IceServerConfig>());
                         await SendEnvelopeAsync(

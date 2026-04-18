@@ -34,6 +34,7 @@
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal">
@@ -73,18 +74,36 @@
                     </Border>
                 </StackPanel>
 
+                <!-- Share / Stop lives in the top bar so it's always reachable
+                     without scrolling the member strip. Primary appearance
+                     while idle (call to action), Danger while sharing so the
+                     stop control stands out. -->
                 <ui:Button Grid.Column="2"
+                           Appearance="Primary"
+                           Icon="{ui:SymbolIcon Symbol=Share24}"
+                           Content="Share screen"
+                           Command="{Binding ShareScreenCommand}"
+                           Visibility="{Binding IsSharing, Converter={StaticResource InvertBoolToVisibility}}" />
+                <ui:Button Grid.Column="2"
+                           Appearance="Danger"
+                           Icon="{ui:SymbolIcon Symbol=DismissCircle24}"
+                           Content="Stop sharing"
+                           Command="{Binding StopSharingCommand}"
+                           Visibility="{Binding IsSharing, Converter={StaticResource BoolToVisibility}}" />
+
+                <ui:Button Grid.Column="3"
                            Appearance="Secondary"
                            Icon="{ui:SymbolIcon Symbol=DataPie24}"
                            Command="{Binding ToggleStatsPanelCommand}"
-                           ToolTip="Stream stats" />
-                <ui:Button Grid.Column="3"
+                           ToolTip="Stream stats"
+                           Margin="8,0,0,0" />
+                <ui:Button Grid.Column="4"
                            Appearance="Secondary"
                            Icon="{ui:SymbolIcon Symbol=Settings24}"
                            Command="{Binding ShowSettingsCommand}"
                            ToolTip="Settings"
                            Margin="8,0,0,0" />
-                <ui:Button Grid.Column="4"
+                <ui:Button Grid.Column="5"
                            Appearance="Secondary"
                            Icon="{ui:SymbolIcon Symbol=SignOut24}"
                            Content="Leave"
@@ -205,30 +224,10 @@
                 </Border>
             </Grid>
 
-            <!-- Footer: Share button + members strip. -->
+            <!-- Footer: members strip. Share/Stop now lives in the top bar. -->
             <Grid Grid.Row="2" Margin="0,12,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-
-                <ui:Button Grid.Column="0"
-                           Appearance="Primary"
-                           Icon="{ui:SymbolIcon Symbol=Share24}"
-                           Content="Share screen"
-                           Command="{Binding ShareScreenCommand}"
-                           Visibility="{Binding IsSharing, Converter={StaticResource InvertBoolToVisibility}}" />
-                <ui:Button Grid.Column="0"
-                           Appearance="Danger"
-                           Icon="{ui:SymbolIcon Symbol=DismissCircle24}"
-                           Content="Stop sharing"
-                           Command="{Binding StopSharingCommand}"
-                           Visibility="{Binding IsSharing, Converter={StaticResource BoolToVisibility}}" />
-
-                <ScrollViewer Grid.Column="1"
-                              HorizontalScrollBarVisibility="Auto"
-                              VerticalScrollBarVisibility="Disabled"
-                              Margin="16,0,0,0">
+                <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Disabled">
                     <ItemsControl ItemsSource="{Binding Peers}">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
@@ -261,10 +260,6 @@
                                         <TextBlock Text="{Binding DisplayName}"
                                                    FontWeight="SemiBold" FontSize="13"
                                                    VerticalAlignment="Center" Margin="10,0,0,0" />
-                                        <ui:SymbolIcon Symbol="Star24" Foreground="#FFD479" FontSize="13"
-                                                       VerticalAlignment="Center" Margin="6,0,0,0"
-                                                       ToolTip="Host"
-                                                       Visibility="{Binding IsHost, Converter={StaticResource BoolToVisibility}}" />
                                         <Ellipse Width="8" Height="8" Fill="#FFD13A3A"
                                                  VerticalAlignment="Center" Margin="6,0,0,0"
                                                  ToolTip="Streaming"

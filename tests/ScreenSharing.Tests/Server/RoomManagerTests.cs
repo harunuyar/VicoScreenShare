@@ -42,7 +42,7 @@ public class RoomManagerTests
     }
 
     [Fact]
-    public void TryJoin_first_peer_becomes_host()
+    public void TryJoin_first_peer_lands_in_snapshot()
     {
         var mgr = CreateManager();
         var room = mgr.CreateRoom().Room!;
@@ -51,12 +51,11 @@ public class RoomManagerTests
         var result = mgr.TryJoin(room.Id, peer);
 
         result.Status.Should().Be(JoinRoomStatus.Success);
-        result.HostPeerId.Should().Be(peer.PeerId);
         result.SnapshotAfterJoin.Should().ContainSingle(p => p.PeerId == peer.PeerId);
     }
 
     [Fact]
-    public void Second_peer_joins_but_first_remains_host()
+    public void Second_peer_joins_and_snapshot_has_both()
     {
         var mgr = CreateManager();
         var room = mgr.CreateRoom().Room!;
@@ -67,7 +66,6 @@ public class RoomManagerTests
         var result = mgr.TryJoin(room.Id, bob);
 
         result.Status.Should().Be(JoinRoomStatus.Success);
-        result.HostPeerId.Should().Be(alice.PeerId);
         result.SnapshotAfterJoin.Should().HaveCount(2);
     }
 
@@ -87,7 +85,7 @@ public class RoomManagerTests
     }
 
     [Fact]
-    public void RemovePeer_promotes_next_oldest_when_host_leaves()
+    public void RemovePeer_keeps_room_alive_when_others_remain()
     {
         var mgr = CreateManager();
         var room = mgr.CreateRoom().Room!;
@@ -100,8 +98,7 @@ public class RoomManagerTests
         var outcome = mgr.RemovePeer(room.Id, alice.PeerId);
 
         outcome.Found.Should().BeTrue();
-        outcome.WasHost.Should().BeTrue();
-        outcome.NewHostPeerId.Should().Be(bob.PeerId);
+        outcome.PeerCountAfter.Should().Be(1);
         outcome.RoomDeleted.Should().BeFalse();
     }
 

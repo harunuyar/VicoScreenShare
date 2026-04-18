@@ -15,6 +15,7 @@
             <conv:InvertBoolConverter x:Key="InvertBool" />
             <conv:NullToCollapsedConverter x:Key="NullToCollapsed" />
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <conv:NonNullToBoolConverter x:Key="NonNullToBool" />
             <conv:InvertBoolToVisibilityConverter x:Key="InvertBoolToVisibility" />
             <conv:TileLayoutColumnsConverter x:Key="TileLayoutColumns" />
             <conv:TileLayoutRowsConverter x:Key="TileLayoutRows" />

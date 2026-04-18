@@ -41,8 +41,8 @@ public sealed record IceServerConfig(
 /// <summary>Broadcast to all existing peers when a new peer joins.</summary>
 public sealed record PeerJoined(PeerInfo Peer);
 
-/// <summary>Broadcast when a peer disconnects or leaves. If the peer was host, <see cref="NewHostPeerId"/> is set.</summary>
-public sealed record PeerLeft(Guid PeerId, Guid? NewHostPeerId);
+/// <summary>Broadcast when a peer disconnects or leaves the room.</summary>
+public sealed record PeerLeft(Guid PeerId);
 
 /// <summary>
 /// Broadcast when a peer's WebSocket drops into the server-side grace period
