@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using ScreenSharing.Protocol;
 using ScreenSharing.Server.Config;
 using ScreenSharing.Server.Rooms;
 using ScreenSharing.Server.Signaling;
@@ -35,7 +37,21 @@ public static class ServerHost
     {
         app.UseWebSockets();
 
-        app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
+        // /healthz is the client's pre-connect probe: it reports liveness plus
+        // whether the server requires a shared password, so the client's
+        // connection picker can render "Password required" before the user
+        // tries to join. Returns protocol version too, so a future client
+        // mismatch shows up here rather than only at ClientHello time.
+        app.MapGet("/healthz", (IOptionsMonitor<RoomServerOptions> options) =>
+        {
+            var pw = options.CurrentValue.AccessPassword;
+            return Results.Ok(new
+            {
+                status = "ok",
+                requiresAuth = !string.IsNullOrEmpty(pw),
+                protocolVersion = ProtocolVersion.Current,
+            });
+        });
 
         app.Map("/ws", async context =>
         {

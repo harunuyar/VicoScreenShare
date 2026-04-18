@@ -94,7 +94,12 @@ public sealed class SettingsStore
     /// </summary>
     private sealed class PersistedSettings
     {
+        /// <summary>Legacy single-server URI. Migrated into Connections on load.</summary>
         public string? ServerUri { get; set; }
+
+        /// <summary>Address book of saved server entries (name + URI + password).</summary>
+        public List<PersistedConnection>? Connections { get; set; }
+        public Guid? ActiveConnectionId { get; set; }
 
         // New schema fields.
         public int? TargetHeight { get; set; }
@@ -115,7 +120,10 @@ public sealed class SettingsStore
 
         public static PersistedSettings From(ClientSettings source) => new()
         {
-            ServerUri = source.ServerUri.ToString(),
+            // ServerUri is no longer written back — single-URI is a load-time
+            // concept only. The connection list carries all URIs going forward.
+            Connections = source.Connections.Select(PersistedConnection.From).ToList(),
+            ActiveConnectionId = source.ActiveConnectionId,
             TargetHeight = source.Video.TargetHeight,
             TargetFrameRate = source.Video.TargetFrameRate,
             TargetBitrate = source.Video.TargetBitrate,
@@ -141,11 +149,74 @@ public sealed class SettingsStore
                     ReceiveBufferFrames = ReceiveBufferFrames > 0 && ReceiveBufferFrames <= 240 ? ReceiveBufferFrames : 5,
                 },
             };
-            if (!string.IsNullOrWhiteSpace(ServerUri) && Uri.TryCreate(ServerUri, UriKind.Absolute, out var uri))
+
+            // Rehydrate the connection list if present.
+            if (Connections is { Count: > 0 })
             {
-                result.ServerUri = uri;
+                foreach (var c in Connections)
+                {
+                    if (c.TryMaterialize(out var entry))
+                    {
+                        result.Connections.Add(entry);
+                    }
+                }
+                result.ActiveConnectionId = ActiveConnectionId;
             }
+
+            // Migration path for files written by the pre-address-book client:
+            // if there are no connections but the legacy ServerUri is set,
+            // synthesize a single entry from it and mark it active.
+            if (result.Connections.Count == 0 && !string.IsNullOrWhiteSpace(ServerUri)
+                && Uri.TryCreate(ServerUri, UriKind.Absolute, out var legacyUri))
+            {
+                var legacyEntry = new ServerConnection { Uri = legacyUri };
+                result.Connections.Add(legacyEntry);
+                result.ActiveConnectionId = legacyEntry.Id;
+            }
+
+            // Heal an orphaned ActiveConnectionId — the user might have
+            // deleted the active entry via a hand edit. Fall back to the
+            // first remaining entry, or leave null if list is empty.
+            if (result.ActiveConnectionId is Guid id && !result.Connections.Any(c => c.Id == id))
+            {
+                result.ActiveConnectionId = result.Connections.FirstOrDefault()?.Id;
+            }
+            else if (result.ActiveConnectionId is null && result.Connections.Count > 0)
+            {
+                result.ActiveConnectionId = result.Connections[0].Id;
+            }
+
             return result;
+        }
+    }
+
+    private sealed class PersistedConnection
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string Uri { get; set; } = string.Empty;
+        public string? Password { get; set; }
+
+        public static PersistedConnection From(ServerConnection source) => new()
+        {
+            Id = source.Id,
+            Name = source.Name,
+            Uri = source.Uri.ToString(),
+            Password = string.IsNullOrEmpty(source.Password) ? null : source.Password,
+        };
+
+        public bool TryMaterialize(out ServerConnection entry)
+        {
+            entry = default!;
+            if (!System.Uri.TryCreate(Uri, UriKind.Absolute, out var parsed)) return false;
+            entry = new ServerConnection
+            {
+                Id = Id == Guid.Empty ? Guid.NewGuid() : Id,
+                Name = Name ?? string.Empty,
+                Uri = parsed,
+                Password = Password,
+            };
+            return true;
         }
     }
 }

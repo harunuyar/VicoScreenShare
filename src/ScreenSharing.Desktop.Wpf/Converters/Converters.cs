@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
+using System.Windows.Media;
 using ScreenSharing.Desktop.App.ViewModels;
 using ScreenSharing.Desktop.App.Views;
 
@@ -140,6 +141,65 @@ public sealed class TileLayoutRowsConverter : IValueConverter
 /// Used by <c>MainWindow.xaml</c>'s ContentControl so the shell can render
 /// whichever VM <see cref="NavigationService"/> currently points at.
 /// </summary>
+/// <summary>
+/// <see cref="ServerStatus"/> → status-dot <see cref="Brush"/>. Green for
+/// online, yellow for auth-required, red for offline, gray while checking
+/// or unknown. Picker rows bind the dot's Fill to this.
+/// </summary>
+public sealed class ServerStatusToBrushConverter : IValueConverter
+{
+    private static readonly Brush Online = new SolidColorBrush(Color.FromRgb(0x3E, 0xC9, 0x4B));
+    private static readonly Brush AuthRequired = new SolidColorBrush(Color.FromRgb(0xF5, 0xB1, 0x2C));
+    private static readonly Brush Offline = new SolidColorBrush(Color.FromRgb(0xE0, 0x4F, 0x4F));
+    private static readonly Brush Pending = new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88));
+
+    static ServerStatusToBrushConverter()
+    {
+        Online.Freeze();
+        AuthRequired.Freeze();
+        Offline.Freeze();
+        Pending.Freeze();
+    }
+
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is not ScreenSharing.Client.Services.ServerStatus status) return Pending;
+        return status switch
+        {
+            ScreenSharing.Client.Services.ServerStatus.Online => Online,
+            ScreenSharing.Client.Services.ServerStatus.AuthRequired => AuthRequired,
+            ScreenSharing.Client.Services.ServerStatus.Offline => Offline,
+            _ => Pending,
+        };
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+/// <summary>
+/// <see cref="ServerStatus"/> → a short human label: "Online",
+/// "Password required", "Offline", "Checking…", or "—" for Unknown.
+/// </summary>
+public sealed class ServerStatusToTextConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is not ScreenSharing.Client.Services.ServerStatus status) return "—";
+        return status switch
+        {
+            ScreenSharing.Client.Services.ServerStatus.Online => "Online",
+            ScreenSharing.Client.Services.ServerStatus.AuthRequired => "Password required",
+            ScreenSharing.Client.Services.ServerStatus.Offline => "Offline",
+            ScreenSharing.Client.Services.ServerStatus.Checking => "Checking…",
+            _ => "—",
+        };
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 public sealed class ViewModelToPageConverter : IValueConverter
 {
     private static readonly Dictionary<Type, Func<object, System.Windows.FrameworkElement>> Map = new()

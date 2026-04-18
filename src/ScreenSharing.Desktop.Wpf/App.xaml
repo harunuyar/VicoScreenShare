@@ -17,6 +17,8 @@
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
             <conv:NonNullToBoolConverter x:Key="NonNullToBool" />
             <conv:LayoutToVisibilityConverter x:Key="LayoutToVisibility" />
+            <conv:ServerStatusToBrushConverter x:Key="ServerStatusToBrush" />
+            <conv:ServerStatusToTextConverter x:Key="ServerStatusToText" />
             <conv:InvertBoolToVisibilityConverter x:Key="InvertBoolToVisibility" />
             <conv:TileLayoutColumnsConverter x:Key="TileLayoutColumns" />
             <conv:TileLayoutRowsConverter x:Key="TileLayoutRows" />

@@ -9,6 +9,174 @@
              mc:Ignorable="d">
 
     <Grid>
+        <!-- Top-left: compact connection picker. Clicking the chevron opens
+             a Popup with the full address book + add/edit/delete affordances.
+             The active connection's status dot + label is the resting-state
+             summary. HomeView has no HwndHosts, so a Popup with
+             AllowsTransparency sits above everything cleanly. -->
+        <ui:Card x:Name="ConnectionStrip"
+                 HorizontalAlignment="Left" VerticalAlignment="Top"
+                 Margin="24,16,0,0" Padding="10,6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Ellipse Grid.Column="0" Width="10" Height="10"
+                         VerticalAlignment="Center"
+                         Fill="{Binding ActiveConnection.Status, Converter={StaticResource ServerStatusToBrush}}" />
+                <TextBlock Grid.Column="1"
+                           Text="{Binding ActiveConnectionSummary}"
+                           Margin="10,0,10,0"
+                           FontWeight="SemiBold" FontSize="13"
+                           MaxWidth="280" TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" />
+                <ui:Button Grid.Column="2"
+                           Appearance="Transparent"
+                           Icon="{ui:SymbolIcon Symbol=ChevronDown24}"
+                           Padding="4"
+                           Command="{Binding TogglePickerCommand}" />
+            </Grid>
+        </ui:Card>
+
+        <!-- Connection picker flyout: opens below the strip. Lists every
+             saved connection with its status, plus an Add button and an
+             inline editor that takes over when IsEditingConnection=true. -->
+        <Popup IsOpen="{Binding IsPickerOpen}"
+               StaysOpen="False"
+               AllowsTransparency="True"
+               Placement="Bottom"
+               PlacementTarget="{Binding ElementName=ConnectionStrip}"
+               HorizontalOffset="0" VerticalOffset="6">
+            <Border Background="{DynamicResource ApplicationBackgroundBrush}"
+                    BorderBrush="{DynamicResource ControlElevationBorderBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="6"
+                    MinWidth="360" MaxWidth="420">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.45" />
+                </Border.Effect>
+                <Grid>
+                    <!-- List view (when not editing). -->
+                    <StackPanel Visibility="{Binding IsEditingConnection, Converter={StaticResource InvertBoolToVisibility}}">
+                        <ItemsControl ItemsSource="{Binding Connections}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:ConnectionEntryViewModel}">
+                                    <Grid Background="Transparent" Margin="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Ellipse Grid.Column="0" Width="10" Height="10"
+                                                 VerticalAlignment="Center" Margin="8,0,10,0"
+                                                 Fill="{Binding Status, Converter={StaticResource ServerStatusToBrush}}" />
+                                        <!-- Clickable body: name + uri. Sets this row active. -->
+                                        <Button Grid.Column="1" BorderThickness="0"
+                                                Background="Transparent"
+                                                HorizontalContentAlignment="Stretch"
+                                                Padding="0,6"
+                                                Command="{Binding DataContext.SetActiveCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding DisplayLabel}"
+                                                               FontWeight="SemiBold" FontSize="13" />
+                                                    <ui:SymbolIcon Symbol="Checkmark24" FontSize="12"
+                                                                   Foreground="#3EC94B" Margin="6,0,0,0"
+                                                                   VerticalAlignment="Center"
+                                                                   Visibility="{Binding IsActive, Converter={StaticResource BoolToVisibility}}" />
+                                                </StackPanel>
+                                                <TextBlock Text="{Binding UriSummary}"
+                                                           Opacity="0.55" FontSize="11"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding Status, Converter={StaticResource ServerStatusToText}}"
+                                                           Opacity="0.55" FontSize="10" />
+                                            </StackPanel>
+                                        </Button>
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                                    VerticalAlignment="Center">
+                                            <ui:Button Appearance="Transparent"
+                                                       Icon="{ui:SymbolIcon Symbol=Edit24}"
+                                                       ToolTip="Edit"
+                                                       Padding="4"
+                                                       Command="{Binding DataContext.EditConnectionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                       CommandParameter="{Binding}" />
+                                            <ui:Button Appearance="Transparent"
+                                                       Icon="{ui:SymbolIcon Symbol=Delete24}"
+                                                       ToolTip="Delete"
+                                                       Padding="4"
+                                                       Command="{Binding DataContext.DeleteConnectionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                       CommandParameter="{Binding}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <Rectangle Height="1" Fill="#20808080" Margin="6,6" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ui:Button Grid.Column="0"
+                                       Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=Add24}"
+                                       Content="Add connection"
+                                       HorizontalContentAlignment="Left"
+                                       HorizontalAlignment="Stretch"
+                                       Command="{Binding AddConnectionCommand}" />
+                            <ui:Button Grid.Column="1"
+                                       Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=ArrowSync24}"
+                                       ToolTip="Refresh status"
+                                       Padding="4"
+                                       Command="{Binding RefreshStatusesCommand}" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Inline editor (add / edit). -->
+                    <StackPanel Margin="6"
+                                Visibility="{Binding IsEditingConnection, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="Connection details"
+                                   FontWeight="SemiBold" FontSize="14"
+                                   Margin="0,0,0,8" />
+                        <TextBlock Text="Name (optional)" Opacity="0.7" FontSize="11" />
+                        <ui:TextBox Text="{Binding EditName, UpdateSourceTrigger=PropertyChanged}"
+                                    PlaceholderText="My VPS"
+                                    Margin="0,2,0,8" />
+                        <TextBlock Text="Server URL" Opacity="0.7" FontSize="11" />
+                        <ui:TextBox Text="{Binding EditUri, UpdateSourceTrigger=PropertyChanged}"
+                                    PlaceholderText="wss://example.com/ws"
+                                    Margin="0,2,0,8" />
+                        <TextBlock Text="Password (if the server requires one)" Opacity="0.7" FontSize="11" />
+                        <ui:PasswordBox Password="{Binding EditPassword, Mode=TwoWay}"
+                                        Margin="0,2,0,4" />
+                        <TextBlock Text="{Binding EditError}" Foreground="#E04F4F"
+                                   FontSize="11"
+                                   Visibility="{Binding EditError, Converter={StaticResource NullToCollapsed}}"
+                                   Margin="0,2,0,8" />
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ui:Button Grid.Column="1"
+                                       Appearance="Secondary"
+                                       Content="Cancel"
+                                       Command="{Binding CancelEditCommand}"
+                                       Margin="0,0,8,0" />
+                            <ui:Button Grid.Column="2"
+                                       Appearance="Primary"
+                                       Content="Save"
+                                       Command="{Binding SaveEditCommand}" />
+                        </Grid>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Popup>
+
         <!-- Top-right action cluster: Capture test next to Settings. Both
              docked to the corner so the hero card stays visually centered. -->
         <StackPanel Orientation="Horizontal"

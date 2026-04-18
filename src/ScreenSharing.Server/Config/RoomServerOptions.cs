@@ -21,4 +21,13 @@ public sealed class RoomServerOptions
     /// existing stream id. After this window the peer is fully removed.
     /// </summary>
     public TimeSpan PeerGracePeriod { get; set; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Optional shared password clients must present in
+    /// <c>ClientHello.AccessToken</c>. Null or empty = open server (no auth).
+    /// Set this in the operator's <c>appsettings.json</c> under the
+    /// <c>Rooms</c> section to restrict the server to friends who have
+    /// the password.
+    /// </summary>
+    public string? AccessPassword { get; set; } = null;
 }

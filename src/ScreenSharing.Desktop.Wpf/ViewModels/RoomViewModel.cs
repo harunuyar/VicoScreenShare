@@ -1015,8 +1015,13 @@ public sealed partial class RoomViewModel : ViewModelBase
                 SubscribeSignalingEvents(candidate);
 
                 var profile = _identity.LoadOrCreate();
-                var hello = new ClientHello(profile.UserId, profile.DisplayName, ProtocolVersion.Current);
-                await candidate.ConnectAsync(_settings.ServerUri, hello, ct).ConfigureAwait(false);
+                // Reconnect targets the currently-active connection's URI and
+                // password — both could have changed since the first join if
+                // the user switched connections mid-session.
+                var active = _settings.ActiveConnection
+                    ?? throw new InvalidOperationException("No active connection configured");
+                var hello = new ClientHello(profile.UserId, profile.DisplayName, ProtocolVersion.Current, AccessToken: active.Password);
+                await candidate.ConnectAsync(active.Uri, hello, ct).ConfigureAwait(false);
 
                 // Ask the server to rebind us to our existing room slot.
                 await candidate.ResumeSessionAsync(RoomId, _resumeToken, ct).ConfigureAwait(false);

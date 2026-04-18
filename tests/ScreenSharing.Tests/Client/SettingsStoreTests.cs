@@ -31,7 +31,8 @@ public class SettingsStoreTests : IDisposable
         settings.Video.TargetHeight.Should().Be(1080);
         settings.Video.TargetFrameRate.Should().Be(60);
         settings.Video.Scaler.Should().Be(ScalerMode.Bilinear);
-        settings.ServerUri.Should().Be(new Uri("ws://localhost:5000/ws"));
+        settings.Connections.Should().BeEmpty("fresh install has no saved connections yet");
+        settings.ActiveConnectionId.Should().BeNull();
         File.Exists(_settingsPath).Should().BeFalse("LoadOrCreate only persists on Save");
     }
 
@@ -41,7 +42,6 @@ public class SettingsStoreTests : IDisposable
         var store = new SettingsStore(_settingsPath);
         store.Save(new ClientSettings
         {
-            ServerUri = new Uri("ws://example.test:9000/ws"),
             Video = new VideoSettings
             {
                 TargetHeight = 1440,
@@ -54,12 +54,86 @@ public class SettingsStoreTests : IDisposable
 
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
 
-        loaded.ServerUri.Should().Be(new Uri("ws://example.test:9000/ws"));
         loaded.Video.TargetHeight.Should().Be(1440);
         loaded.Video.TargetFrameRate.Should().Be(120);
         loaded.Video.TargetBitrate.Should().Be(25_000_000);
         loaded.Video.KeyframeIntervalSeconds.Should().Be(1.0);
         loaded.Video.Scaler.Should().Be(ScalerMode.Lanczos);
+    }
+
+    [Fact]
+    public void Save_then_LoadOrCreate_roundtrips_connection_list()
+    {
+        var store = new SettingsStore(_settingsPath);
+        var vps = new ServerConnection
+        {
+            Name = "My VPS",
+            Uri = new Uri("wss://vps.example.com/ws"),
+            Password = "hunter2",
+        };
+        var local = new ServerConnection
+        {
+            Name = "",
+            Uri = new Uri("ws://localhost:5000/ws"),
+            Password = null,
+        };
+        store.Save(new ClientSettings
+        {
+            Connections = new List<ServerConnection> { local, vps },
+            ActiveConnectionId = vps.Id,
+        });
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+
+        loaded.Connections.Should().HaveCount(2);
+        loaded.ActiveConnectionId.Should().Be(vps.Id);
+        var active = loaded.ActiveConnection;
+        active.Should().NotBeNull();
+        active!.Name.Should().Be("My VPS");
+        active.Uri.Should().Be(new Uri("wss://vps.example.com/ws"));
+        active.Password.Should().Be("hunter2");
+    }
+
+    [Fact]
+    public void LoadOrCreate_migrates_legacy_ServerUri_into_Connections()
+    {
+        // Settings files written by the pre-address-book client had a single
+        // top-level serverUri field. After upgrading, that should surface as
+        // one saved entry, active.
+        File.WriteAllText(
+            _settingsPath,
+            """{ "serverUri": "wss://legacy.example.com/ws", "targetFrameRate": 60 }""");
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+
+        loaded.Connections.Should().HaveCount(1, "migration synthesizes one entry from legacy serverUri");
+        var entry = loaded.Connections[0];
+        entry.Uri.Should().Be(new Uri("wss://legacy.example.com/ws"));
+        entry.Password.Should().BeNull();
+        loaded.ActiveConnectionId.Should().Be(entry.Id);
+    }
+
+    [Fact]
+    public void LoadOrCreate_heals_orphaned_ActiveConnectionId()
+    {
+        // ActiveConnectionId points at an entry that isn't in Connections —
+        // hand-edited file scenario. Fall back to first available entry.
+        var rogueActive = Guid.NewGuid();
+        var real = Guid.NewGuid();
+        File.WriteAllText(
+            _settingsPath,
+            $$"""
+            {
+              "connections": [
+                { "id": "{{real}}", "name": "Real", "uri": "ws://a:1/ws" }
+              ],
+              "activeConnectionId": "{{rogueActive}}"
+            }
+            """);
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+
+        loaded.ActiveConnectionId.Should().Be(real, "orphan heals to the first remaining entry");
     }
 
     [Fact]

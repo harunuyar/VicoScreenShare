@@ -316,6 +316,28 @@ public sealed class WsSession
             return;
         }
 
+        // Shared-password auth. Null/empty AccessPassword on the server = open;
+        // otherwise the client's AccessToken must match byte-for-byte via a
+        // constant-time compare (defends against timing side channels even
+        // though this is a single shared secret, not a per-user credential).
+        var expectedPassword = _options.CurrentValue.AccessPassword;
+        if (!string.IsNullOrEmpty(expectedPassword))
+        {
+            var expectedBytes = System.Text.Encoding.UTF8.GetBytes(expectedPassword);
+            var actualBytes = System.Text.Encoding.UTF8.GetBytes(hello.AccessToken ?? string.Empty);
+            var matches = actualBytes.Length == expectedBytes.Length
+                && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+            if (!matches)
+            {
+                // Send direct — the channel-based path races the close below,
+                // and the client must actually see the Unauthorized envelope
+                // to render a useful error message.
+                await SendErrorDirectAsync(ErrorCode.Unauthorized, "Invalid access token", envelope.CorrelationId).ConfigureAwait(false);
+                await CloseWithPolicyViolationAsync("unauthorized").ConfigureAwait(false);
+                return;
+            }
+        }
+
         if (string.IsNullOrWhiteSpace(hello.DisplayName))
         {
             await SendErrorAsync(ErrorCode.BadRequest, "DisplayName must be non-empty", envelope.CorrelationId).ConfigureAwait(false);
@@ -925,6 +947,26 @@ public sealed class WsSession
         }
         catch (OperationCanceledException) { }
         catch (ChannelClosedException) { }
+    }
+
+    /// <summary>
+    /// Same payload as <see cref="SendErrorAsync"/> but bypasses the outbound
+    /// channel to write straight to the socket. Used for terminal errors
+    /// (e.g. Unauthorized) that must land on the wire BEFORE the follow-up
+    /// CloseAsync — the channel-based path races the close and the client
+    /// sometimes sees a bare close frame with no error envelope.
+    /// </summary>
+    private async Task SendErrorDirectAsync(ErrorCode code, string message, string? correlationId)
+    {
+        try
+        {
+            if (_socket.State != WebSocketState.Open) return;
+            var json = WsMessageCodec.EncodeEnvelope(MessageType.Error, new Error(code, message), correlationId);
+            var bytes = Encoding.UTF8.GetBytes(json);
+            await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (WebSocketException) { }
+        catch (OperationCanceledException) { }
     }
 
     private async Task RunWriterAsync(CancellationToken ct)
