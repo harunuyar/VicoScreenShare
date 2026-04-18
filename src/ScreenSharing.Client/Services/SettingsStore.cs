@@ -9,10 +9,11 @@ namespace ScreenSharing.Client.Services;
 
 /// <summary>
 /// Persists <see cref="ClientSettings"/> to a JSON file under
-/// <c>%AppData%/ScreenSharing/settings.json</c>. Mirrors <see cref="IdentityStore"/>:
+/// <c>%AppData%/VicoMeet/settings.json</c>. Mirrors <see cref="IdentityStore"/>:
 /// atomic writes via temp-file + <see cref="File.Move(string,string,bool)"/>, and
 /// <see cref="LoadOrCreate"/> returns defaults when the file is missing or
-/// corrupted so the app always starts cleanly.
+/// corrupted so the app always starts cleanly. On first launch after the
+/// rename, inherits any pre-existing <c>%AppData%/ScreenSharing/settings.json</c>.
 /// </summary>
 public sealed class SettingsStore
 {
@@ -38,7 +39,17 @@ public sealed class SettingsStore
     public static string DefaultPath()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        return Path.Combine(appData, "ScreenSharing", "settings.json");
+        var newPath = Path.Combine(appData, "VicoMeet", "settings.json");
+        if (!File.Exists(newPath))
+        {
+            var legacy = Path.Combine(appData, "ScreenSharing", "settings.json");
+            if (File.Exists(legacy))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
+                try { File.Copy(legacy, newPath); } catch { }
+            }
+        }
+        return newPath;
     }
 
     public ClientSettings LoadOrCreate()

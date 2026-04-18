@@ -7,8 +7,10 @@ namespace ScreenSharing.Client.Services;
 
 /// <summary>
 /// Persists the local profile (stable user id + display name) to
-/// <c>%AppData%/ScreenSharing/profile.json</c>. Reads return a cached copy; writes
+/// <c>%AppData%/VicoMeet/profile.json</c>. Reads return a cached copy; writes
 /// go through a temp file so a crash mid-write never corrupts the stored profile.
+/// On first launch after the rename, inherits any pre-existing
+/// <c>%AppData%/ScreenSharing/profile.json</c> so stable user id survives.
 /// </summary>
 public sealed class IdentityStore
 {
@@ -35,7 +37,17 @@ public sealed class IdentityStore
     public static string DefaultProfilePath()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        return Path.Combine(appData, "ScreenSharing", "profile.json");
+        var newPath = Path.Combine(appData, "VicoMeet", "profile.json");
+        if (!File.Exists(newPath))
+        {
+            var legacy = Path.Combine(appData, "ScreenSharing", "profile.json");
+            if (File.Exists(legacy))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
+                try { File.Copy(legacy, newPath); } catch { }
+            }
+        }
+        return newPath;
     }
 
     /// <summary>

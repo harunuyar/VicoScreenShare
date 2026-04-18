@@ -195,7 +195,7 @@
         <ui:Card MaxWidth="440" Padding="28"
                  HorizontalAlignment="Center" VerticalAlignment="Center">
             <StackPanel>
-                <TextBlock Text="ScreenSharing"
+                <TextBlock Text="VicoMeet"
                            FontSize="28" FontWeight="Bold"
                            HorizontalAlignment="Center" />
                 <TextBlock Text="Self-hosted screen share"
