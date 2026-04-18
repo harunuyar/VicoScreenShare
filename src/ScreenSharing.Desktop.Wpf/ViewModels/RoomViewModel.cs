@@ -124,6 +124,32 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             OnPropertyChanged(nameof(HasAnyTile));
             OnPropertyChanged(nameof(TileCount));
+            OnPropertyChanged(nameof(HasFocusStripItems));
+            OnPropertyChanged(nameof(FocusedTile));
+            OnPropertyChanged(nameof(FullscreenTile));
+
+            // Repair Focus layout if the focused publisher just left. Prefer
+            // another tile over dropping back to Grid — the user likely wants
+            // to keep "big one + strip" layout if any tiles remain.
+            if (CurrentLayout == RoomLayout.Focus && FocusedTile is null)
+            {
+                var next = Tiles.FirstOrDefault();
+                if (next is not null)
+                {
+                    FocusedPublisherPeerId = next.PublisherPeerId;
+                }
+                else
+                {
+                    CurrentLayout = RoomLayout.Grid;
+                    FocusedPublisherPeerId = null;
+                }
+            }
+
+            // Drop out of fullscreen if that publisher's tile is gone.
+            if (FullscreenPublisherPeerId is not null && FullscreenTile is null)
+            {
+                FullscreenPublisherPeerId = null;
+            }
         };
 
         SubscribeSignalingEvents(_signaling);
@@ -147,12 +173,192 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (vm is not null) vm.IsStreaming = streaming;
     }
 
+    /// <summary>
+    /// Stop Watching: unsubscribe from a publisher. Server tears down the
+    /// subscriber PC, the tile unmounts, and the peer's member-strip chip
+    /// shows an Eye (Watch) button as long as they're still streaming.
+    /// </summary>
+    [RelayCommand]
+    private async Task StopWatchingAsync(Guid publisherPeerId)
+    {
+        var peer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
+        if (peer is not null) peer.IsWatching = false;
+
+        try
+        {
+            if (_signaling.IsConnected)
+            {
+                await _signaling.SendUnsubscribeAsync(publisherPeerId).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[room] SendUnsubscribeAsync threw: {ex.Message}");
+        }
+
+        await DisposeTileAsync(publisherPeerId).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Watch: resume a previously-dropped subscription. Server spins up a new
+    /// SfuSubscriberPeer and drives an SDP offer — the existing
+    /// <c>OnSdpOfferReceived</c> flow mounts a fresh tile.
+    /// </summary>
+    [RelayCommand]
+    private async Task WatchAsync(Guid publisherPeerId)
+    {
+        var peer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
+        if (peer is not null) peer.IsWatching = true;
+
+        try
+        {
+            if (_signaling.IsConnected)
+            {
+                await _signaling.SendSubscribeAsync(publisherPeerId).ConfigureAwait(true);
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[room] SendSubscribeAsync threw: {ex.Message}");
+        }
+    }
+
     public ObservableCollection<PeerViewModel> Peers { get; }
 
     /// <summary>True while at least one publisher tile is mounted.</summary>
     public bool HasAnyTile => Tiles.Count > 0;
 
+    /// <summary>
+    /// Current layout — Grid (auto-uniform) or Focus (one big tile + bottom strip).
+    /// Toggled via the top-bar Layout button; also switched automatically to
+    /// Focus when the user clicks a tile in Grid mode.
+    /// </summary>
+    [ObservableProperty] private RoomLayout _currentLayout = RoomLayout.Grid;
+
+    /// <summary>Publisher currently highlighted in Focus layout. Null when Grid.</summary>
+    [ObservableProperty] private Guid? _focusedPublisherPeerId;
+
+    /// <summary>
+    /// Publisher currently filling the entire room area. Null when no tile
+    /// is fullscreen. Orthogonal to <see cref="CurrentLayout"/> — we can be
+    /// in Grid or Focus layout when fullscreen exits.
+    /// </summary>
+    [ObservableProperty] private Guid? _fullscreenPublisherPeerId;
+
+    /// <summary>The tile matching <see cref="FocusedPublisherPeerId"/> or null.</summary>
+    public PublisherTileViewModel? FocusedTile =>
+        FocusedPublisherPeerId is Guid id
+            ? Tiles.FirstOrDefault(t => t.PublisherPeerId == id)
+            : null;
+
+    /// <summary>The tile currently fullscreen, or null.</summary>
+    public PublisherTileViewModel? FullscreenTile =>
+        FullscreenPublisherPeerId is Guid id
+            ? Tiles.FirstOrDefault(t => t.PublisherPeerId == id)
+            : null;
+
+    /// <summary>True while a tile is fullscreen — top bar and member strip collapse.</summary>
+    public bool IsFullscreen => FullscreenPublisherPeerId is not null;
+
+    partial void OnFullscreenPublisherPeerIdChanged(Guid? value)
+    {
+        OnPropertyChanged(nameof(FullscreenTile));
+        OnPropertyChanged(nameof(IsFullscreen));
+    }
+
+    /// <summary>
+    /// Self-preview collapsed to a small LIVE badge so it doesn't block
+    /// publisher tiles while still giving the user confirmation they're live.
+    /// Toggled by the chevron on the preview itself.
+    /// </summary>
+    [ObservableProperty] private bool _isSelfPreviewCollapsed;
+
+    [RelayCommand]
+    private void ToggleSelfPreviewCollapsed() => IsSelfPreviewCollapsed = !IsSelfPreviewCollapsed;
+
+    [RelayCommand]
+    private void ToggleFullscreen(Guid publisherPeerId)
+    {
+        if (FullscreenPublisherPeerId == publisherPeerId)
+        {
+            FullscreenPublisherPeerId = null;
+            return;
+        }
+        FullscreenPublisherPeerId = publisherPeerId;
+    }
+
+    /// <summary>
+    /// Escape-key handler. Unwinds overlay state one layer at a time:
+    /// fullscreen first, then Focus → Grid. No-op when already at Grid.
+    /// </summary>
+    [RelayCommand]
+    private void ExitOverlayMode()
+    {
+        if (FullscreenPublisherPeerId is not null)
+        {
+            FullscreenPublisherPeerId = null;
+            return;
+        }
+        if (CurrentLayout == RoomLayout.Focus)
+        {
+            CurrentLayout = RoomLayout.Grid;
+            FocusedPublisherPeerId = null;
+        }
+    }
+
+    partial void OnFocusedPublisherPeerIdChanged(Guid? value)
+    {
+        OnPropertyChanged(nameof(FocusedTile));
+        foreach (var tile in Tiles)
+        {
+            tile.IsFocused = tile.PublisherPeerId == value;
+        }
+    }
+
+    partial void OnCurrentLayoutChanged(RoomLayout value) => OnPropertyChanged(nameof(FocusedTile));
+
+    [RelayCommand]
+    private void ToggleLayout()
+    {
+        if (CurrentLayout == RoomLayout.Grid)
+        {
+            // Pick a default focus target — the first tile in the collection.
+            var first = Tiles.FirstOrDefault();
+            if (first is null) return; // nothing to focus, stay in Grid
+            FocusedPublisherPeerId = first.PublisherPeerId;
+            CurrentLayout = RoomLayout.Focus;
+        }
+        else
+        {
+            CurrentLayout = RoomLayout.Grid;
+            FocusedPublisherPeerId = null;
+        }
+    }
+
+    [RelayCommand]
+    private void FocusTile(Guid publisherPeerId)
+    {
+        // Toggle off if clicking the already-focused tile while in Focus layout.
+        if (CurrentLayout == RoomLayout.Focus && FocusedPublisherPeerId == publisherPeerId)
+        {
+            CurrentLayout = RoomLayout.Grid;
+            FocusedPublisherPeerId = null;
+            return;
+        }
+        FocusedPublisherPeerId = publisherPeerId;
+        CurrentLayout = RoomLayout.Focus;
+    }
+
     public int TileCount => Tiles.Count;
+
+    /// <summary>
+    /// True when the Focus-layout bottom strip has at least one tile to
+    /// show (i.e. there are publishers besides the focused one). Lets the
+    /// strip collapse to 0 px when Tiles.Count ≤ 1 so a single-tile Focus
+    /// view is pixel-identical to Grid view — no confusing 4 px shift
+    /// when the user clicks the one tile to toggle layouts.
+    /// </summary>
+    public bool HasFocusStripItems => Tiles.Count > 1;
 
     /// <summary>
     /// Local capture exposed to a separate, smaller renderer for the
@@ -322,6 +528,10 @@ public sealed partial class RoomViewModel : ViewModelBase
             {
                 Tiles.Remove(toDispose);
             }
+            // Seed IsFocused before the tile enters the visual tree so the
+            // Focus-layout strip trigger doesn't flash the tile for a frame
+            // before collapsing it.
+            tile.IsFocused = FocusedPublisherPeerId == publisherPeerId;
             Tiles.Add(tile);
             // If the media status was "Waiting for a streamer…" etc, clear it so
             // the grid takes over the empty state region.
@@ -529,6 +739,13 @@ public sealed partial class RoomViewModel : ViewModelBase
         _dispatcher.BeginInvoke(new Action(() =>
         {
             SetPeerStreaming(message.PeerId, true);
+
+            // Auto-watch on every fresh StreamStarted: opt-outs don't persist
+            // across stream sessions, so even if the user previously Stop
+            // Watching'd this peer, a new share brings them back.
+            var peer = Peers.FirstOrDefault(p => p.PeerId == message.PeerId);
+            if (peer is not null) peer.IsWatching = true;
+
             if (message.PeerId == YourPeerId) return;
             var fps = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
             _announcedFrameRates[message.PeerId] = fps;
@@ -1013,4 +1230,16 @@ public sealed partial class RoomViewModel : ViewModelBase
         var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider);
         _navigation.NavigateTo(home);
     }
+}
+
+/// <summary>
+/// Room tile layout. <see cref="Grid"/> packs every tile into a UniformGrid
+/// sized by <c>TileLayoutConverter</c>. <see cref="Focus"/> promotes one
+/// publisher to the full area and stacks the rest into a bottom strip —
+/// useful when one stream matters more than the others.
+/// </summary>
+public enum RoomLayout
+{
+    Grid,
+    Focus,
 }

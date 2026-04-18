@@ -282,6 +282,14 @@ public sealed class WsSession
                 await HandleStreamEndedAsync(envelope).ConfigureAwait(false);
                 break;
 
+            case MessageType.Subscribe:
+                await HandleSubscribeAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.Unsubscribe:
+                await HandleUnsubscribeAsync(envelope).ConfigureAwait(false);
+                break;
+
             default:
                 _logger.LogInformation("Session {PeerId} sent unknown message type {Type}", PeerId, envelope.Type);
                 await SendErrorAsync(ErrorCode.BadRequest, $"Unknown message type '{envelope.Type}'", envelope.CorrelationId).ConfigureAwait(false);
@@ -735,6 +743,45 @@ public sealed class WsSession
         {
             await sfu.OnPublisherStoppedAsync(PeerId).ConfigureAwait(false);
         }
+    }
+
+    private async Task HandleSubscribeAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null)
+        {
+            await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room first", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        if (sfu is null) return;
+
+        var request = WsMessageCodec.DecodePayload<Subscribe>(envelope.Payload);
+
+        // Ignore silently if the publisher isn't actively streaming — the
+        // client may have raced a StreamEnded and it's easier to noop than
+        // to bounce an error.
+        if (!sfu.IsPublishing(request.PublisherPeerId)) return;
+
+        AttachSfuSessionHooks(sfu);
+        await sfu.SubscribeAsync(PeerId, request.PublisherPeerId).ConfigureAwait(false);
+    }
+
+    private async Task HandleUnsubscribeAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is null)
+        {
+            await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room first", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        if (sfu is null) return;
+
+        var request = WsMessageCodec.DecodePayload<Unsubscribe>(envelope.Payload);
+        await sfu.UnsubscribeAsync(PeerId, request.PublisherPeerId).ConfigureAwait(false);
     }
 
     /// <summary>

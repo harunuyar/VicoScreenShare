@@ -16,6 +16,8 @@ public static class MessageType
     public const string StreamStarted = "stream_started";
     public const string StreamEnded = "stream_ended";
     public const string RequestKeyframe = "request_keyframe";
+    public const string Subscribe = "subscribe";
+    public const string Unsubscribe = "unsubscribe";
     public const string Ping = "ping";
     public const string Pong = "pong";
     public const string Error = "error";

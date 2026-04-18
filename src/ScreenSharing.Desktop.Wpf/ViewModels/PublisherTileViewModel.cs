@@ -68,6 +68,13 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
     [ObservableProperty] private int _nominalFrameRate;
 
     /// <summary>
+    /// True when this tile is the <see cref="RoomViewModel.FocusedPublisherPeerId"/>.
+    /// The Room view uses this to hide the tile from the Focus-layout bottom
+    /// strip (where it would duplicate the main focused slot).
+    /// </summary>
+    [ObservableProperty] private bool _isFocused;
+
+    /// <summary>
     /// True once at least one frame has decoded. Before this, the tile shows a
     /// "Connecting…" placeholder instead of a black rectangle.
     /// </summary>

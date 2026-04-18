@@ -52,3 +52,20 @@ public sealed record StreamEnded(Guid PeerId, string StreamId);
 /// forwards a PLI to the publisher, who will emit an IDR frame.
 /// </summary>
 public sealed record RequestKeyframe(string StreamId);
+
+/// <summary>
+/// Client → server. Opt this viewer into receiving a specific publisher's stream.
+/// Normally viewers are auto-subscribed on StreamStarted; this message covers the
+/// resume-after-StopWatching case, where the user previously called
+/// <see cref="Unsubscribe"/> and now wants the stream back. Server responds by
+/// creating a new <c>SfuSubscriberPeer</c> and driving a fresh SDP offer.
+/// </summary>
+public sealed record Subscribe(Guid PublisherPeerId);
+
+/// <summary>
+/// Client → server. Stop receiving this publisher's stream. Server tears down
+/// the matching <c>SfuSubscriberPeer</c> so the viewer stops paying for decode
+/// bandwidth. Opt-out is per-stream-session — when the publisher stops and
+/// starts again, every viewer auto-subscribes again.
+/// </summary>
+public sealed record Unsubscribe(Guid PublisherPeerId);

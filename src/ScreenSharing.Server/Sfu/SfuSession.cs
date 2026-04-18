@@ -134,6 +134,37 @@ public sealed class SfuSession : IAsyncDisposable
         }
     }
 
+    /// <summary>Is the given peer currently publishing a stream?</summary>
+    public bool IsPublishing(Guid peerId) => _publishers.ContainsKey(peerId);
+
+    /// <summary>
+    /// Client-driven subscribe: viewer wants to (re-)receive this publisher's
+    /// stream. No-op if the publisher isn't currently streaming or if a
+    /// subscription already exists. Fires the usual SubscriberReady event so
+    /// the WsSession drives the SDP offer.
+    /// </summary>
+    public async Task SubscribeAsync(Guid viewerPeerId, Guid publisherPeerId)
+    {
+        if (viewerPeerId == publisherPeerId) return;
+        if (!_publishers.ContainsKey(publisherPeerId)) return;
+        await EnsureSubscriberAsync(viewerPeerId, publisherPeerId).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Client-driven unsubscribe: viewer no longer wants this publisher's
+    /// stream. Disposes the matching <see cref="SfuSubscriberPeer"/>; the
+    /// SFU's own OnConnectionStateChange on the viewer-side PC will clean
+    /// the client's tile up on its next teardown event.
+    /// </summary>
+    public async Task UnsubscribeAsync(Guid viewerPeerId, Guid publisherPeerId)
+    {
+        var key = (viewerPeerId, publisherPeerId);
+        if (_subscribers.TryRemove(key, out var sub))
+        {
+            await sub.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
     private async Task EnsureSubscriberAsync(Guid viewerPeerId, Guid publisherPeerId)
     {
         var key = (viewerPeerId, publisherPeerId);

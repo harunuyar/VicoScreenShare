@@ -1,6 +1,8 @@
 using System;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Threading;
 using ScreenSharing.Desktop.App.Rendering;
 using ScreenSharing.Desktop.App.ViewModels;
@@ -17,11 +19,42 @@ public partial class RoomView : UserControl
     private long _selfPrevPainted, _selfPrevInput;
     private DateTime _prevTickUtc = DateTime.MinValue;
 
+
     public RoomView()
     {
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        // PreviewKeyDown at the UserControl level so fullscreen/Focus shortcuts
+        // fire before any child control can eat the key. Settings overlay lives
+        // in its own popup HWND, so its Escape handler doesn't compete.
+        PreviewKeyDown += OnPreviewKeyDown;
+        Focusable = true;
+    }
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (DataContext is not RoomViewModel vm) return;
+
+        switch (e.Key)
+        {
+            case Key.Escape:
+                if (vm.ExitOverlayModeCommand.CanExecute(null))
+                {
+                    vm.ExitOverlayModeCommand.Execute(null);
+                    e.Handled = true;
+                }
+                break;
+            case Key.F11:
+                // F11 toggles fullscreen on the focused tile (or first tile).
+                var target = vm.FocusedPublisherPeerId ?? vm.Tiles.FirstOrDefault()?.PublisherPeerId;
+                if (target is Guid id && vm.ToggleFullscreenCommand.CanExecute(id))
+                {
+                    vm.ToggleFullscreenCommand.Execute(id);
+                    e.Handled = true;
+                }
+                break;
+        }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -106,4 +139,5 @@ public partial class RoomView : UserControl
             // Clipboard access races with other apps sometimes. Not fatal.
         }
     }
+
 }

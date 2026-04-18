@@ -41,6 +41,25 @@ public sealed class NonNullToBoolConverter : IValueConverter
         => throw new NotSupportedException();
 }
 
+/// <summary>
+/// <c>Visible</c> when the bound <see cref="ViewModels.RoomLayout"/> value
+/// matches the <c>ConverterParameter</c> (the enum member name as a string),
+/// <c>Collapsed</c> otherwise. Lets the Room view mount two layout templates
+/// side by side and toggle between them without a visual-tree churn.
+/// </summary>
+public sealed class LayoutToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is null || parameter is null) return Visibility.Collapsed;
+        return string.Equals(value.ToString(), parameter.ToString(), StringComparison.Ordinal)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 public sealed class BoolToVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)

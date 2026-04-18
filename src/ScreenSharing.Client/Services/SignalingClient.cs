@@ -158,6 +158,22 @@ public sealed class SignalingClient : IAsyncDisposable
     public Task SendStreamEndedAsync(string streamId, CancellationToken ct = default) =>
         SendAsync(MessageType.StreamEnded, new StreamEnded(Guid.Empty, streamId), ct);
 
+    /// <summary>
+    /// Opt this viewer back into a publisher's stream after a prior
+    /// <see cref="SendUnsubscribeAsync"/>. Server responds by spinning up
+    /// a fresh SubscriberPeer and driving an SDP offer for it.
+    /// </summary>
+    public Task SendSubscribeAsync(Guid publisherPeerId, CancellationToken ct = default) =>
+        SendAsync(MessageType.Subscribe, new Subscribe(publisherPeerId), ct);
+
+    /// <summary>
+    /// Stop watching a publisher. Server tears down the subscriber PC so the
+    /// viewer stops paying for decode bandwidth; the client's tile will
+    /// unmount on the PC's close event.
+    /// </summary>
+    public Task SendUnsubscribeAsync(Guid publisherPeerId, CancellationToken ct = default) =>
+        SendAsync(MessageType.Unsubscribe, new Unsubscribe(publisherPeerId), ct);
+
     public async Task SendAsync<T>(string type, T payload, CancellationToken ct = default)
     {
         if (Volatile.Read(ref _state) != StateConnected)

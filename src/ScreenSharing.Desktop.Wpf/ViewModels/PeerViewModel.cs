@@ -35,6 +35,16 @@ public sealed partial class PeerViewModel : ObservableObject
     private bool _isConnected = true;
 
     /// <summary>
+    /// True while this viewer is subscribed to the peer's stream. Flips to
+    /// false when the local user calls Stop Watching; back to true on Watch
+    /// or on a fresh StreamStarted (new session = auto-subscribe). When
+    /// <see cref="IsStreaming"/> is true AND this is false, the member-strip
+    /// chip shows a "Watch" eye button so the user can resume.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isWatching = true;
+
+    /// <summary>
     /// First 1-2 characters of the display name, uppercased, for the
     /// circular avatar on the chip. Recomputed when DisplayName changes.
     /// </summary>

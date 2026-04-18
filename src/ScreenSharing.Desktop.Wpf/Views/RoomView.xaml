@@ -9,11 +9,124 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d">
 
+    <UserControl.Resources>
+        <!-- Tile template shared between Grid mode, Focus mode's main slot,
+             and Focus mode's bottom strip. Single source of truth for the
+             renderer + paused overlay + chrome bar + click-to-focus.
+             Structural note: the D3D renderer is an HwndHost, which means
+             WPF content cannot render above it and its HWND consumes any
+             mouse event in its area. Controls live in a dedicated chrome
+             strip (Row 0) above the renderer (Row 1) so they're hit-testable.
+             Name + hover-style buttons live there, always visible so users
+             never have to hunt. -->
+        <DataTemplate x:Key="PublisherTileTemplate" DataType="{x:Type vm:PublisherTileViewModel}">
+            <Border x:Name="TileRoot"
+                    Margin="3"
+                    CornerRadius="10"
+                    BorderThickness="1"
+                    BorderBrush="#33FFFFFF"
+                    ClipToBounds="True"
+                    Background="#FF0A0A0A"
+                    Cursor="Hand"
+                    Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=UserControl}}">
+                <Grid>
+                    <!-- D3D renderer fills the entire tile. CornerRadius shapes the
+                         HWND via SetWindowRgn; CutoutFor registrations below poke
+                         rectangular holes in that shape where WPF overlays render.
+                         LeftClick/LeftDoubleClickCommand bridge WM_LBUTTON* out of
+                         the child HWND so clicks on the video reach the VM — WPF
+                         MouseBindings on the Border above can't fire because the
+                         HwndHost consumes mouse input in its area. -->
+                    <rendering:D3DImageVideoRenderer x:Name="TileRenderer"
+                                                     Receiver="{Binding Receiver}"
+                                                     NominalFrameRate="{Binding NominalFrameRate}"
+                                                     CornerRadius="10"
+                                                     LeftClickCommand="{Binding Tag.FocusTileCommand, ElementName=TileRoot}"
+                                                     LeftClickCommandParameter="{Binding PublisherPeerId}"
+                                                     LeftDoubleClickCommand="{Binding Tag.ToggleFullscreenCommand, ElementName=TileRoot}"
+                                                     LeftDoubleClickCommandParameter="{Binding PublisherPeerId}"
+                                                     Visibility="{Binding HasFirstFrame, Converter={StaticResource BoolToVisibility}}" />
+
+                    <TextBlock Text="Connecting…"
+                               Foreground="#AAFFFFFF" FontSize="13"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Visibility="{Binding HasFirstFrame, Converter={StaticResource InvertBoolToVisibility}}" />
+
+                    <!-- Paused overlay — stalled stream, last frame frozen. -->
+                    <Grid Background="#80000000"
+                          Visibility="{Binding IsPaused, Converter={StaticResource BoolToVisibility}}"
+                          IsHitTestVisible="False">
+                        <Border HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Background="#CC1E1E1E" CornerRadius="14" Padding="16,8">
+                            <StackPanel Orientation="Horizontal">
+                                <ui:SymbolIcon Symbol="Pause24" FontSize="16" Foreground="White"
+                                               VerticalAlignment="Center" />
+                                <TextBlock Text="Paused" Foreground="White"
+                                           FontWeight="SemiBold" FontSize="13"
+                                           VerticalAlignment="Center" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <!-- Display name: tight rounded pill, bottom-left. HwndHost can't
+                         composite over live video pixels, so the pill's cutout
+                         reveals the tile's dark fill — styled intentionally with
+                         subtle rounding + modest padding so the background reads
+                         as a label chip, not a box around bare text. -->
+                    <Border HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                            Margin="10"
+                            Background="#B3000000"
+                            CornerRadius="4"
+                            Padding="8,3"
+                            IsHitTestVisible="False"
+                            rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
+                        <TextBlock Text="{Binding DisplayName}"
+                                   Foreground="White"
+                                   FontSize="12" FontWeight="SemiBold"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxWidth="280" />
+                    </Border>
+
+                    <!-- Controls pill: top-right. Same cutout pattern so buttons
+                         are rendered by WPF (and actually receive clicks). -->
+                    <Border HorizontalAlignment="Right" VerticalAlignment="Top"
+                            Margin="8"
+                            Background="#B3000000"
+                            CornerRadius="20"
+                            Padding="2"
+                            rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:Button Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=FullScreenMaximize24}"
+                                       Foreground="White"
+                                       ToolTip="Fullscreen (double-click)"
+                                       Padding="6"
+                                       Command="{Binding Tag.ToggleFullscreenCommand, ElementName=TileRoot}"
+                                       CommandParameter="{Binding PublisherPeerId}" />
+                            <ui:Button Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=EyeOff24}"
+                                       Foreground="White"
+                                       ToolTip="Stop watching"
+                                       Padding="6"
+                                       Command="{Binding Tag.StopWatchingCommand, ElementName=TileRoot}"
+                                       CommandParameter="{Binding PublisherPeerId}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <!-- Root Grid swaps between normal content and fullscreen overlay on
+         IsFullscreen. Two sibling children in the same Grid: normal visible
+         when !IsFullscreen, overlay visible when IsFullscreen. -->
+    <Grid>
+
     <!-- Outer 2-column layout. Column 0 holds the room (top bar +
          video area + footer); column 1 holds the stats sidebar which
          only takes space when IsStatsPanelOpen. The room shrinks
          automatically when the panel opens — no overlap. -->
-    <Grid>
+    <Grid Visibility="{Binding IsFullscreen, Converter={StaticResource InvertBoolToVisibility}}">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
@@ -31,6 +144,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
@@ -91,19 +205,28 @@
                            Command="{Binding StopSharingCommand}"
                            Visibility="{Binding IsSharing, Converter={StaticResource BoolToVisibility}}" />
 
+                <!-- Layout toggle: Grid ↔ Focus (speaker view). Disabled when
+                     there are no tiles — nothing to focus on. -->
                 <ui:Button Grid.Column="3"
+                           Appearance="Secondary"
+                           Icon="{ui:SymbolIcon Symbol=Apps24}"
+                           Command="{Binding ToggleLayoutCommand}"
+                           ToolTip="Toggle layout (Grid / Focus)"
+                           IsEnabled="{Binding HasAnyTile}"
+                           Margin="8,0,0,0" />
+                <ui:Button Grid.Column="4"
                            Appearance="Secondary"
                            Icon="{ui:SymbolIcon Symbol=DataPie24}"
                            Command="{Binding ToggleStatsPanelCommand}"
                            ToolTip="Stream stats"
                            Margin="8,0,0,0" />
-                <ui:Button Grid.Column="4"
+                <ui:Button Grid.Column="5"
                            Appearance="Secondary"
                            Icon="{ui:SymbolIcon Symbol=Settings24}"
                            Command="{Binding ShowSettingsCommand}"
                            ToolTip="Settings"
                            Margin="8,0,0,0" />
-                <ui:Button Grid.Column="5"
+                <ui:Button Grid.Column="6"
                            Appearance="Secondary"
                            Icon="{ui:SymbolIcon Symbol=SignOut24}"
                            Content="Leave"
@@ -111,16 +234,12 @@
                            Margin="8,0,0,0" />
             </Grid>
 
-            <!-- Video area: row 0 stretches (publisher tile grid),
-                 row 1 is Auto (self preview, only when sharing). -->
+            <!-- Video area. The self-preview used to live in its own row under
+                 the tile grid, eating real estate even when the user was
+                 happy with 320x180 in a corner. Now it's a floating child
+                 of the tile area (below), draggable + collapsible. -->
             <Grid Grid.Row="1">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="*" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-
-                <Border Grid.Row="0"
-                        CornerRadius="8" ClipToBounds="True"
+                <Border CornerRadius="8" ClipToBounds="True"
                         Background="Black">
                     <Grid>
                         <!-- Empty-state text when no publishers are mounted. Hidden
@@ -131,94 +250,152 @@
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
                                    Visibility="{Binding HasAnyTile, Converter={StaticResource InvertBoolToVisibility}}" />
 
-                        <!-- Publisher tile grid. UniformGrid columns/rows are driven
-                             by TileLayoutConverter based on Tiles.Count. -->
-                        <ItemsControl ItemsSource="{Binding Tiles}">
+                        <!-- GRID LAYOUT: uniform grid of tiles, sized via TileLayoutConverter. -->
+                        <ItemsControl ItemsSource="{Binding Tiles}"
+                                      ItemTemplate="{StaticResource PublisherTileTemplate}"
+                                      Visibility="{Binding CurrentLayout, Converter={StaticResource LayoutToVisibility}, ConverterParameter=Grid}">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <UniformGrid Columns="{Binding TileCount, Converter={StaticResource TileLayoutColumns}}"
                                                  Rows="{Binding TileCount, Converter={StaticResource TileLayoutRows}}" />
                                 </ItemsPanelTemplate>
                             </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate DataType="{x:Type vm:PublisherTileViewModel}">
-                                    <Border Margin="2" CornerRadius="6" ClipToBounds="True"
-                                            Background="#FF101010">
-                                        <Grid>
-                                            <rendering:D3DImageVideoRenderer Receiver="{Binding Receiver}"
-                                                                             NominalFrameRate="{Binding NominalFrameRate}"
-                                                                             Visibility="{Binding HasFirstFrame, Converter={StaticResource BoolToVisibility}}" />
-
-                                            <!-- Connecting placeholder before the first frame. -->
-                                            <TextBlock Text="Connecting…"
-                                                       Foreground="#AAFFFFFF"
-                                                       FontSize="13"
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                       Visibility="{Binding HasFirstFrame, Converter={StaticResource InvertBoolToVisibility}}" />
-
-                                            <!-- Paused overlay — stream stalled, last frame frozen. -->
-                                            <Grid Background="#80000000"
-                                                  Visibility="{Binding IsPaused, Converter={StaticResource BoolToVisibility}}"
-                                                  IsHitTestVisible="False">
-                                                <Border HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                        Background="#CC1E1E1E"
-                                                        CornerRadius="14"
-                                                        Padding="16,8">
-                                                    <StackPanel Orientation="Horizontal">
-                                                        <ui:SymbolIcon Symbol="Pause24" FontSize="16" Foreground="White"
-                                                                       VerticalAlignment="Center" />
-                                                        <TextBlock Text="Paused" Foreground="White"
-                                                                   FontWeight="SemiBold" FontSize="13"
-                                                                   VerticalAlignment="Center" Margin="8,0,0,0" />
-                                                    </StackPanel>
-                                                </Border>
-                                            </Grid>
-
-                                            <!-- Display-name chip, bottom-left. -->
-                                            <Border HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                                                    Margin="8"
-                                                    Background="#99000000"
-                                                    CornerRadius="6"
-                                                    Padding="8,3"
-                                                    IsHitTestVisible="False">
-                                                <TextBlock Text="{Binding DisplayName}"
-                                                           Foreground="White"
-                                                           FontSize="11" FontWeight="SemiBold" />
-                                            </Border>
-                                        </Grid>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                    </Grid>
-                </Border>
 
-                <Border Grid.Row="1"
-                        Margin="0,12,0,0"
-                        HorizontalAlignment="Center"
-                        Width="320" Height="180"
-                        CornerRadius="8"
-                        BorderThickness="2"
-                        BorderBrush="#FFD13A3A"
-                        Background="Black"
-                        ClipToBounds="True"
-                        Visibility="{Binding IsSharing, Converter={StaticResource BoolToVisibility}}">
-                    <Grid>
-                        <rendering:D3DImageVideoRenderer x:Name="SelfRenderer"
-                                                         LocalPreviewSource="{Binding LocalPreviewSource}" />
-                        <Border HorizontalAlignment="Left" VerticalAlignment="Top"
-                                Margin="6"
-                                Background="#CCD13A3A"
-                                CornerRadius="8"
-                                Padding="6,2"
-                                IsHitTestVisible="False">
-                            <StackPanel Orientation="Horizontal">
-                                <Ellipse Width="6" Height="6" Fill="White"
-                                         VerticalAlignment="Center" Margin="0,0,4,0" />
-                                <TextBlock Text="LIVE" Foreground="White"
-                                           FontWeight="Bold" FontSize="9"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
+                        <!-- FOCUS LAYOUT: one big tile + horizontal bottom strip of everyone else. -->
+                        <Grid Visibility="{Binding CurrentLayout, Converter={StaticResource LayoutToVisibility}, ConverterParameter=Focus}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Focused tile. ContentControl re-uses PublisherTileTemplate against
+                                 FocusedTile so the renderer, hover controls, and Stop Watching all
+                                 work identically to Grid mode. -->
+                            <ContentControl Grid.Row="0"
+                                            Content="{Binding FocusedTile}"
+                                            ContentTemplate="{StaticResource PublisherTileTemplate}" />
+
+                            <!-- Bottom strip: every tile except the focused one. Collapsed when
+                                 there's only one tile — otherwise the strip's top margin
+                                 claims vertical space and the focused tile renders 4 px
+                                 shorter than Grid view's same-size tile, producing a
+                                 confusing jolt when the user toggles layouts.
+                                 Wrapped in a ScrollViewer so many publishers can scroll
+                                 horizontally instead of shrinking off the right edge. -->
+                            <ScrollViewer Grid.Row="1"
+                                          HorizontalScrollBarVisibility="Auto"
+                                          VerticalScrollBarVisibility="Disabled"
+                                          Margin="0,4,0,0"
+                                          Visibility="{Binding HasFocusStripItems, Converter={StaticResource BoolToVisibility}}">
+                                <ItemsControl ItemsSource="{Binding Tiles}"
+                                              ItemTemplate="{StaticResource PublisherTileTemplate}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <StackPanel Orientation="Horizontal" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <!-- Hide the focused tile inside the strip — ContentControl above
+                                         owns it. Style trigger on the container, not the template. -->
+                                    <ItemsControl.ItemContainerStyle>
+                                        <Style TargetType="ContentPresenter">
+                                            <Setter Property="Width" Value="240" />
+                                            <Setter Property="Height" Value="135" />
+                                            <Setter Property="Margin" Value="4,0,0,0" />
+                                            <Style.Triggers>
+                                                <!-- Hide the focused tile inside the strip — the big slot above
+                                                     renders it, and we don't want a duplicate rendering. -->
+                                                <DataTrigger Binding="{Binding IsFocused}" Value="True">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ItemsControl.ItemContainerStyle>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Grid>
+
+                        <!-- Self-preview: pinned to bottom-right of the video area with
+                             a fixed 16 px inset. Not draggable — keeps the UI simple. -->
+                        <Border x:Name="SelfPreviewBorder"
+                                HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                Margin="16"
+                                CornerRadius="10"
+                                BorderThickness="1"
+                                BorderBrush="#66FFFFFF"
+                                Background="#FF0A0A0A"
+                                ClipToBounds="True"
+                                Visibility="{Binding IsSharing, Converter={StaticResource BoolToVisibility}}">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Width" Value="320" />
+                                    <Setter Property="Height" Value="180" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsSelfPreviewCollapsed}" Value="True">
+                                            <Setter Property="Width" Value="120" />
+                                            <Setter Property="Height" Value="32" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <Grid>
+                                <rendering:D3DImageVideoRenderer x:Name="SelfRenderer"
+                                                                 LocalPreviewSource="{Binding LocalPreviewSource}"
+                                                                 CornerRadius="10"
+                                                                 IsAlwaysTopmost="True"
+                                                                 Visibility="{Binding IsSelfPreviewCollapsed, Converter={StaticResource InvertBoolToVisibility}}" />
+
+                                <!-- Chrome strip: LIVE pill + collapse chevron. CutoutForAll
+                                     punches a hole in EVERY renderer (the self-preview AND
+                                     any publisher tile whose HWND lands over the same
+                                     screen region), so the WPF chrome always shows through. -->
+                                <Grid VerticalAlignment="Top" Height="28"
+                                      Background="#80000000"
+                                      rendering:D3DImageVideoRenderer.CutoutForAll="True">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <Border Grid.Column="0"
+                                            HorizontalAlignment="Left" VerticalAlignment="Center"
+                                            Margin="8,0,0,0"
+                                            Background="#CCD13A3A"
+                                            CornerRadius="10"
+                                            Padding="7,2"
+                                            IsHitTestVisible="False">
+                                        <StackPanel Orientation="Horizontal">
+                                            <Ellipse Width="6" Height="6" Fill="White"
+                                                     VerticalAlignment="Center" Margin="0,0,4,0" />
+                                            <TextBlock Text="LIVE" Foreground="White"
+                                                       FontWeight="Bold" FontSize="9"
+                                                       VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <ui:Button Grid.Column="1"
+                                               Appearance="Transparent"
+                                               Foreground="White"
+                                               ToolTip="Collapse / expand self-preview"
+                                               Padding="4" Margin="0,0,6,0"
+                                               Command="{Binding ToggleSelfPreviewCollapsedCommand}">
+                                        <ui:Button.Icon>
+                                            <ui:SymbolIcon>
+                                                <ui:SymbolIcon.Style>
+                                                    <Style TargetType="ui:SymbolIcon">
+                                                        <Setter Property="Symbol" Value="ChevronDown24" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsSelfPreviewCollapsed}" Value="True">
+                                                                <Setter Property="Symbol" Value="ChevronUp24" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </ui:SymbolIcon.Style>
+                                            </ui:SymbolIcon>
+                                        </ui:Button.Icon>
+                                    </ui:Button>
+                                </Grid>
+                            </Grid>
                         </Border>
                     </Grid>
                 </Border>
@@ -264,6 +441,30 @@
                                                  VerticalAlignment="Center" Margin="6,0,0,0"
                                                  ToolTip="Streaming"
                                                  Visibility="{Binding IsStreaming, Converter={StaticResource BoolToVisibility}}" />
+                                        <!-- Watch button: appears only when this peer is streaming AND
+                                             the local user previously stopped watching them. Click
+                                             re-subscribes via the SFU; the tile remounts on SDP offer. -->
+                                        <ui:Button Appearance="Transparent"
+                                                   Icon="{ui:SymbolIcon Symbol=Eye24}"
+                                                   ToolTip="Watch"
+                                                   Padding="4" Margin="4,0,0,0"
+                                                   Command="{Binding DataContext.WatchCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                   CommandParameter="{Binding PeerId}">
+                                            <ui:Button.Style>
+                                                <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding IsStreaming}" Value="True" />
+                                                                <Condition Binding="{Binding IsWatching}" Value="False" />
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </ui:Button.Style>
+                                        </ui:Button>
                                         <TextBlock Text="(you)" Opacity="0.5" FontSize="11"
                                                    VerticalAlignment="Center" Margin="6,0,0,0"
                                                    Visibility="{Binding IsSelf, Converter={StaticResource BoolToVisibility}}" />
@@ -341,5 +542,17 @@
                 </ScrollViewer>
             </Grid>
         </Border>
+    </Grid>
+
+        <!-- Fullscreen overlay: one tile fills the entire UserControl. The
+             normal content above collapses when IsFullscreen flips true.
+             Uses the same PublisherTileTemplate so hover controls (including
+             Fullscreen toggle) still work as an exit affordance. -->
+        <Border Background="Black"
+                Visibility="{Binding IsFullscreen, Converter={StaticResource BoolToVisibility}}">
+            <ContentControl Content="{Binding FullscreenTile}"
+                            ContentTemplate="{StaticResource PublisherTileTemplate}" />
+        </Border>
+
     </Grid>
 </UserControl>
