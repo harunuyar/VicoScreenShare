@@ -46,11 +46,6 @@ public sealed class WsSession
     private bool _sfuPeerBound;
     private string? _currentStreamId;
 
-    // Each subscriber PC we drive for this viewer. Keyed by the subscription id
-    // in wire format (publisher's PeerId as "N"). We add an entry when we wire
-    // up ICE-forwarding for the subscriber and keep it until the corresponding
-    // SfuSubscriberPeer is disposed by the session.
-    private readonly HashSet<string> _boundSubscriberIds = new(StringComparer.Ordinal);
     private SfuSession? _currentSfuSession;
     private Func<SfuSubscriberPeer, Task>? _subscriberReadyHandler;
 
@@ -162,8 +157,6 @@ public sealed class WsSession
         {
             await sfuSession.RemovePeerAsync(PeerId).ConfigureAwait(false);
         }
-
-        _boundSubscriberIds.Clear();
 
         // Kick off grace. The expiry callback runs the full LeaveCurrentRoomAsync
         // path on our behalf. If the client resumes within the window, the
@@ -826,20 +819,22 @@ public sealed class WsSession
         // Only drive offers to the viewer this subscriber is paired with.
         if (sub.ViewerPeerId != PeerId) return;
 
-        // Wire up ICE forwarding for the new subscriber exactly once.
-        if (_boundSubscriberIds.Add(sub.SubscriptionId))
+        // Wire ICE forwarding for this subscriber instance. SfuSession fires
+        // SubscriberReady exactly once per SfuSubscriberPeer (EnsureSubscriberAsync
+        // dedups at the dict layer) and the handler closure dies with the sub
+        // when it's disposed, so no guard is needed here — and adding one keyed
+        // by SubscriptionId would break repub, since SubscriptionId is the
+        // publisher's PeerId and stays stable across stop/restart.
+        var subscriptionId = sub.SubscriptionId;
+        sub.LocalIceCandidateReady += candidateJson =>
         {
-            var subscriptionId = sub.SubscriptionId;
-            sub.LocalIceCandidateReady += candidateJson =>
+            try
             {
-                try
-                {
-                    _ = SendAsync(MessageType.IceCandidate,
-                        new IceCandidate(candidateJson, null, null, subscriptionId));
-                }
-                catch { /* session tearing down */ }
-            };
-        }
+                _ = SendAsync(MessageType.IceCandidate,
+                    new IceCandidate(candidateJson, null, null, subscriptionId));
+            }
+            catch { /* session tearing down */ }
+        };
 
         try
         {
@@ -897,7 +892,6 @@ public sealed class WsSession
         }
         _currentSfuSession = null;
         _subscriberReadyHandler = null;
-        _boundSubscriberIds.Clear();
 
         // Capture the stream id BEFORE RemovePeer so we can still fan out a
         // StreamEnded for the crash/disconnect case — otherwise viewers would
