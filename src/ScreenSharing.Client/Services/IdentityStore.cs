@@ -7,10 +7,10 @@ namespace ScreenSharing.Client.Services;
 
 /// <summary>
 /// Persists the local profile (stable user id + display name) to
-/// <c>%AppData%/VicoMeet/profile.json</c>. Reads return a cached copy; writes
-/// go through a temp file so a crash mid-write never corrupts the stored profile.
-/// On first launch after the rename, inherits any pre-existing
-/// <c>%AppData%/ScreenSharing/profile.json</c> so stable user id survives.
+/// <c>%AppData%/VicoScreenShare/profile.json</c>. Reads return a cached copy;
+/// writes go through a temp file so a crash mid-write never corrupts the stored
+/// profile. On first launch after a rename, inherits the file from any
+/// prior-name folder (VicoMeet, ScreenSharing) so stable user id survives.
 /// </summary>
 public sealed class IdentityStore
 {
@@ -37,14 +37,18 @@ public sealed class IdentityStore
     public static string DefaultProfilePath()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        var newPath = Path.Combine(appData, "VicoMeet", "profile.json");
+        var newPath = Path.Combine(appData, "VicoScreenShare", "profile.json");
         if (!File.Exists(newPath))
         {
-            var legacy = Path.Combine(appData, "ScreenSharing", "profile.json");
-            if (File.Exists(legacy))
+            foreach (var legacyFolder in new[] { "VicoMeet", "ScreenSharing" })
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
-                try { File.Copy(legacy, newPath); } catch { }
+                var legacy = Path.Combine(appData, legacyFolder, "profile.json");
+                if (File.Exists(legacy))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
+                    try { File.Copy(legacy, newPath); } catch { }
+                    break;
+                }
             }
         }
         return newPath;

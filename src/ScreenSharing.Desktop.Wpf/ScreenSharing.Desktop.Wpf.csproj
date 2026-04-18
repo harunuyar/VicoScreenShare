@@ -9,7 +9,7 @@
          time and gated at runtime with ApiInformation. -->
     <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
     <RootNamespace>ScreenSharing.Desktop.App</RootNamespace>
-    <AssemblyName>VicoMeet</AssemblyName>
+    <AssemblyName>VicoScreenShare</AssemblyName>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -17,7 +17,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <UseWPF>true</UseWPF>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>Assets\VicoMeet.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\VicoScreenShare.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -26,7 +26,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Resource Include="Assets\VicoMeet.ico" />
+    <Resource Include="Assets\VicoScreenShare.ico" />
   </ItemGroup>
 
   <ItemGroup>

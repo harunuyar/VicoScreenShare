@@ -9,11 +9,11 @@ namespace ScreenSharing.Client.Services;
 
 /// <summary>
 /// Persists <see cref="ClientSettings"/> to a JSON file under
-/// <c>%AppData%/VicoMeet/settings.json</c>. Mirrors <see cref="IdentityStore"/>:
+/// <c>%AppData%/VicoScreenShare/settings.json</c>. Mirrors <see cref="IdentityStore"/>:
 /// atomic writes via temp-file + <see cref="File.Move(string,string,bool)"/>, and
 /// <see cref="LoadOrCreate"/> returns defaults when the file is missing or
-/// corrupted so the app always starts cleanly. On first launch after the
-/// rename, inherits any pre-existing <c>%AppData%/ScreenSharing/settings.json</c>.
+/// corrupted so the app always starts cleanly. On first launch after a rename,
+/// inherits the file from any prior-name folder (VicoMeet, ScreenSharing).
 /// </summary>
 public sealed class SettingsStore
 {
@@ -39,14 +39,19 @@ public sealed class SettingsStore
     public static string DefaultPath()
     {
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        var newPath = Path.Combine(appData, "VicoMeet", "settings.json");
+        var newPath = Path.Combine(appData, "VicoScreenShare", "settings.json");
         if (!File.Exists(newPath))
         {
-            var legacy = Path.Combine(appData, "ScreenSharing", "settings.json");
-            if (File.Exists(legacy))
+            // Carry forward from whichever prior-name folder has the file.
+            foreach (var legacyFolder in new[] { "VicoMeet", "ScreenSharing" })
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
-                try { File.Copy(legacy, newPath); } catch { }
+                var legacy = Path.Combine(appData, legacyFolder, "settings.json");
+                if (File.Exists(legacy))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
+                    try { File.Copy(legacy, newPath); } catch { }
+                    break;
+                }
             }
         }
         return newPath;

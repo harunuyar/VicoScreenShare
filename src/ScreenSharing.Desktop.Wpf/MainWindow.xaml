@@ -3,8 +3,8 @@
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:svc="clr-namespace:ScreenSharing.Desktop.App.Services"
-                 Title="VicoMeet"
-                 Icon="pack://application:,,,/Assets/VicoMeet.ico"
+                 Title="Vico Screen Share"
+                 Icon="pack://application:,,,/Assets/VicoScreenShare.ico"
                  Width="1280" Height="800"
                  MinWidth="720" MinHeight="500"
                  ExtendsContentIntoTitleBar="True"
@@ -26,12 +26,12 @@
              fills right up to the chrome edge and picks up the Mica
              backdrop underneath. -->
         <ui:TitleBar Grid.Row="0"
-                     Title="VicoMeet"
+                     Title="Vico Screen Share"
                      ShowMaximize="True"
                      ShowMinimize="True"
                      ShowClose="True">
             <ui:TitleBar.Icon>
-                <ui:ImageIcon Source="pack://application:,,,/Assets/VicoMeet.ico" />
+                <ui:ImageIcon Source="pack://application:,,,/Assets/VicoScreenShare.ico" />
             </ui:TitleBar.Icon>
         </ui:TitleBar>
 
