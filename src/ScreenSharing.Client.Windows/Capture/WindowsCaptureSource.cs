@@ -321,25 +321,45 @@ public sealed class WindowsCaptureSource : ICaptureSource
         var textureHandler = TextureArrived;
         if (textureHandler is not null)
         {
-            // AddRef the snapshot so the handler can wrap it as
-            // `using var` and Release on dispose without dropping
-            // our ref.
-            _snapshotTexture.AddRef();
-            var handlerTookOwnership = false;
-            try
+            // Invoke subscribers one at a time with a fresh AddRef each.
+            // The handler contract is: wrap the pointer as
+            // `using var = new ID3D11Texture2D(ptr)` so dispose balances
+            // the AddRef. With a single subscriber the old code AddRef'd
+            // once around a multicast invocation and that worked; with
+            // two subscribers (encoder + self-preview renderer) both
+            // handlers dispose a wrapper, each doing a Release, and the
+            // original ref underflows — the texture gets freed while our
+            // _snapshotTexture pointer still references it, and the next
+            // frame's CopyResource walks into freed memory and raises
+            // ExecutionEngineException. Walking the invocation list
+            // explicitly gives every subscriber its own matched AddRef,
+            // independent of how many there are.
+            var targets = textureHandler.GetInvocationList();
+            var dispatched = false;
+            foreach (var target in targets)
             {
-                textureHandler(_snapshotTexture.NativePointer, width, height, contentTimestamp);
-                handlerTookOwnership = true;
-                Interlocked.Increment(ref _dispatchedFrameCount);
+                _snapshotTexture.AddRef();
+                var disposedByHandler = false;
+                try
+                {
+                    ((TextureArrivedHandler)target).Invoke(
+                        _snapshotTexture.NativePointer, width, height, contentTimestamp);
+                    disposedByHandler = true;
+                    dispatched = true;
+                }
+                catch (Exception ex)
+                {
+                    ScreenSharing.Client.Diagnostics.DebugLog.Write(
+                        $"[capture] TextureArrived handler threw: {ex.Message}");
+                }
+                if (!disposedByHandler)
+                {
+                    // Handler threw before disposing its wrapper: undo the
+                    // AddRef so we don't leak a ref each failure.
+                    _snapshotTexture.Release();
+                }
             }
-            catch (Exception ex)
-            {
-                ScreenSharing.Client.Diagnostics.DebugLog.Write($"[capture] TextureArrived handler threw: {ex.Message}");
-            }
-            if (!handlerTookOwnership)
-            {
-                _snapshotTexture.Release();
-            }
+            if (dispatched) Interlocked.Increment(ref _dispatchedFrameCount);
         }
 
         // CPU readback path for subscribers that want BGRA bytes. Still

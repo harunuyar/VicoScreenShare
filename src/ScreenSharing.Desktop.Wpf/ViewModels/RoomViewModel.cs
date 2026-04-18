@@ -256,6 +256,13 @@ public sealed partial class RoomViewModel : ViewModelBase
 
             receiver = new StreamReceiver(session.PeerConnection, _decoderFactory, displayName: "Remote peer");
             receiver.FrameArrived += OnRemoteFrameArrived;
+            // The GPU texture fast path emits on TextureArrived and DOES NOT
+            // raise FrameArrived (the decoder skips the CPU readback). We
+            // still need to flip HasRemoteStream so the RemoteRenderer is
+            // laid out and visible — without this the tile stays Collapsed
+            // and "nothing renders" even though the renderer is successfully
+            // painting underneath.
+            receiver.TextureArrived += OnRemoteTextureArrived;
             await receiver.StartAsync().ConfigureAwait(true);
 
             await session.NegotiateAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
@@ -271,6 +278,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             if (receiver is not null)
             {
                 try { receiver.FrameArrived -= OnRemoteFrameArrived; } catch { }
+                try { receiver.TextureArrived -= OnRemoteTextureArrived; } catch { }
                 try { await receiver.DisposeAsync().ConfigureAwait(true); } catch { }
             }
             if (session is not null)
@@ -282,6 +290,21 @@ public sealed partial class RoomViewModel : ViewModelBase
     }
 
     private void OnRemoteFrameArrived(in CaptureFrameData frame)
+    {
+        NotifyRemoteFrameObserved();
+    }
+
+    // Same job as OnRemoteFrameArrived but for the GPU-texture fast path.
+    // StreamReceiver's TextureArrived carries no CaptureFrameData, only the
+    // native pointer + dimensions + timestamp, which we don't need here —
+    // we just need a signal that frames are flowing so the remote tile can
+    // become visible.
+    private void OnRemoteTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
+    {
+        NotifyRemoteFrameObserved();
+    }
+
+    private void NotifyRemoteFrameObserved()
     {
         // Drop late frames that arrive after we've torn down the stream.
         // StreamEnded comes in on the signaling path (TCP) and a handful
@@ -419,6 +442,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_streamReceiver is not null)
         {
             try { _streamReceiver.FrameArrived -= OnRemoteFrameArrived; } catch { }
+            try { _streamReceiver.TextureArrived -= OnRemoteTextureArrived; } catch { }
             try { await _streamReceiver.DisposeAsync().ConfigureAwait(true); } catch { }
             _streamReceiver = null;
             OnPropertyChanged(nameof(StreamReceiver));
@@ -746,6 +770,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_streamReceiver is not null)
         {
             try { _streamReceiver.FrameArrived -= OnRemoteFrameArrived; } catch { }
+            try { _streamReceiver.TextureArrived -= OnRemoteTextureArrived; } catch { }
             await _streamReceiver.DisposeAsync().ConfigureAwait(true);
             _streamReceiver = null;
             OnPropertyChanged(nameof(StreamReceiver));

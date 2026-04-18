@@ -340,6 +340,8 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 _swapChain.ResizeBuffers(
                     2, (uint)newW, (uint)newH,
                     Format.B8G8R8A8_UNorm, SwapChainFlags.None);
+                ScreenSharing.Client.Diagnostics.DebugLog.Write(
+                    $"[renderer] swap chain resized {_swapChainWidth}x{_swapChainHeight} -> {newW}x{newH}");
                 _swapChainWidth = newW;
                 _swapChainHeight = newH;
             }
@@ -398,33 +400,37 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         _attachedReceiver = receiver;
         receiver.FrameArrived += OnFrameArrived;
-        ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] subscribed to FrameArrived (receiver={receiver.GetType().Name})");
+        receiver.TextureArrived += OnTextureArrived;
+        ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] subscribed to FrameArrived + TextureArrived (receiver={receiver.GetType().Name})");
     }
 
     private void DetachReceiver()
     {
         if (_attachedReceiver is null) return;
         try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch { }
+        try { _attachedReceiver.TextureArrived -= OnTextureArrived; } catch { }
         _attachedReceiver = null;
         // Drop any queued frames so a fresh attach doesn't play back
         // stale content from the previous stream.
         _playoutQueue.Clear();
-        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed FrameArrived");
+        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed FrameArrived + TextureArrived");
     }
 
     private void AttachLocalSource(ICaptureSource source)
     {
         _attachedLocalSource = source;
         source.FrameArrived += OnFrameArrived;
-        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] subscribed to ICaptureSource.FrameArrived (local preview)");
+        source.TextureArrived += OnTextureArrived;
+        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] subscribed to ICaptureSource.FrameArrived + TextureArrived (local preview)");
     }
 
     private void DetachLocalSource()
     {
         if (_attachedLocalSource is null) return;
         try { _attachedLocalSource.FrameArrived -= OnFrameArrived; } catch { }
+        try { _attachedLocalSource.TextureArrived -= OnTextureArrived; } catch { }
         _attachedLocalSource = null;
-        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed ICaptureSource.FrameArrived (local preview)");
+        ScreenSharing.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed ICaptureSource.FrameArrived + TextureArrived (local preview)");
     }
 
     private long _frameArrivedCount;
@@ -479,6 +485,66 @@ public sealed class D3DImageVideoRenderer : HwndHost
             {
                 ScreenSharing.Client.Diagnostics.DebugLog.Write(
                     $"[renderer] OnFrameArrived threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// GPU texture fast path. Fires synchronously from the decoder thread
+    /// when the source has a <see cref="IVideoDecoder.GpuOutputHandler"/>
+    /// wired up and produces a BGRA <c>ID3D11Texture2D</c> on the shared
+    /// device. We GPU-copy into our own <c>_uploadTexture</c> (so the
+    /// decoder can safely reuse its texture on the next decode) and run
+    /// the normal scale + present sequence inline. Skips the byte[] queue
+    /// entirely — no CPU upload, no CPU→GPU PCIe transfer, which is what
+    /// unlocks 4K120 on hardware decoders that were capped by the old
+    /// readback path.
+    ///
+    /// The native texture pointer is valid only for the duration of this
+    /// call; the <see cref="_context.CopyResource"/> below captures its
+    /// contents into a locally-owned resource before we return.
+    /// </summary>
+    private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
+    {
+        if (nativeTexture == IntPtr.Zero || width <= 0 || height <= 0) return;
+
+        try
+        {
+            lock (_renderLock)
+            {
+                if (_disposed) return;
+                InputFrameCount++;
+
+                InitD3DLocked();
+                if (_swapChain is null || _device is null || _context is null) return;
+
+                var count = System.Threading.Interlocked.Increment(ref _frameArrivedCount);
+                if (count <= 3 || count % 300 == 0)
+                {
+                    ScreenSharing.Client.Diagnostics.DebugLog.Write(
+                        $"[renderer] gpu-frame #{count} {width}x{height} -> {_swapChainWidth}x{_swapChainHeight}");
+                }
+
+                EnsureUploadTextureLocked(width, height);
+
+                // Wrapping the caller's pointer AddRefs the underlying
+                // COM object (Vortice's ComObject ctor). Disposing the
+                // wrapper Releases. CopyResource queues a GPU-side DMA
+                // from the decoder's BGRA texture into our owned upload
+                // texture — no PCIe traffic, no CPU stall.
+                using var sourceTexture = new ID3D11Texture2D(nativeTexture);
+                _context.CopyResource(_uploadTexture!, sourceTexture);
+
+                PaintUploadedTextureLocked(width, height);
+            }
+        }
+        catch (Exception ex)
+        {
+            var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
+            if (count <= 5 || count % 60 == 0)
+            {
+                ScreenSharing.Client.Diagnostics.DebugLog.Write(
+                    $"[renderer] OnTextureArrived threw (#{count}): {ex.GetType().Name}: {ex.Message}");
             }
         }
     }
@@ -563,50 +629,59 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 }
             }
 
-            using var backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
-
-            EnsureScalerLocked(width, height, _swapChainWidth, _swapChainHeight);
-
-            // Aspect-preserving fit: compute the letterbox rect inside
-            // the back buffer that keeps the source's aspect ratio. The
-            // VP fills the unused part with the background color we set
-            // on scaler construction (black).
-            var destRect = ComputeLetterboxRect(width, height, _swapChainWidth, _swapChainHeight);
-
-            try
-            {
-                _scaler!.Process(_uploadTexture!, backBuffer, destRect);
-            }
-            catch (Exception ex)
-            {
-                ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] scaler.Process threw: {ex.Message}");
-                return;
-            }
-
-            // SyncInterval=1 locks Present to display vsync (=display
-            // refresh rate). DWM hands the composed result to the
-            // compositor at its own tick. No UI-thread work at all.
-            try
-            {
-                // SyncInterval=0 ("uncapped"): Present returns as soon as
-                // the back buffer is queued to DWM instead of blocking
-                // for the next vsync. DWM itself still paces the
-                // compositor to the monitor refresh rate, so you still
-                // cannot SEE more than 144 fps on a 144 Hz display — but
-                // the render thread stops being the bottleneck. Without
-                // this, each frame cost ~6.9 ms of pure Present-block on
-                // top of upload + scale, which capped paint to ~55 fps
-                // even when the decoder was producing 120+.
-                _swapChain.Present(0, PresentFlags.None);
-                PaintedFrameCount++;
-            }
-            catch (Exception ex)
-            {
-                ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] Present threw: {ex.Message}");
-            }
+            PaintUploadedTextureLocked(width, height);
         }
         var paintEnd = System.Diagnostics.Stopwatch.GetTimestamp();
         LastPaintMs = (paintEnd - paintStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    }
+
+    /// <summary>
+    /// Scale the populated <see cref="_uploadTexture"/> into the current
+    /// swap-chain back buffer and present. Shared by the CPU path (after
+    /// <c>UpdateSubresource</c>) and the GPU path (after
+    /// <c>CopyResource</c>). Caller must already hold <see cref="_renderLock"/>
+    /// and have verified <c>_swapChain</c> / <c>_device</c> / <c>_context</c>
+    /// are non-null.
+    /// </summary>
+    private void PaintUploadedTextureLocked(int width, int height)
+    {
+        using var backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
+
+        EnsureScalerLocked(width, height, _swapChainWidth, _swapChainHeight);
+
+        // Aspect-preserving fit: compute the letterbox rect inside the
+        // back buffer that keeps the source's aspect ratio. The VP fills
+        // the unused part with the background color we set on scaler
+        // construction (black).
+        var destRect = ComputeLetterboxRect(width, height, _swapChainWidth, _swapChainHeight);
+
+        try
+        {
+            _scaler!.Process(_uploadTexture!, backBuffer, destRect);
+        }
+        catch (Exception ex)
+        {
+            ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] scaler.Process threw: {ex.Message}");
+            return;
+        }
+
+        // SyncInterval=0 ("uncapped"): Present returns as soon as the
+        // back buffer is queued to DWM instead of blocking for the next
+        // vsync. DWM itself still paces the compositor to the monitor
+        // refresh rate, so you still cannot SEE more than the display
+        // refresh — but the render thread stops being the bottleneck.
+        // Without this, each frame cost ~6.9 ms of pure Present-block on
+        // top of upload + scale, which capped paint to ~55 fps even when
+        // the decoder was producing 120+.
+        try
+        {
+            _swapChain.Present(0, PresentFlags.None);
+            PaintedFrameCount++;
+        }
+        catch (Exception ex)
+        {
+            ScreenSharing.Client.Diagnostics.DebugLog.Write($"[renderer] Present threw: {ex.Message}");
+        }
     }
 
     private static RawRect ComputeLetterboxRect(int srcW, int srcH, int dstW, int dstH)

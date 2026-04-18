@@ -58,6 +58,16 @@ public interface IVideoEncoder : IDisposable
     /// <see cref="SupportsTextureInput"/> is false.
     /// </summary>
     EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp);
+
+    /// <summary>
+    /// Request the encoder emit the next frame as an IDR/keyframe. Used when
+    /// the receive side reports unrecoverable packet loss via RTCP PLI —
+    /// the sender forces a fresh GOP so the decoder can re-sync without
+    /// waiting for the scheduled interval. Safe to call from any thread.
+    /// Default implementation is a no-op for codecs that don't support
+    /// runtime keyframe control (VP8 via libvpx).
+    /// </summary>
+    void RequestKeyframe() { }
 }
 
 /// <summary>

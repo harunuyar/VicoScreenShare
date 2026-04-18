@@ -39,6 +39,12 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         _pc = pc;
         DisplayName = displayName;
         _decoder = decoderFactory.CreateDecoder();
+        // Opt the decoder into GPU-resident output. Decoders that don't
+        // support it (VPX, and MF decoders with no shared D3D device) use
+        // the default no-op setter; their frames still flow via the CPU
+        // byte[] path. MF + shared device emits here, which saves the
+        // per-frame BGRA readback + upload round-trip.
+        _decoder.GpuOutputHandler = OnDecoderGpuFrame;
     }
 
     public string DisplayName { get; }
@@ -64,10 +70,17 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     public event FrameArrivedHandler? FrameArrived;
 
-    // StreamReceiver is a CPU-path-only view onto decoded remote frames —
-    // no D3D11 texture is involved on the receive side today. Declared to
-    // satisfy ICaptureSource, never raised.
-    public event TextureArrivedHandler? TextureArrived { add { } remove { } }
+    /// <summary>
+    /// Raised synchronously from the decoder thread when a GPU-capable
+    /// decoder emits a BGRA <c>ID3D11Texture2D</c> on the shared device.
+    /// The native pointer is valid ONLY for the duration of the call;
+    /// subscribers must <c>CopyResource</c> (or otherwise consume) before
+    /// returning. When this fires, <see cref="FrameArrived"/> does NOT
+    /// fire for the same frame — the decoder already skipped the CPU
+    /// readback. For decoders without GPU support (VPX, sysmem MF)
+    /// frames continue to arrive on <see cref="FrameArrived"/> as before.
+    /// </summary>
+    public event TextureArrivedHandler? TextureArrived;
 
     /// <summary>Alias for <see cref="FrameArrived"/> that reads clearer from the receiver side.</summary>
     public event FrameArrivedHandler? FrameDecoded
@@ -148,11 +161,13 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         // one) each output carries its OWN original timestamp.
         var rtpInputTs = TimeSpan.FromTicks((long)timestamp * TimeSpan.TicksPerMillisecond / 90);
 
+        int gpuEmittedThisCall;
         lock (_decodeLock)
         {
             if (_disposed) return;
             FramesReceived++;
             EncodedByteCount += encodedSample.Length;
+            _gpuEmittedThisCall = 0;
             try
             {
                 frames = _decoder.Decode(encodedSample, rtpInputTs);
@@ -164,7 +179,14 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
                 DebugLog.Write($"[recv] decoder threw: {ex.Message}");
                 return;
             }
+            gpuEmittedThisCall = _gpuEmittedThisCall;
         }
+
+        // GPU fast path: decoder invoked our GpuOutputHandler synchronously
+        // inside Decode, so TextureArrived has already fired and
+        // FramesDecoded / LastWidth / LastHeight were updated there.
+        // `frames` is empty by construction in that case.
+        if (gpuEmittedThisCall > 0) return;
 
         if (frames.Count == 0) return;
 
@@ -187,6 +209,28 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
                 format: CaptureFramePixelFormat.Bgra8,
                 timestamp: decoded.Timestamp);
             FrameArrived?.Invoke(in frame);
+        }
+    }
+
+    // Fires synchronously from inside _decoder.Decode when the decoder
+    // opts into zero-copy GPU output. Bumps the per-frame counters the
+    // CPU path normally maintains so the stats overlay still reads
+    // correctly, then raises TextureArrived for subscribers (the renderer)
+    // to GPU-copy the texture during this call. _gpuEmittedThisCall lets
+    // OnVideoFrameReceived tell a genuine empty decode apart from a
+    // GPU-path decode that legitimately returned no CPU bytes.
+    private int _gpuEmittedThisCall;
+
+    private void OnDecoderGpuFrame(IntPtr texture, int width, int height, TimeSpan timestamp)
+    {
+        FramesDecoded++;
+        LastWidth = width;
+        LastHeight = height;
+        _gpuEmittedThisCall++;
+        try { TextureArrived?.Invoke(texture, width, height, timestamp); }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[recv] TextureArrived handler threw: {ex.GetType().Name}: {ex.Message}");
         }
     }
 }

@@ -61,6 +61,18 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     private long _loggedDecodedFrames;
     private bool _disposed;
 
+    /// <summary>
+    /// When non-null, the decoder invokes this delegate synchronously inside
+    /// <see cref="Decode"/> for each produced frame, handing over the
+    /// <c>ID3D11Texture2D</c> pointer for the BGRA result on the decoder's
+    /// shared device. In that mode the per-frame GPU→CPU readback is
+    /// skipped entirely and <see cref="Decode"/> returns an empty list for
+    /// those frames — the caller is expected to consume (GPU-copy) the
+    /// texture during the callback. Falls back to the legacy CPU readback
+    /// path when null.
+    /// </summary>
+    public Action<IntPtr, int, int, TimeSpan>? GpuOutputHandler { get; set; }
+
     public MediaFoundationH264Decoder() : this(externalDevice: null)
     {
     }
@@ -165,6 +177,24 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     }
 
     public VideoCodec Codec => VideoCodec.H264;
+
+    public void Flush()
+    {
+        if (_disposed) return;
+        // MF_MESSAGE_COMMAND_FLUSH clears the MFT's internal input queue,
+        // any pending output, and any accumulated error state. After flush
+        // the decoder expects the next input to be a keyframe — callers
+        // must gate inter-frames until one arrives.
+        try
+        {
+            _transform.ProcessMessage(TMessageType.MessageCommandFlush, 0);
+            DebugLog.Write("[mf] H264 decoder flushed");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] H264 decoder flush threw: {ex.Message}");
+        }
+    }
 
     public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp)
     {
@@ -293,6 +323,47 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                 try { outSampleTimeTicks = outSample.SampleTime; }
                 catch { outSampleTimeTicks = 0; }
 
+                var outTs = TimeSpan.FromTicks(outSampleTimeTicks);
+
+                // GPU texture fast path: skip the 14–32 MB BGRA readback
+                // that otherwise caps us at ~100 fps on 1440p. Do the
+                // NV12 → BGRA blit into _bgraDest on GPU, then hand the
+                // texture pointer to the subscribed sink synchronously.
+                // The sink is expected to GPU-copy the texture into its
+                // own pool inside the callback; _bgraDest is reused on
+                // the next frame.
+                if (_useD3dPath && GpuOutputHandler is { } gpuSink)
+                {
+                    if (BlitSampleToBgraGpu(outSample))
+                    {
+                        // Per-subscriber AddRef: the sink's
+                        // `using var _ = new ID3D11Texture2D(ptr)` pattern
+                        // doesn't AddRef on construction (probed directly)
+                        // but does Release on dispose, so without an AddRef
+                        // per subscriber we'd drain refs off _bgraDest.
+                        // D3D11's deferred destruction hides the damage in
+                        // simple runs, but under real load the underlying
+                        // resource can be reclaimed between frames.
+                        var targets = gpuSink.GetInvocationList();
+                        foreach (var target in targets)
+                        {
+                            _bgraDest!.AddRef();
+                            try
+                            {
+                                ((Action<IntPtr, int, int, TimeSpan>)target).Invoke(
+                                    _bgraDest.NativePointer, _width, _height, outTs);
+                            }
+                            catch (Exception ex)
+                            {
+                                DebugLog.Write($"[mf] H264 GpuOutputHandler threw: {ex.Message}");
+                                try { _bgraDest.Release(); } catch { }
+                            }
+                        }
+                        if (_loggedDecodedFrames < 3) _loggedDecodedFrames++;
+                    }
+                    continue;
+                }
+
                 byte[]? bgra;
                 if (_useD3dPath)
                 {
@@ -317,7 +388,6 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
                 if (bgra is null) continue;
 
-                var outTs = TimeSpan.FromTicks(outSampleTimeTicks);
                 (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height, outTs));
 
                 if (_loggedDecodedFrames < 3)
@@ -330,6 +400,43 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                 outSample?.Dispose();
                 outBuffer?.Dispose();
             }
+        }
+    }
+
+    /// <summary>
+    /// Zero-copy variant of <see cref="DecodeSampleToBgraViaGpu"/>. Runs
+    /// the NV12 → BGRA GPU blit into <see cref="_bgraDest"/> and STOPS —
+    /// no CopyResource to staging, no Map, no CPU readback. Returns true
+    /// if the blit succeeded; caller hands <see cref="_bgraDest"/> to the
+    /// <see cref="GpuOutputHandler"/> sink which is expected to GPU-copy
+    /// it into its own pool during the synchronous callback.
+    /// </summary>
+    private bool BlitSampleToBgraGpu(IMFSample sample)
+    {
+        using var buffer = sample.ConvertToContiguousBuffer();
+        IMFDXGIBuffer? dxgiBuffer;
+        try { dxgiBuffer = buffer.QueryInterface<IMFDXGIBuffer>(); }
+        catch { return false; }
+
+        ID3D11Texture2D? sourceTexture = null;
+        try
+        {
+            var ptr = dxgiBuffer.GetResource(typeof(ID3D11Texture2D).GUID);
+            if (ptr == IntPtr.Zero) return false;
+            sourceTexture = new ID3D11Texture2D(ptr);
+
+            uint arraySlice = 0;
+            try { arraySlice = dxgiBuffer.SubresourceIndex; }
+            catch { }
+
+            EnsureScalerAndStaging(_width, _height);
+            _scaler!.Process(sourceTexture, _bgraDest!, arraySlice);
+            return true;
+        }
+        finally
+        {
+            sourceTexture?.Dispose();
+            dxgiBuffer.Dispose();
         }
     }
 
@@ -599,12 +706,22 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
             GuidMajorType = MediaTypeGuids.Video,
             GuidSubtype = VideoFormatGuids.H264,
         };
-        var flags = (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter);
-        var transform = TryCreateDecoder(flags, inputFilter, "hardware");
+
+        // Enumerate HARDWARE with BOTH sync and async flags so we surface
+        // whichever mode the driver actually exposes. Some modern HW
+        // decoders register only as ASYNCMFT; filtering to SYNCMFT alone
+        // can drop us onto a slower sync shim or even exclude the real
+        // hardware entirely. MF will still drive an enumerated async MFT
+        // via the legacy ProcessInput / ProcessOutput path we use today.
+        var hwFlags = (uint)(EnumFlag.EnumFlagHardware
+                             | EnumFlag.EnumFlagSyncmft
+                             | EnumFlag.EnumFlagAsyncmft
+                             | EnumFlag.EnumFlagSortandfilter);
+        var transform = TryCreateDecoder(hwFlags, inputFilter, "hardware");
         if (transform is not null) return transform;
 
-        flags = (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter);
-        return TryCreateDecoder(flags, inputFilter, "software");
+        var swFlags = (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter);
+        return TryCreateDecoder(swFlags, inputFilter, "software");
     }
 
     private static IMFTransform? TryCreateDecoder(uint flags, RegisterTypeInfo inputFilter, string label)

@@ -164,6 +164,39 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     public bool SupportsTextureInput => _d3dDevice is not null && _inputIsBgra;
 
     /// <summary>
+    /// Force the encoder to emit its next frame as an IDR/keyframe. Called
+    /// from the PLI path when the receiver reports unrecoverable loss.
+    ///
+    /// Per <c>IMFTransform::ProcessMessage</c> docs:
+    /// "If the MFT is an encoder, the next frame that the MFT encodes
+    /// must be a key frame" after <c>MFT_MESSAGE_COMMAND_FLUSH</c>. That's
+    /// a hard MFT-contract obligation — unlike the
+    /// <c>CODECAPI_AVEncVideoForceKeyFrame</c> attribute, which several
+    /// hardware MFTs (notably NVENC's AV1, verified by direct log
+    /// measurement) silently ignore. Flushing discards any in-flight
+    /// samples the pipeline is currently holding; we accept the ~1-frame
+    /// gap because we're already in a loss-recovery path where a stall
+    /// is strictly better than continuing to emit P-frames the decoder
+    /// can't use.
+    /// </summary>
+    public void RequestKeyframe()
+    {
+        lock (_processLock)
+        {
+            if (_disposed) return;
+            try
+            {
+                _transform.ProcessMessage(TMessageType.MessageCommandFlush, 0);
+                DebugLog.Write("[mf] H264 encoder flushed for keyframe (PLI)");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[mf] H264 encoder flush threw: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
     /// The internal D3D11 device, exposed so callers (like the test harness
     /// or future zero-copy capture path) can allocate textures on the same
     /// device the encoder is using. Null when no GPU manager is attached

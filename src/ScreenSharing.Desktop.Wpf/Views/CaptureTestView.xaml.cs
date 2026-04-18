@@ -318,6 +318,12 @@ public partial class CaptureTestView : UserControl
         {
             _capture = capture;
             _decoder = decoderFactory.CreateDecoder();
+            // Opt the decoder into GPU-resident output so the capture test's
+            // decode→render leg skips the per-frame GPU→CPU readback and
+            // matching CPU→GPU upload. Decoders that don't support it
+            // (sysmem MF, VPX) see the default no-op setter and frames
+            // continue to flow on the FrameArrived CPU path below.
+            _decoder.GpuOutputHandler = OnDecoderGpuFrame;
             _streamer = new CaptureStreamer(capture, OnEncoded, settings, encoderFactory);
         }
 
@@ -325,7 +331,16 @@ public partial class CaptureTestView : UserControl
 
         public event FrameArrivedHandler? FrameArrived;
 
-        public event TextureArrivedHandler? TextureArrived { add { } remove { } }
+        public event TextureArrivedHandler? TextureArrived;
+
+        private void OnDecoderGpuFrame(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
+        {
+            try { TextureArrived?.Invoke(nativeTexture, width, height, timestamp); }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[capture-test] TextureArrived handler threw: {ex.Message}");
+            }
+        }
 
         public event Action? Closed
         {

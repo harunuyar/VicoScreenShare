@@ -563,6 +563,19 @@ public sealed class CaptureStreamer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Propagate a keyframe request from upstream (e.g. an RTCP PLI received
+    /// by <see cref="Services.WebRtcSession"/>) down into the encoder.
+    /// Best-effort: if the encoder is null or being torn down, silently
+    /// swallow — the next natural keyframe still arrives on the scheduled
+    /// GOP boundary.
+    /// </summary>
+    public void RequestKeyframe()
+    {
+        if (_disposed) return;
+        try { _encoder?.RequestKeyframe(); } catch { }
+    }
+
     public void Dispose()
     {
         Stop();
