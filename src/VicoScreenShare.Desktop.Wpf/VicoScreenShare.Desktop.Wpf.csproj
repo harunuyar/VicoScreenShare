@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <!-- Floor: Windows 10 1809 (the oldest .NET 10 supports). We compile
+         against the 26100 SDK reference assembly so newer WGC APIs
+         (MinUpdateInterval, IsBorderRequired) are available at compile
+         time and gated at runtime with ApiInformation. -->
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>VicoScreenShare.Desktop.App</RootNamespace>
+    <AssemblyName>VicoScreenShare</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWPF>true</UseWPF>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\VicoScreenShare.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+    <PackageReference Include="WPF-UI" Version="4.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\VicoScreenShare.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VicoScreenShare.Client\VicoScreenShare.Client.csproj" />
+    <ProjectReference Include="..\VicoScreenShare.Client.Windows\VicoScreenShare.Client.Windows.csproj" />
+    <ProjectReference Include="..\VicoScreenShare.Protocol\VicoScreenShare.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

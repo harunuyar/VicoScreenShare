@@ -34,6 +34,7 @@ coverage/
 
 # Publish output
 publish/
+client-publish/
 app.publish/
 
 # Secrets & certs (never commit these)

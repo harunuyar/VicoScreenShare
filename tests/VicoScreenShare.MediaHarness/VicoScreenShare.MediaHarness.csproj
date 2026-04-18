@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\VicoScreenShare.Client\VicoScreenShare.Client.csproj" />
+    <ProjectReference Include="..\..\src\VicoScreenShare.Client.Windows\VicoScreenShare.Client.Windows.csproj" />
+    <ProjectReference Include="..\..\src\VicoScreenShare.Protocol\VicoScreenShare.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\VicoScreenShare.Server\VicoScreenShare.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>

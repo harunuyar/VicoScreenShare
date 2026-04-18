@@ -1,0 +1,299 @@
+﻿<UserControl x:Class="VicoScreenShare.Desktop.App.Views.HomeView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:VicoScreenShare.Desktop.App.ViewModels"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             d:DataContext="{d:DesignInstance Type=vm:HomeViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+
+    <Grid>
+        <!-- Top-left: compact connection picker. Clicking the chevron opens
+             a Popup with the full address book + add/edit/delete affordances.
+             The active connection's status dot + label is the resting-state
+             summary. HomeView has no HwndHosts, so a Popup with
+             AllowsTransparency sits above everything cleanly. -->
+        <ui:Card x:Name="ConnectionStrip"
+                 HorizontalAlignment="Left" VerticalAlignment="Top"
+                 Margin="24,16,0,0" Padding="10,6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Ellipse Grid.Column="0" Width="10" Height="10"
+                         VerticalAlignment="Center"
+                         Fill="{Binding ActiveConnection.Status, Converter={StaticResource ServerStatusToBrush}}" />
+                <TextBlock Grid.Column="1"
+                           Text="{Binding ActiveConnectionSummary}"
+                           Margin="10,0,10,0"
+                           FontWeight="SemiBold" FontSize="13"
+                           MaxWidth="280" TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" />
+                <ui:Button Grid.Column="2"
+                           Appearance="Transparent"
+                           Icon="{ui:SymbolIcon Symbol=ChevronDown24}"
+                           Padding="4"
+                           Command="{Binding TogglePickerCommand}" />
+            </Grid>
+        </ui:Card>
+
+        <!-- Connection picker flyout: opens below the strip. Lists every
+             saved connection with its status, plus an Add button and an
+             inline editor that takes over when IsEditingConnection=true. -->
+        <Popup IsOpen="{Binding IsPickerOpen}"
+               StaysOpen="False"
+               AllowsTransparency="True"
+               Placement="Bottom"
+               PlacementTarget="{Binding ElementName=ConnectionStrip}"
+               HorizontalOffset="0" VerticalOffset="6">
+            <Border Background="{DynamicResource ApplicationBackgroundBrush}"
+                    BorderBrush="{DynamicResource ControlElevationBorderBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="6"
+                    MinWidth="360" MaxWidth="420">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.45" />
+                </Border.Effect>
+                <Grid>
+                    <!-- List view (when not editing). -->
+                    <StackPanel Visibility="{Binding IsEditingConnection, Converter={StaticResource InvertBoolToVisibility}}">
+                        <ItemsControl ItemsSource="{Binding Connections}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:ConnectionEntryViewModel}">
+                                    <Grid Background="Transparent" Margin="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Ellipse Grid.Column="0" Width="10" Height="10"
+                                                 VerticalAlignment="Center" Margin="8,0,10,0"
+                                                 Fill="{Binding Status, Converter={StaticResource ServerStatusToBrush}}" />
+                                        <!-- Clickable body: name + uri. Sets this row active. -->
+                                        <Button Grid.Column="1" BorderThickness="0"
+                                                Background="Transparent"
+                                                HorizontalContentAlignment="Stretch"
+                                                Padding="0,6"
+                                                Command="{Binding DataContext.SetActiveCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding DisplayLabel}"
+                                                               FontWeight="SemiBold" FontSize="13" />
+                                                    <ui:SymbolIcon Symbol="Checkmark24" FontSize="12"
+                                                                   Foreground="#3EC94B" Margin="6,0,0,0"
+                                                                   VerticalAlignment="Center"
+                                                                   Visibility="{Binding IsActive, Converter={StaticResource BoolToVisibility}}" />
+                                                </StackPanel>
+                                                <TextBlock Text="{Binding UriSummary}"
+                                                           Opacity="0.55" FontSize="11"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding Status, Converter={StaticResource ServerStatusToText}}"
+                                                           Opacity="0.55" FontSize="10" />
+                                            </StackPanel>
+                                        </Button>
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                                    VerticalAlignment="Center">
+                                            <ui:Button Appearance="Transparent"
+                                                       Icon="{ui:SymbolIcon Symbol=Edit24}"
+                                                       ToolTip="Edit"
+                                                       Padding="4"
+                                                       Command="{Binding DataContext.EditConnectionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                       CommandParameter="{Binding}" />
+                                            <ui:Button Appearance="Transparent"
+                                                       Icon="{ui:SymbolIcon Symbol=Delete24}"
+                                                       ToolTip="Delete"
+                                                       Padding="4"
+                                                       Command="{Binding DataContext.DeleteConnectionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                       CommandParameter="{Binding}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <Rectangle Height="1" Fill="#20808080" Margin="6,6" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ui:Button Grid.Column="0"
+                                       Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=Add24}"
+                                       Content="Add connection"
+                                       HorizontalContentAlignment="Left"
+                                       HorizontalAlignment="Stretch"
+                                       Command="{Binding AddConnectionCommand}" />
+                            <ui:Button Grid.Column="1"
+                                       Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=ArrowSync24}"
+                                       ToolTip="Refresh status"
+                                       Padding="4"
+                                       Command="{Binding RefreshStatusesCommand}" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Inline editor (add / edit). -->
+                    <StackPanel Margin="6"
+                                Visibility="{Binding IsEditingConnection, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="Connection details"
+                                   FontWeight="SemiBold" FontSize="14"
+                                   Margin="0,0,0,8" />
+                        <TextBlock Text="Name (optional)" Opacity="0.7" FontSize="11" />
+                        <ui:TextBox Text="{Binding EditName, UpdateSourceTrigger=PropertyChanged}"
+                                    PlaceholderText="My VPS"
+                                    Margin="0,2,0,8" />
+                        <TextBlock Text="Server URL" Opacity="0.7" FontSize="11" />
+                        <ui:TextBox Text="{Binding EditUri, UpdateSourceTrigger=PropertyChanged}"
+                                    PlaceholderText="wss://example.com/ws"
+                                    Margin="0,2,0,8" />
+                        <TextBlock Text="Password (if the server requires one)" Opacity="0.7" FontSize="11" />
+                        <ui:PasswordBox Password="{Binding EditPassword, Mode=TwoWay}"
+                                        Margin="0,2,0,4" />
+                        <TextBlock Text="{Binding EditError}" Foreground="#E04F4F"
+                                   FontSize="11"
+                                   Visibility="{Binding EditError, Converter={StaticResource NullToCollapsed}}"
+                                   Margin="0,2,0,8" />
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ui:Button Grid.Column="1"
+                                       Appearance="Secondary"
+                                       Content="Cancel"
+                                       Command="{Binding CancelEditCommand}"
+                                       Margin="0,0,8,0" />
+                            <ui:Button Grid.Column="2"
+                                       Appearance="Primary"
+                                       Content="Save"
+                                       Command="{Binding SaveEditCommand}" />
+                        </Grid>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Popup>
+
+        <!-- Top-right action cluster: Capture test next to Settings. Both
+             docked to the corner so the hero card stays visually centered. -->
+        <StackPanel Orientation="Horizontal"
+                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="0,16,24,0">
+            <ui:Button Appearance="Secondary"
+                       Icon="{ui:SymbolIcon Symbol=Bug24}"
+                       ToolTip="Capture test (diagnostic pipeline)"
+                       Command="{Binding ShowCaptureTestCommand}"
+                       Margin="0,0,8,0" />
+            <ui:Button Appearance="Secondary"
+                       Icon="{ui:SymbolIcon Symbol=Settings24}"
+                       Command="{Binding ShowSettingsCommand}" />
+        </StackPanel>
+
+        <ui:Card MaxWidth="440" Padding="28"
+                 HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel>
+                <TextBlock Text="Vico Screen Share"
+                           FontSize="28" FontWeight="Bold"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="Self-hosted screen share"
+                           Opacity="0.55" FontSize="13"
+                           HorizontalAlignment="Center"
+                           Margin="0,2,0,24" />
+
+                <!-- 6-char uppercase room ID + paste button.
+                     MaxLength + the sanitize hook in the VM guarantee the
+                     buffer never holds more than 6 valid characters. -->
+                <TextBlock Text="Room ID" Opacity="0.7" FontSize="12" />
+                <Grid Margin="0,4,0,16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ui:TextBox Grid.Column="0"
+                                Text="{Binding JoinRoomId, UpdateSourceTrigger=PropertyChanged}"
+                                MaxLength="6"
+                                CharacterCasing="Upper"
+                                FontFamily="Cascadia Mono, Consolas, Courier New"
+                                FontSize="22"
+                                HorizontalContentAlignment="Center"
+                                PlaceholderText="ABC123" />
+                    <ui:Button Grid.Column="1"
+                               Appearance="Secondary"
+                               Icon="{ui:SymbolIcon Symbol=ClipboardPaste24}"
+                               ToolTip="Paste from clipboard"
+                               Command="{Binding PasteRoomIdCommand}"
+                               Margin="8,0,0,0" />
+                </Grid>
+
+                <ui:Button Appearance="Primary"
+                           Content="Join room"
+                           Icon="{ui:SymbolIcon Symbol=ArrowRight24}"
+                           Command="{Binding JoinRoomCommand}"
+                           IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBool}}"
+                           HorizontalAlignment="Stretch" />
+
+                <!-- Visual break before the secondary "create instead"
+                     action so the user can't accidentally hit Create
+                     while reaching for Join. -->
+                <Grid Margin="0,20,0,16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Rectangle Grid.Column="0" Height="1" Fill="#40808080" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="or" Opacity="0.5" FontSize="12"
+                               Margin="12,0" VerticalAlignment="Center" />
+                    <Rectangle Grid.Column="2" Height="1" Fill="#40808080" VerticalAlignment="Center" />
+                </Grid>
+
+                <ui:Button Appearance="Secondary"
+                           Content="Create a new room"
+                           Icon="{ui:SymbolIcon Symbol=Add24}"
+                           Command="{Binding CreateRoomCommand}"
+                           IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBool}}"
+                           HorizontalAlignment="Stretch" />
+
+                <ui:InfoBar Title="Heads up"
+                            Message="{Binding StatusMessage}"
+                            Severity="Warning"
+                            IsClosable="True"
+                            IsOpen="{Binding StatusMessage, Converter={StaticResource NullToCollapsed}, FallbackValue=False}"
+                            Margin="0,16,0,0" />
+
+                <!-- Display name footer: click the pencil to swap the
+                     label for an inline TextBox, checkmark commits. -->
+                <Grid Margin="0,24,0,0">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+                                Visibility="{Binding IsEditingDisplayName, Converter={StaticResource InvertBoolToVisibility}}">
+                        <TextBlock Text="Joining as " Opacity="0.55" />
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                        <ui:Button Appearance="Transparent"
+                                   Icon="{ui:SymbolIcon Symbol=Edit24}"
+                                   Command="{Binding BeginEditDisplayNameCommand}"
+                                   Margin="4,0,0,0" Padding="4" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+                                Visibility="{Binding IsEditingDisplayName, Converter={StaticResource BoolToVisibility}}">
+                        <ui:TextBox Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
+                                    MinWidth="200"
+                                    PlaceholderText="Display name" />
+                        <ui:Button Appearance="Primary"
+                                   Icon="{ui:SymbolIcon Symbol=Checkmark24}"
+                                   Command="{Binding CommitDisplayNameCommand}"
+                                   Margin="4,0,0,0" />
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
+        </ui:Card>
+
+        <!-- Indeterminate progress ring while a connect is in flight. -->
+        <ui:ProgressRing IsIndeterminate="True"
+                         Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}"
+                         HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                         Margin="0,0,0,32" Width="32" Height="32" />
+    </Grid>
+</UserControl>

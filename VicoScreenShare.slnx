@@ -1,0 +1,19 @@
+﻿<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VicoScreenShare.Client.Windows/VicoScreenShare.Client.Windows.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/VicoScreenShare.Client/VicoScreenShare.Client.csproj" />
+    <Project Path="src/VicoScreenShare.Desktop.Wpf/VicoScreenShare.Desktop.Wpf.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/VicoScreenShare.Protocol/VicoScreenShare.Protocol.csproj" />
+    <Project Path="src/VicoScreenShare.Server/VicoScreenShare.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VicoScreenShare.MediaHarness/VicoScreenShare.MediaHarness.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="tests/VicoScreenShare.Tests/VicoScreenShare.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,29 @@
+﻿<Application x:Class="VicoScreenShare.Desktop.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:VicoScreenShare.Desktop.App"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:conv="clr-namespace:VicoScreenShare.Desktop.App.Converters"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ui:ThemesDictionary Theme="Dark" />
+                <ui:ControlsDictionary />
+            </ResourceDictionary.MergedDictionaries>
+
+            <conv:InvertBoolConverter x:Key="InvertBool" />
+            <conv:NullToCollapsedConverter x:Key="NullToCollapsed" />
+            <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <conv:NonNullToBoolConverter x:Key="NonNullToBool" />
+            <conv:LayoutToVisibilityConverter x:Key="LayoutToVisibility" />
+            <conv:ServerStatusToBrushConverter x:Key="ServerStatusToBrush" />
+            <conv:ServerStatusToTextConverter x:Key="ServerStatusToText" />
+            <conv:InvertBoolToVisibilityConverter x:Key="InvertBoolToVisibility" />
+            <conv:TileLayoutColumnsConverter x:Key="TileLayoutColumns" />
+            <conv:TileLayoutRowsConverter x:Key="TileLayoutRows" />
+            <conv:PeerConnectionTooltipConverter x:Key="PeerConnectionTooltip" />
+            <conv:ViewModelToPageConverter x:Key="VmToPage" />
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
