@@ -46,6 +46,14 @@ public sealed class WsSession
     private bool _sfuPeerBound;
     private string? _currentStreamId;
 
+    // Each subscriber PC we drive for this viewer. Keyed by the subscription id
+    // in wire format (publisher's PeerId as "N"). We add an entry when we wire
+    // up ICE-forwarding for the subscriber and keep it until the corresponding
+    // SfuSubscriberPeer is disposed by the session.
+    private readonly HashSet<string> _boundSubscriberIds = new(StringComparer.Ordinal);
+    private SfuSession? _currentSfuSession;
+    private Func<SfuSubscriberPeer, Task>? _subscriberReadyHandler;
+
     public WsSession(
         WebSocket socket,
         RoomManager rooms,
@@ -60,7 +68,12 @@ public sealed class WsSession
         _logger = logger;
     }
 
-    public Guid PeerId { get; } = Guid.NewGuid();
+    /// <summary>
+    /// Per-session id assigned by the server. Starts as a fresh <see cref="Guid.NewGuid"/>
+    /// and is rebound to the original <see cref="RoomPeer"/>'s id inside
+    /// <see cref="HandleResumeSessionAsync"/> when the client successfully resumes.
+    /// </summary>
+    public Guid PeerId { get; private set; } = Guid.NewGuid();
 
     public string DisplayName => _displayName;
 
@@ -90,10 +103,95 @@ public sealed class WsSession
             _outbound.Writer.TryComplete();
             try { await writerTask.ConfigureAwait(false); } catch { }
             try { await heartbeatTask.ConfigureAwait(false); } catch { }
-            await LeaveCurrentRoomAsync().ConfigureAwait(false);
+            await BeginPeerGraceOrLeaveAsync().ConfigureAwait(false);
             _sessions.Remove(PeerId);
             await SafeCloseAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// On WebSocket teardown, put the peer into the server-side grace window
+    /// rather than immediately evicting them. During grace:
+    /// <list type="bullet">
+    ///   <item>The <see cref="RoomPeer"/> stays in the room with <c>IsConnected=false</c>.</item>
+    ///   <item>Other peers get a <c>PeerConnectionState(IsConnected=false)</c> broadcast
+    ///         so their UI can show a ghosted chip/tile.</item>
+    ///   <item>If the client reconnects within the grace window via <c>ResumeSession</c>,
+    ///         the <c>RoomManager.TryResume</c> path atomically cancels the expiry
+    ///         timer and rebinds the new session to the same <c>PeerId</c>.</item>
+    ///   <item>If the window elapses, the grace timer runs the "hard leave" path —
+    ///         the same cleanup <c>LeaveCurrentRoomAsync</c> does today.</item>
+    /// </list>
+    /// SFU state (upstream <c>SfuPeer</c> + this viewer's subscriber PCs) is
+    /// torn down on entry because SIPSorcery <c>RTCPeerConnection</c>s don't
+    /// survive a WS drop. On resume the client re-offers and everything rebuilds.
+    /// </summary>
+    private async Task BeginPeerGraceOrLeaveAsync()
+    {
+        var roomId = _currentRoomId;
+        if (roomId is null) return;
+
+        // Detach SFU hooks — this WsSession is about to die, it shouldn't drive
+        // more subscriber offers. A resumed session re-attaches fresh.
+        var sfuSession = _currentSfuSession;
+        var handler = _subscriberReadyHandler;
+        if (sfuSession is not null && handler is not null)
+        {
+            sfuSession.SubscriberReady -= handler;
+        }
+        _currentSfuSession = null;
+        _subscriberReadyHandler = null;
+        _sfuPeerBound = false;
+
+        // Stash the streaming state on the RoomPeer so Phase 5 can re-emit
+        // StreamStarted on resume without the client re-sending it.
+        var room = _rooms.FindRoom(roomId);
+        if (room is not null)
+        {
+            var peer = room.SnapshotPeers().FirstOrDefault(p => p.PeerId == PeerId);
+            if (peer is not null)
+            {
+                peer.LastStreamId = _currentStreamId;
+            }
+        }
+
+        // Evict every SFU PC tied to this peer — upstream SfuPeer (publisher
+        // role) AND every (viewer=me, publisher=X) SfuSubscriberPeer. The room
+        // slot stays reserved via the grace timer.
+        if (sfuSession is not null)
+        {
+            await sfuSession.RemovePeerAsync(PeerId).ConfigureAwait(false);
+        }
+
+        _boundSubscriberIds.Clear();
+
+        // Kick off grace. The expiry callback runs the full LeaveCurrentRoomAsync
+        // path on our behalf. If the client resumes within the window, the
+        // callback is cancelled and never runs.
+        var placedInGrace = _rooms.BeginPeerGrace(roomId, PeerId, async () =>
+        {
+            // Restore _currentRoomId so LeaveCurrentRoomAsync actually does work.
+            _currentRoomId = roomId;
+            await LeaveCurrentRoomAsync().ConfigureAwait(false);
+        });
+
+        if (placedInGrace is null)
+        {
+            // Room or peer already gone — nothing to broadcast.
+            _currentRoomId = null;
+            return;
+        }
+
+        // Broadcast disconnection so other peers ghost this chip/tile during
+        // grace. Other sessions route this via SessionRegistry.Get — their
+        // send path is independent of this now-dying session.
+        await BroadcastToRoomAsync(
+            placedInGrace,
+            MessageType.PeerConnectionState,
+            new PeerConnectionState(PeerId, false),
+            excludePeer: PeerId).ConfigureAwait(false);
+
+        _currentRoomId = null;
     }
 
     private async Task RunReaderAsync(CancellationToken ct)
@@ -154,6 +252,14 @@ public sealed class WsSession
 
             case MessageType.JoinRoom:
                 await HandleJoinRoomAsync(envelope).ConfigureAwait(false);
+                break;
+
+            case MessageType.LeaveRoom:
+                await HandleLeaveRoomAsync().ConfigureAwait(false);
+                break;
+
+            case MessageType.ResumeSession:
+                await HandleResumeSessionAsync(envelope).ConfigureAwait(false);
                 break;
 
             case MessageType.SdpOffer:
@@ -253,7 +359,95 @@ public sealed class WsSession
         _currentRoomId = room.Id;
 
         await SendAsync(MessageType.RoomCreated, new RoomCreated(room.Id), envelope.CorrelationId).ConfigureAwait(false);
-        await SendRoomJoinedAsync(room, join.HostPeerId, join.SnapshotAfterJoin).ConfigureAwait(false);
+        await SendRoomJoinedAsync(room, join.HostPeerId, join.SnapshotAfterJoin, peer.ResumeToken ?? string.Empty).ConfigureAwait(false);
+
+        // Attach the subscriber-offer pump so the server can drive SdpOffers
+        // for this viewer whenever anyone in the room starts publishing. The
+        // creator is the first peer, so OnViewerJoinedAsync is a no-op.
+        var sfu = _rooms.GetSfuSession(room.Id);
+        if (sfu is not null)
+        {
+            AttachSfuSessionHooks(sfu);
+            await sfu.OnViewerJoinedAsync(PeerId).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleResumeSessionAsync(MessageEnvelope envelope)
+    {
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (_currentRoomId is not null)
+        {
+            await SendErrorAsync(ErrorCode.AlreadyInRoom, "Already in a room", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
+        var request = WsMessageCodec.DecodePayload<ResumeSession>(envelope.Payload);
+        var outcome = _rooms.TryResume(request.RoomId, request.ResumeToken);
+
+        switch (outcome.Status)
+        {
+            case ResumeOutcomeStatus.Success:
+                var room = outcome.Room!;
+                var peer = outcome.Peer!;
+
+                // Rebind this session's PeerId to the original peer's. Any future
+                // broadcasts (including PeerConnectionState below) and SFU routing
+                // needs to find us under the SAME id that remote peers already know.
+                var oldPeerId = PeerId;
+                _sessions.Remove(oldPeerId);
+                PeerId = peer.PeerId;
+                _sessions.Add(this);
+
+                _currentRoomId = room.Id;
+                if (peer.IsStreaming && peer.LastStreamId is not null)
+                {
+                    _currentStreamId = peer.LastStreamId;
+                }
+
+                // Send a new RoomJoined (with a fresh roster snapshot + rotated
+                // token) so the client can re-seed all its state from the
+                // authoritative server view.
+                var hostId = room.HostPeerId ?? PeerId;
+                await SendRoomJoinedAsync(room, hostId, room.SnapshotPeers(), outcome.NewResumeToken ?? string.Empty)
+                    .ConfigureAwait(false);
+
+                // Announce to the other peers that we're back.
+                await BroadcastToRoomAsync(
+                    room,
+                    MessageType.PeerConnectionState,
+                    new PeerConnectionState(PeerId, true),
+                    excludePeer: PeerId).ConfigureAwait(false);
+
+                // Re-wire SFU hooks and re-subscribe to live publishers.
+                var sfu = _rooms.GetSfuSession(_currentRoomId);
+                if (sfu is not null)
+                {
+                    AttachSfuSessionHooks(sfu);
+                    await sfu.OnViewerJoinedAsync(PeerId).ConfigureAwait(false);
+                }
+
+                _logger.LogInformation("Session {PeerId} resumed in room {RoomId}", PeerId, _currentRoomId);
+                break;
+
+            case ResumeOutcomeStatus.TokenUnknown:
+                await SendAsync(MessageType.ResumeFailed, new ResumeFailed(ResumeFailedReason.TokenUnknown), envelope.CorrelationId).ConfigureAwait(false);
+                break;
+            case ResumeOutcomeStatus.Expired:
+                await SendAsync(MessageType.ResumeFailed, new ResumeFailed(ResumeFailedReason.Expired), envelope.CorrelationId).ConfigureAwait(false);
+                break;
+            case ResumeOutcomeStatus.RoomGone:
+                await SendAsync(MessageType.ResumeFailed, new ResumeFailed(ResumeFailedReason.RoomGone), envelope.CorrelationId).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    private async Task HandleLeaveRoomAsync()
+    {
+        // Explicit leave — evict immediately rather than sitting in grace. The
+        // WS will close right after this from the client side; our finally
+        // block's BeginPeerGraceOrLeaveAsync becomes a no-op because
+        // _currentRoomId is already null.
+        await LeaveCurrentRoomAsync().ConfigureAwait(false);
     }
 
     private async Task HandleJoinRoomAsync(MessageEnvelope envelope)
@@ -273,8 +467,16 @@ public sealed class WsSession
         {
             case JoinRoomStatus.Success:
                 _currentRoomId = result.Room!.Id;
-                await SendRoomJoinedAsync(result.Room, result.HostPeerId, result.SnapshotAfterJoin).ConfigureAwait(false);
+                await SendRoomJoinedAsync(result.Room, result.HostPeerId, result.SnapshotAfterJoin, peer.ResumeToken ?? string.Empty).ConfigureAwait(false);
                 await BroadcastPeerJoinedAsync(result.Room, result.HostPeerId, peer).ConfigureAwait(false);
+
+                // Auto-subscribe the joiner to every already-live publisher.
+                var sfu = _rooms.GetSfuSession(_currentRoomId);
+                if (sfu is not null)
+                {
+                    AttachSfuSessionHooks(sfu);
+                    await sfu.OnViewerJoinedAsync(PeerId).ConfigureAwait(false);
+                }
                 break;
             case JoinRoomStatus.NotFound:
                 await SendErrorAsync(ErrorCode.RoomNotFound, "Room not found", envelope.CorrelationId).ConfigureAwait(false);
@@ -288,23 +490,25 @@ public sealed class WsSession
         }
     }
 
-    private Task SendRoomJoinedAsync(Room room, Guid hostPeerId, IReadOnlyList<RoomPeer> peers)
+    private Task SendRoomJoinedAsync(Room room, Guid hostPeerId, IReadOnlyList<RoomPeer> peers, string resumeToken)
     {
         var peerInfos = peers
-            .Select(p => new PeerInfo(p.PeerId, p.DisplayName, p.PeerId == hostPeerId, p.IsStreaming))
+            .Select(p => new PeerInfo(p.PeerId, p.DisplayName, p.PeerId == hostPeerId, p.IsStreaming, p.IsConnected))
             .ToArray();
         var joined = new RoomJoined(
             RoomId: room.Id,
             YourPeerId: PeerId,
             Peers: peerInfos,
-            IceServers: Array.Empty<IceServerConfig>());
+            IceServers: Array.Empty<IceServerConfig>(),
+            ResumeToken: resumeToken,
+            ResumeTtl: _options.CurrentValue.PeerGracePeriod);
         return SendAsync(MessageType.RoomJoined, joined);
     }
 
     private async Task BroadcastPeerJoinedAsync(Room room, Guid hostPeerId, RoomPeer newPeer)
     {
         var message = new PeerJoined(new PeerInfo(
-            newPeer.PeerId, newPeer.DisplayName, newPeer.PeerId == hostPeerId, newPeer.IsStreaming));
+            newPeer.PeerId, newPeer.DisplayName, newPeer.PeerId == hostPeerId, newPeer.IsStreaming, newPeer.IsConnected));
         await BroadcastToRoomAsync(room, MessageType.PeerJoined, message, excludePeer: newPeer.PeerId)
             .ConfigureAwait(false);
     }
@@ -344,6 +548,16 @@ public sealed class WsSession
         }
 
         var offer = WsMessageCodec.DecodePayload<SdpOffer>(envelope.Payload);
+
+        // Client-initiated offers only ever target the main SfuPeer. Subscriber
+        // PCs are server-initiated, so a client SdpOffer with a non-null
+        // SubscriptionId is a protocol violation.
+        if (!string.IsNullOrEmpty(offer.SubscriptionId))
+        {
+            await SendErrorAsync(ErrorCode.BadRequest, "SubscriptionId is server-driven; clients must not offer on a subscriber PC", envelope.CorrelationId).ConfigureAwait(false);
+            return;
+        }
+
         var peer = GetOrAttachSfuPeer(sfu);
 
         try
@@ -368,16 +582,38 @@ public sealed class WsSession
         }
 
         var sfu = _rooms.GetSfuSession(_currentRoomId);
-        var peer = sfu?.Find(PeerId);
-        if (peer is null)
+        if (sfu is null)
         {
-            await SendErrorAsync(ErrorCode.BadRequest, "No pending SFU peer for this session", envelope.CorrelationId).ConfigureAwait(false);
+            await SendErrorAsync(ErrorCode.InternalError, "No SFU session for room", envelope.CorrelationId).ConfigureAwait(false);
             return;
         }
 
         var answer = WsMessageCodec.DecodePayload<SdpAnswer>(envelope.Payload);
+
         try
         {
+            // Answer for a subscriber PC — the server was the offerer. Route to
+            // the matching SfuSubscriberPeer by (this viewer, publisher id).
+            if (TryParseSubscriptionPublisher(answer.SubscriptionId, out var publisherId))
+            {
+                var sub = sfu.FindSubscriber(PeerId, publisherId);
+                if (sub is null)
+                {
+                    _logger.LogDebug("Session {PeerId} answer for unknown subscription {Sub}", PeerId, answer.SubscriptionId);
+                    return;
+                }
+                sub.HandleRemoteAnswer(answer.Sdp);
+                return;
+            }
+
+            // Answer for the main PC — shouldn't happen in the current flow
+            // (client offers, server answers) but kept for symmetry.
+            var peer = sfu.Find(PeerId);
+            if (peer is null)
+            {
+                await SendErrorAsync(ErrorCode.BadRequest, "No pending SFU peer for this session", envelope.CorrelationId).ConfigureAwait(false);
+                return;
+            }
             peer.HandleRemoteAnswer(answer.Sdp);
         }
         catch (Exception ex)
@@ -403,12 +639,39 @@ public sealed class WsSession
             return;
         }
 
-        // Trickle ICE can race the SDP offer on fast connections. Always go through
-        // GetOrAttachSfuPeer so an early candidate creates the SfuPeer and is
-        // buffered until HandleRemoteOfferAsync applies the remote description.
-        var peer = GetOrAttachSfuPeer(sfu);
         var ice = WsMessageCodec.DecodePayload<IceCandidate>(envelope.Payload);
+
+        if (TryParseSubscriptionPublisher(ice.SubscriptionId, out var publisherId))
+        {
+            var sub = sfu.FindSubscriber(PeerId, publisherId);
+            if (sub is null)
+            {
+                // Candidate can race ahead of the subscription being created on
+                // this side (e.g. viewer answered fast, server hasn't finished
+                // wire-up). Drop quietly — SIPSorcery would drop it too if the
+                // remote description isn't applied yet.
+                _logger.LogDebug("Session {PeerId} ICE for unknown subscription {Sub}", PeerId, ice.SubscriptionId);
+                return;
+            }
+            sub.AddRemoteIceCandidate(ice.Candidate);
+            return;
+        }
+
+        // Trickle ICE for the main PC. Go through GetOrAttachSfuPeer so an early
+        // candidate creates the SfuPeer and is buffered until the offer applies
+        // the remote description.
+        var peer = GetOrAttachSfuPeer(sfu);
         peer.AddRemoteIceCandidate(ice.Candidate);
+    }
+
+    private static bool TryParseSubscriptionPublisher(string? subscriptionId, out Guid publisherId)
+    {
+        if (!string.IsNullOrEmpty(subscriptionId) && Guid.TryParseExact(subscriptionId, "N", out publisherId))
+        {
+            return true;
+        }
+        publisherId = Guid.Empty;
+        return false;
     }
 
     private async Task HandleStreamStartedAsync(MessageEnvelope envelope)
@@ -426,9 +689,7 @@ public sealed class WsSession
         var request = WsMessageCodec.DecodePayload<StreamStarted>(envelope.Payload);
 
         // Server is authoritative on the PeerId the message carries — a client
-        // cannot claim to be someone else. The stream id is client-chosen so
-        // the viewer can distinguish concurrent streams from the same peer
-        // once Phase 4 multi-stream lands; Phase 3 only cares about PeerId.
+        // cannot claim to be someone else.
         if (!room.TrySetPeerStreaming(PeerId, true))
         {
             // Either already marked streaming or peer has been removed; either
@@ -440,6 +701,15 @@ public sealed class WsSession
         var authoritative = request with { PeerId = PeerId };
         await BroadcastToRoomAsync(room, MessageType.StreamStarted, authoritative, excludePeer: PeerId)
             .ConfigureAwait(false);
+
+        // Spin up per-viewer subscriber PCs so the server can fan out this
+        // peer's RTP on dedicated outbound tracks/SSRCs to each viewer.
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        if (sfu is not null)
+        {
+            AttachSfuSessionHooks(sfu);
+            await sfu.OnPublisherStartedAsync(PeerId).ConfigureAwait(false);
+        }
     }
 
     private async Task HandleStreamEndedAsync(MessageEnvelope envelope)
@@ -460,6 +730,60 @@ public sealed class WsSession
         var authoritative = new StreamEnded(PeerId, streamId);
         await BroadcastToRoomAsync(room, MessageType.StreamEnded, authoritative, excludePeer: PeerId)
             .ConfigureAwait(false);
+
+        var sfu = _rooms.GetSfuSession(_currentRoomId);
+        if (sfu is not null)
+        {
+            await sfu.OnPublisherStoppedAsync(PeerId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Subscribe to <see cref="SfuSession.SubscriberReady"/> exactly once. When a
+    /// subscriber PC is created for this viewer, we create its server-side SDP
+    /// offer and ship it through the signaling channel with SubscriptionId =
+    /// publisher PeerId.
+    /// </summary>
+    private void AttachSfuSessionHooks(SfuSession sfu)
+    {
+        if (_currentSfuSession is not null) return;
+
+        _currentSfuSession = sfu;
+        _subscriberReadyHandler = OnSubscriberReadyAsync;
+        sfu.SubscriberReady += _subscriberReadyHandler;
+    }
+
+    private async Task OnSubscriberReadyAsync(SfuSubscriberPeer sub)
+    {
+        // Only drive offers to the viewer this subscriber is paired with.
+        if (sub.ViewerPeerId != PeerId) return;
+
+        // Wire up ICE forwarding for the new subscriber exactly once.
+        if (_boundSubscriberIds.Add(sub.SubscriptionId))
+        {
+            var subscriptionId = sub.SubscriptionId;
+            sub.LocalIceCandidateReady += candidateJson =>
+            {
+                try
+                {
+                    _ = SendAsync(MessageType.IceCandidate,
+                        new IceCandidate(candidateJson, null, null, subscriptionId));
+                }
+                catch { /* session tearing down */ }
+            };
+        }
+
+        try
+        {
+            var offerSdp = await sub.CreateOfferAsync().ConfigureAwait(false);
+            await SendAsync(MessageType.SdpOffer, new SdpOffer(offerSdp, sub.SubscriptionId))
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Session {PeerId} failed to drive subscriber offer for {Publisher}",
+                PeerId, sub.PublisherPeerId);
+        }
     }
 
     private SfuPeer GetOrAttachSfuPeer(SfuSession sfu)
@@ -491,6 +815,21 @@ public sealed class WsSession
         var roomId = _currentRoomId;
         if (roomId is null) return;
         _currentRoomId = null;
+
+        // Detach the subscriber-offer pump so the shared SfuSession.SubscriberReady
+        // event stops holding a reference to this (soon-to-be-dead) session. We
+        // hold the delegate reference separately because SfuSession.SubscriberReady
+        // is typed as Func&lt;SfuSubscriberPeer, Task&gt; — method-group unsubscribe
+        // works too, but the explicit capture is clearer and race-free.
+        var sfuSession = _currentSfuSession;
+        var handler = _subscriberReadyHandler;
+        if (sfuSession is not null && handler is not null)
+        {
+            sfuSession.SubscriberReady -= handler;
+        }
+        _currentSfuSession = null;
+        _subscriberReadyHandler = null;
+        _boundSubscriberIds.Clear();
 
         // Capture the stream id BEFORE RemovePeer so we can still fan out a
         // StreamEnded for the crash/disconnect case — otherwise viewers would

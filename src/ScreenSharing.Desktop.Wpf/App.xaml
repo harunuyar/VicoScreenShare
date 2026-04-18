@@ -16,6 +16,9 @@
             <conv:NullToCollapsedConverter x:Key="NullToCollapsed" />
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />
             <conv:InvertBoolToVisibilityConverter x:Key="InvertBoolToVisibility" />
+            <conv:TileLayoutColumnsConverter x:Key="TileLayoutColumns" />
+            <conv:TileLayoutRowsConverter x:Key="TileLayoutRows" />
+            <conv:PeerConnectionTooltipConverter x:Key="PeerConnectionTooltip" />
             <conv:ViewModelToPageConverter x:Key="VmToPage" />
         </ResourceDictionary>
     </Application.Resources>

@@ -6,6 +6,7 @@ public static class MessageType
     public const string CreateRoom = "create_room";
     public const string RoomCreated = "room_created";
     public const string JoinRoom = "join_room";
+    public const string LeaveRoom = "leave_room";
     public const string RoomJoined = "room_joined";
     public const string PeerJoined = "peer_joined";
     public const string PeerLeft = "peer_left";
@@ -18,4 +19,7 @@ public static class MessageType
     public const string Ping = "ping";
     public const string Pong = "pong";
     public const string Error = "error";
+    public const string ResumeSession = "resume_session";
+    public const string ResumeFailed = "resume_failed";
+    public const string PeerConnectionState = "peer_connection_state";
 }

@@ -33,6 +33,10 @@ public sealed class SignalingE2ETests : IAsyncLifetime
                         o.MaxRoomCapacity = 4;
                         o.HeartbeatInterval = TimeSpan.FromMinutes(10);
                         o.HeartbeatTimeout = TimeSpan.FromMinutes(20);
+                        // Tests that rely on the hard-eviction path (PeerLeft /
+                        // StreamEnded broadcasts) use a short grace so they
+                        // don't sit for 20s waiting for the default window.
+                        o.PeerGracePeriod = TimeSpan.FromMilliseconds(250);
                     });
                 });
             });
@@ -113,6 +117,13 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         await ExpectAsync(host, MessageType.PeerJoined, cts.Token);
 
         await CleanCloseAsync(host);
+
+        // Host's WS drop puts them into the grace window first. Other peers
+        // see a PeerConnectionState(IsConnected=false) before the hard-eviction
+        // PeerLeft arrives once the grace timer fires.
+        var disconnectEnv = await ExpectAsync(viewer, MessageType.PeerConnectionState, cts.Token);
+        var disconnect = disconnectEnv.Payload.Deserialize<PeerConnectionState>(ProtocolJson.Options)!;
+        disconnect.IsConnected.Should().BeFalse();
 
         var peerLeftEnvelope = await ExpectAsync(viewer, MessageType.PeerLeft, cts.Token);
         var peerLeft = peerLeftEnvelope.Payload.Deserialize<PeerLeft>(ProtocolJson.Options)!;
@@ -223,10 +234,16 @@ public sealed class SignalingE2ETests : IAsyncLifetime
             cts.Token);
         await ExpectAsync(viewer, MessageType.StreamStarted, cts.Token);
 
-        // Streamer vanishes without sending StreamEnded. The server should fan
-        // out a synthetic StreamEnded before the PeerLeft so the viewer can
-        // clear the tile immediately.
+        // Streamer vanishes without sending StreamEnded. With the grace window
+        // the sequence is now PeerConnectionState(false) immediately, then once
+        // the grace expires, the synthetic StreamEnded + PeerLeft fan out so the
+        // viewer can tear down the tile and release the subscription.
         await CleanCloseAsync(streamer);
+
+        var disconnectEnv = await ExpectAsync(viewer, MessageType.PeerConnectionState, cts.Token);
+        var disconnect = disconnectEnv.Payload.Deserialize<PeerConnectionState>(ProtocolJson.Options)!;
+        disconnect.PeerId.Should().Be(streamerJoin.YourPeerId);
+        disconnect.IsConnected.Should().BeFalse();
 
         var ended = await ExpectAsync(viewer, MessageType.StreamEnded, cts.Token);
         var endedPayload = ended.Payload.Deserialize<StreamEnded>(ProtocolJson.Options)!;

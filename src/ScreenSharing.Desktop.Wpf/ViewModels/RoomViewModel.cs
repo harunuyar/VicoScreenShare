@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
@@ -26,7 +27,10 @@ namespace ScreenSharing.Desktop.App.ViewModels;
 /// </summary>
 public sealed partial class RoomViewModel : ViewModelBase
 {
-    private readonly SignalingClient _signaling;
+    // Not readonly: on reconnect we swap _signaling for a brand-new SignalingClient
+    // (the old one is one-shot and disposed). All event subscriptions re-wire
+    // onto the new instance in ResubscribeSignalingEvents.
+    private SignalingClient _signaling;
     private readonly INavigationHost _navigation;
     private readonly IdentityStore _identity;
     private readonly Func<SignalingClient> _signalingFactory;
@@ -36,36 +40,43 @@ public sealed partial class RoomViewModel : ViewModelBase
     private readonly Dispatcher _dispatcher;
 
     private WebRtcSession? _webRtc;
-    private StreamReceiver? _streamReceiver;
     private ICaptureSource? _localCaptureSource;
     private CaptureStreamer? _captureStreamer;
     private bool _negotiationStarted;
+
+    private string _resumeToken = string.Empty;
+    private TimeSpan _resumeTtl = TimeSpan.Zero;
+    private CancellationTokenSource? _reconnectCts;
+    private bool _leavingIntentionally;
+
+    // True iff this client was publishing at the instant of the WS drop. The
+    // reconnect loop uses this to decide whether to restart the capture
+    // pipeline against the freshly-negotiated main PC and re-emit
+    // StreamStarted with the stashed StreamId so viewers keep their tile.
+    private bool _wasSharingBeforeDisconnect;
+    private string? _stashedStreamIdForResume;
 
     private VideoCodec _sessionCodec;
     private IVideoEncoderFactory _encoderFactory;
     private IVideoDecoderFactory _decoderFactory;
 
-    private Guid? _currentlyStreamingPeerId;
+    // Per-publisher tile. Each wraps a SubscriberSession (the client RecvOnly
+    // PC + decoder) and owns its own stall state + stats. The tile collection
+    // drives the ItemsControl grid in RoomView.xaml; adding/removing a tile
+    // mounts/unmounts its D3DImageVideoRenderer.
+    public ObservableCollection<PublisherTileViewModel> Tiles { get; } = new();
+
+    // Nominal frame rate per publisher, captured from StreamStarted so the
+    // per-tile renderer's jitter buffer can size to the sender's cadence even
+    // before the subscriber PC negotiation completes. Keyed by publisher peer id.
+    private readonly Dictionary<Guid, int> _announcedFrameRates = new();
+
     private string? _localStreamId;
 
-    // Remote-tile stall state machine.
-    //   Active                                      — frames flowing
-    //   no frame for PauseAfter         → Paused    — "Paused" overlay
-    //   no frame for PauseAfter + IdleAfter → Idle  — empty state
-    // A new frame from any moment flips us straight back to Active.
-    private static readonly TimeSpan PauseAfter = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan IdleAfter = TimeSpan.FromSeconds(5);
-    private DispatcherTimer? _staleFrameTimer;
-    private DateTime _lastRemoteFrameUtc = DateTime.MinValue;
-
-    // Per-stream stats. Two timers would be pointless — one 500 ms
-    // DispatcherTimer computes fps/mbps deltas for whichever tile is
-    // currently showing its overlay. Previous-value state lives here.
+    // Per-stream sender stats. Receiver-side stats are per-tile now.
     private DispatcherTimer? _statsTimer;
     private long _statsPrevSenderFrames;
     private long _statsPrevSenderBytes;
-    private long _statsPrevReceiverFrames;
-    private long _statsPrevReceiverBytes;
     private DateTime _statsPrevTickUtc = DateTime.MinValue;
 
 
@@ -100,6 +111,8 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
+        _resumeToken = initial.ResumeToken ?? string.Empty;
+        _resumeTtl = initial.ResumeTtl;
 
         Peers = new ObservableCollection<PeerViewModel>(
             initial.Peers.Select(p => new PeerViewModel(
@@ -111,12 +124,13 @@ public sealed partial class RoomViewModel : ViewModelBase
         HostPeerId = Peers.FirstOrDefault(p => p.IsHost)?.PeerId;
         UpdateYouAreHost();
 
-        _signaling.PeerJoined += OnPeerJoined;
-        _signaling.PeerLeft += OnPeerLeft;
-        _signaling.ServerError += OnServerError;
-        _signaling.ConnectionLost += OnConnectionLost;
-        _signaling.StreamStartedReceived += OnStreamStartedReceived;
-        _signaling.StreamEndedReceived += OnStreamEndedReceived;
+        Tiles.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasAnyTile));
+            OnPropertyChanged(nameof(TileCount));
+        };
+
+        SubscribeSignalingEvents(_signaling);
 
         // Seed the per-peer IsStreaming flag from the initial roster so
         // the members strip already shows live dots on anyone who was
@@ -125,15 +139,6 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             var vm = Peers.FirstOrDefault(x => x.PeerId == p.PeerId);
             if (vm is not null) vm.IsStreaming = p.IsStreaming;
-        }
-
-        var existingStreamer = initial.Peers.FirstOrDefault(
-            p => p.IsStreaming && p.PeerId != initial.YourPeerId);
-        if (existingStreamer is not null)
-        {
-            _currentlyStreamingPeerId = existingStreamer.PeerId;
-            _lastRemoteFrameUtc = DateTime.UtcNow;
-            StartStaleFrameTimer();
         }
 
         _ = StartWebRtcAsync();
@@ -148,11 +153,10 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     public ObservableCollection<PeerViewModel> Peers { get; }
 
-    /// <summary>
-    /// Current remote receiver, or null before negotiation. The room view's
-    /// D3DImageVideoRenderer picks this up to subscribe for decoded frames.
-    /// </summary>
-    public StreamReceiver? StreamReceiver => _streamReceiver;
+    /// <summary>True while at least one publisher tile is mounted.</summary>
+    public bool HasAnyTile => Tiles.Count > 0;
+
+    public int TileCount => Tiles.Count;
 
     /// <summary>
     /// Local capture exposed to a separate, smaller renderer for the
@@ -173,30 +177,14 @@ public sealed partial class RoomViewModel : ViewModelBase
     [ObservableProperty] private Guid? _hostPeerId;
     [ObservableProperty] private bool _youAreHost;
     [ObservableProperty] private string? _statusMessage;
+
+    /// <summary>
+    /// Overlay text shown when no tiles are mounted yet (e.g. "Waiting for a
+    /// streamer…", "Switching codec…", "Media setup failed: …"). When a tile
+    /// mounts, it overlays the grid and this status goes dormant.
+    /// </summary>
     [ObservableProperty] private string? _mediaStatus;
     [ObservableProperty] private bool _isSharing;
-    [ObservableProperty] private bool _hasRemoteStream;
-
-    /// <summary>
-    /// True when the remote stream has stalled (no frames for
-    /// <see cref="PauseAfter"/>) but we haven't yet given up. The room
-    /// view freezes the last frame and overlays a "Paused" badge. If
-    /// frames start flowing again we flip back to active; if nothing
-    /// arrives by <see cref="PauseAfter"/> + <see cref="IdleAfter"/>,
-    /// we clear the tile to the empty state.
-    /// </summary>
-    [ObservableProperty] private bool _isRemotePaused;
-
-    /// <summary>
-    /// Union of <see cref="HasRemoteStream"/> and <see cref="IsRemotePaused"/>.
-    /// Drives the remote-tile renderer's Visibility so it goes
-    /// Collapsed on Idle — the HwndHost child window otherwise keeps
-    /// showing whatever was last in its swap chain back buffer.
-    /// </summary>
-    public bool HasRemoteVideo => HasRemoteStream || IsRemotePaused;
-
-    partial void OnHasRemoteStreamChanged(bool value) => OnPropertyChanged(nameof(HasRemoteVideo));
-    partial void OnIsRemotePausedChanged(bool value) => OnPropertyChanged(nameof(HasRemoteVideo));
 
     /// <summary>
     /// Connection dot brush. Green while the signaling socket is up,
@@ -206,19 +194,29 @@ public sealed partial class RoomViewModel : ViewModelBase
         System.Windows.Media.Brushes.LimeGreen;
 
     /// <summary>
-    /// Nominal frame rate the current remote streamer announced in its
-    /// <see cref="StreamStarted"/> message. The renderer's jitter buffer
-    /// + paint pacer use this as their tick clock so the wall-clock
-    /// gap between painted frames matches the gap between sent frames.
+    /// True while the signaling WebSocket is down and <see cref="ReconnectLoopAsync"/>
+    /// is actively trying to bring it back. The room view shows a "Reconnecting…"
+    /// chip and keeps the user on the room rather than navigating home.
     /// </summary>
-    [ObservableProperty] private int _remoteNominalFrameRate = 60;
+    [ObservableProperty] private bool _isReconnecting;
 
-    // Right-edge stats panel. Single open/close flag — replaces the
-    // per-tile hover overlays which couldn't work under HwndHost
-    // airspace. The button on the top bar toggles it; an X inside
-    // the panel closes it.
+    /// <summary>
+    /// Human-readable label for the reconnect chip. "Reconnecting…" during the
+    /// grace window, a terminal message if the resume fails.
+    /// </summary>
+    [ObservableProperty] private string _reconnectMessage = "Reconnecting…";
+
+    // Right-edge stats panel. Single open/close flag — drives the panel
+    // on the view; when open, the panel aggregates self-outgoing stats
+    // plus per-tile incoming stats.
     [ObservableProperty] private bool _isStatsPanelOpen;
     [ObservableProperty] private string _outgoingStats = "—";
+
+    /// <summary>
+    /// Combined incoming-stats string — concatenates each tile's stats.
+    /// Phase 6 may replace this with per-tile overlays, but for now the
+    /// stats panel shows a single pane for all active tiles.
+    /// </summary>
     [ObservableProperty] private string _incomingStats = "—";
 
     /// <summary>
@@ -227,11 +225,6 @@ public sealed partial class RoomViewModel : ViewModelBase
     /// appends it to <see cref="OutgoingStats"/>.
     /// </summary>
     [ObservableProperty] private string? _selfRenderStatsLine;
-
-    /// <summary>
-    /// Paint-fps line for the remote-stream renderer. Same pattern.
-    /// </summary>
-    [ObservableProperty] private string? _remoteRenderStatsLine;
 
     [RelayCommand]
     private void ToggleStatsPanel() => IsStatsPanelOpen = !IsStatsPanelOpen;
@@ -249,38 +242,24 @@ public sealed partial class RoomViewModel : ViewModelBase
         _negotiationStarted = true;
 
         WebRtcSession? session = null;
-        StreamReceiver? receiver = null;
         try
         {
+            // Main PC is now send-only in practice: the client-initiated
+            // negotiation exists so the peer connection is warm and ready to
+            // carry the user's own outbound screen share when they click Share.
+            // Fan-in (remote streams) flows through per-publisher
+            // SubscriberSession PCs, created reactively on server-driven
+            // SdpOffers tagged with a publisher's SubscriptionId.
             session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional, _sessionCodec);
-
-            receiver = new StreamReceiver(session.PeerConnection, _decoderFactory, displayName: "Remote peer");
-            receiver.FrameArrived += OnRemoteFrameArrived;
-            // The GPU texture fast path emits on TextureArrived and DOES NOT
-            // raise FrameArrived (the decoder skips the CPU readback). We
-            // still need to flip HasRemoteStream so the RemoteRenderer is
-            // laid out and visible — without this the tile stays Collapsed
-            // and "nothing renders" even though the renderer is successfully
-            // painting underneath.
-            receiver.TextureArrived += OnRemoteTextureArrived;
-            await receiver.StartAsync().ConfigureAwait(true);
 
             await session.NegotiateAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
 
             _webRtc = session;
-            _streamReceiver = receiver;
-            OnPropertyChanged(nameof(StreamReceiver));
             MediaStatus = "Waiting for a streamer...";
         }
         catch (Exception ex)
         {
             MediaStatus = $"Media setup failed: {ex.Message}";
-            if (receiver is not null)
-            {
-                try { receiver.FrameArrived -= OnRemoteFrameArrived; } catch { }
-                try { receiver.TextureArrived -= OnRemoteTextureArrived; } catch { }
-                try { await receiver.DisposeAsync().ConfigureAwait(true); } catch { }
-            }
             if (session is not null)
             {
                 try { await session.DisposeAsync().ConfigureAwait(true); } catch { }
@@ -289,54 +268,80 @@ public sealed partial class RoomViewModel : ViewModelBase
         }
     }
 
-    private void OnRemoteFrameArrived(in CaptureFrameData frame)
+    /// <summary>
+    /// Handle a server-driven SDP offer. Null SubscriptionId = main PC offer
+    /// (unused — the client is the offerer on that PC). Non-null = a subscriber
+    /// PC the server is driving for a specific publisher; we build a fresh
+    /// RecvOnly PC for it, answer, and wire up its StreamReceiver.
+    /// </summary>
+    private void OnSdpOfferReceived(SdpOffer offer)
     {
-        NotifyRemoteFrameObserved();
+        if (string.IsNullOrEmpty(offer.SubscriptionId)) return;
+        if (!Guid.TryParseExact(offer.SubscriptionId, "N", out var publisherPeerId)) return;
+
+        // Fire-and-forget: setRemoteDescription / createAnswer / send happens on
+        // a background task; UI state transitions are dispatched back.
+        _ = CreateOrReplaceSubscriberAsync(publisherPeerId, offer.Sdp);
     }
 
-    // Same job as OnRemoteFrameArrived but for the GPU-texture fast path.
-    // StreamReceiver's TextureArrived carries no CaptureFrameData, only the
-    // native pointer + dimensions + timestamp, which we don't need here —
-    // we just need a signal that frames are flowing so the remote tile can
-    // become visible.
-    private void OnRemoteTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
+    private async Task CreateOrReplaceSubscriberAsync(Guid publisherPeerId, string offerSdp)
     {
-        NotifyRemoteFrameObserved();
-    }
+        // Capture the publisher's display-name and announced cadence while the
+        // subscriber is wired up; defaults if neither is known yet (the peer may
+        // have left the roster after sending the offer, or StreamStarted arrived
+        // after the SdpOffer on the signaling stream).
+        var existingPeer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
+        var displayName = existingPeer?.DisplayName ?? $"Publisher {publisherPeerId:N}".Substring(0, 16);
+        var nominalFps = _announcedFrameRates.TryGetValue(publisherPeerId, out var fps) ? fps : 60;
 
-    private void NotifyRemoteFrameObserved()
-    {
-        // Drop late frames that arrive after we've torn down the stream.
-        // StreamEnded comes in on the signaling path (TCP) and a handful
-        // of RTP packets can still be in flight on the media path (UDP);
-        // without this guard, those late decoded frames would call back
-        // into EnterActiveState() and re-flip HasRemoteStream to true
-        // forever, leaving the last frame stuck on screen because the
-        // stale-frame timer also checks _currentlyStreamingPeerId.
-        if (_currentlyStreamingPeerId is null) return;
-
-        _lastRemoteFrameUtc = DateTime.UtcNow;
-
-        // Fast path: already in the Active state with nothing to clear.
-        // Skip the dispatcher hop entirely — this fires on every decoded
-        // frame, potentially 120+ times per second.
-        if (HasRemoteStream && !IsRemotePaused && MediaStatus is null) return;
-
-        if (_dispatcher.CheckAccess())
+        PublisherTileViewModel? toDispose = null;
+        lock (Tiles)
         {
-            EnterActiveState();
+            // If a tile already exists for this publisher, we're replacing its
+            // underlying PC (re-offer path — Phase 5 uses this on publisher
+            // reconnect). Take the old one out and dispose it after we've swapped
+            // in the replacement so the grid doesn't flicker.
+            var existing = Tiles.FirstOrDefault(t => t.PublisherPeerId == publisherPeerId);
+            if (existing is not null)
+            {
+                toDispose = existing;
+            }
         }
-        else
-        {
-            _dispatcher.BeginInvoke(new Action(EnterActiveState));
-        }
-    }
 
-    private void EnterActiveState()
-    {
-        HasRemoteStream = true;
-        IsRemotePaused = false;
-        MediaStatus = null;
+        var session = new SubscriberSession(_signaling, publisherPeerId, _decoderFactory,
+            displayName: displayName);
+
+        try
+        {
+            await session.AcceptOfferAsync(offerSdp).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[room] subscriber offer for {publisherPeerId:N} failed: {ex.Message}");
+            try { await session.DisposeAsync().ConfigureAwait(true); } catch { }
+            return;
+        }
+
+        var tile = new PublisherTileViewModel(session, displayName, nominalFps);
+
+        await _dispatcher.InvokeAsync(() =>
+        {
+            if (toDispose is not null)
+            {
+                Tiles.Remove(toDispose);
+            }
+            Tiles.Add(tile);
+            // If the media status was "Waiting for a streamer…" etc, clear it so
+            // the grid takes over the empty state region.
+            MediaStatus = null;
+        }).Task.ConfigureAwait(true);
+
+        if (toDispose is not null)
+        {
+            try { await toDispose.DisposeAsync().ConfigureAwait(true); } catch { }
+        }
+
+        DebugLog.Write($"[room] mounted tile for {publisherPeerId:N} ({displayName})");
     }
 
     [RelayCommand]
@@ -438,15 +443,8 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         await StopSharingInternalAsync().ConfigureAwait(true);
 
-        ClearRemoteStream("Switching codec...");
-        if (_streamReceiver is not null)
-        {
-            try { _streamReceiver.FrameArrived -= OnRemoteFrameArrived; } catch { }
-            try { _streamReceiver.TextureArrived -= OnRemoteTextureArrived; } catch { }
-            try { await _streamReceiver.DisposeAsync().ConfigureAwait(true); } catch { }
-            _streamReceiver = null;
-            OnPropertyChanged(nameof(StreamReceiver));
-        }
+        MediaStatus = "Switching codec...";
+        await DisposeAllSubscribersAsync().ConfigureAwait(true);
         if (_webRtc is not null)
         {
             try { await _webRtc.DisposeAsync().ConfigureAwait(true); } catch { }
@@ -527,21 +525,15 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnPeerLeft(Guid peerId, Guid? newHostPeerId)
     {
-        _dispatcher.BeginInvoke(new Action(() =>
+        _dispatcher.BeginInvoke(new Action(async () =>
         {
             var existing = Peers.FirstOrDefault(p => p.PeerId == peerId);
             if (existing is not null) Peers.Remove(existing);
 
-            if (_currentlyStreamingPeerId == peerId)
-            {
-                // PeerLeft with no StreamEnded preceding it = the
-                // streamer didn't gracefully stop (process killed,
-                // WebSocket dropped, network cut). Treat it like a
-                // network stall: freeze on the last frame, show Paused,
-                // let the stale-frame timer drop us to Idle after
-                // IdleAfter if nothing recovers.
-                EnterPausedState();
-            }
+            // Dispose the tile (and its subscription) for this peer if any.
+            await DisposeTileAsync(peerId).ConfigureAwait(true);
+
+            _announcedFrameRates.Remove(peerId);
 
             if (newHostPeerId.HasValue)
             {
@@ -560,96 +552,52 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             SetPeerStreaming(message.PeerId, true);
             if (message.PeerId == YourPeerId) return;
-            _currentlyStreamingPeerId = message.PeerId;
-            _lastRemoteFrameUtc = DateTime.UtcNow;
-            // The receiver's paint pacer needs the cadence the sender
-            // promised, so it can size its jitter buffer and tick at
-            // the same rate. Defaults to 60 if the sender pre-dates
-            // this field.
-            RemoteNominalFrameRate = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
-            StartStaleFrameTimer();
+            var fps = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
+            _announcedFrameRates[message.PeerId] = fps;
+
+            // If a tile is already mounted (race between StreamStarted and the
+            // subscriber SDP offer — StreamStarted can arrive after the SdpOffer),
+            // push the cadence into it now.
+            var existingTile = Tiles.FirstOrDefault(t => t.PublisherPeerId == message.PeerId);
+            if (existingTile is not null)
+            {
+                existingTile.NominalFrameRate = fps;
+            }
         }));
     }
 
     private void OnStreamEndedReceived(StreamEnded message)
     {
-        DebugLog.Write($"[room] StreamEnded received from {message.PeerId} (current={_currentlyStreamingPeerId})");
-        _dispatcher.BeginInvoke(new Action(() =>
+        DebugLog.Write($"[room] StreamEnded received from {message.PeerId}");
+        _dispatcher.BeginInvoke(new Action(async () =>
         {
             SetPeerStreaming(message.PeerId, false);
-            if (_currentlyStreamingPeerId != message.PeerId) return;
-            // Explicit StreamEnded = the streamer stopped on purpose.
-            // Jump straight to Idle so watchers don't stare at a frozen
-            // last frame for no reason. Paused is reserved for
-            // unexpected stalls (network drop, process crash) caught by
-            // the stale-frame timer.
-            ClearRemoteStream(null);
+            _announcedFrameRates.Remove(message.PeerId);
+
+            // Drop the subscription + tile for this publisher. Server has
+            // already torn down its matching SfuSubscriberPeer on its side.
+            await DisposeTileAsync(message.PeerId).ConfigureAwait(true);
         }));
     }
 
-    /// <summary>
-    /// Moves the remote tile into Idle — clears the streamer, hides the
-    /// last frame, stops the stall timer. Called on explicit teardown
-    /// paths (LeaveRoom, codec switch) and from the stall state machine
-    /// once we've sat in Paused long enough.
-    /// </summary>
-    private void ClearRemoteStream(string? statusMessage)
+    /// <summary>Dispose a single tile for the given publisher, if one exists.</summary>
+    private async Task DisposeTileAsync(Guid publisherPeerId)
     {
-        if (_currentlyStreamingPeerId is Guid id) SetPeerStreaming(id, false);
-        _currentlyStreamingPeerId = null;
-        HasRemoteStream = false;
-        IsRemotePaused = false;
-        MediaStatus = statusMessage;
-        StopStaleFrameTimer();
+        PublisherTileViewModel? tile;
+        tile = Tiles.FirstOrDefault(t => t.PublisherPeerId == publisherPeerId);
+        if (tile is null) return;
+
+        Tiles.Remove(tile);
+        try { await tile.DisposeAsync().ConfigureAwait(true); } catch { }
     }
 
-    /// <summary>
-    /// Moves the remote tile into Paused — keeps the last frame on
-    /// screen and shows the "Paused" overlay, but leaves the stall
-    /// timer running so we can either recover to Active or drop to
-    /// Idle. No-op if we're not currently receiving a stream.
-    /// </summary>
-    private void EnterPausedState()
+    private async Task DisposeAllSubscribersAsync()
     {
-        if (!HasRemoteStream && !IsRemotePaused) return;
-        HasRemoteStream = false;
-        IsRemotePaused = true;
-    }
-
-    private void StartStaleFrameTimer()
-    {
-        if (_staleFrameTimer is not null) return;
-        _staleFrameTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
+        var all = Tiles.ToArray();
+        Tiles.Clear();
+        foreach (var tile in all)
         {
-            Interval = TimeSpan.FromMilliseconds(500),
-        };
-        _staleFrameTimer.Tick += (_, _) => OnStaleFrameTick();
-        _staleFrameTimer.Start();
-    }
-
-    private void StopStaleFrameTimer()
-    {
-        _staleFrameTimer?.Stop();
-        _staleFrameTimer = null;
-    }
-
-    private void OnStaleFrameTick()
-    {
-        if (_currentlyStreamingPeerId is null) return;
-
-        var gap = DateTime.UtcNow - _lastRemoteFrameUtc;
-
-        // Active → Paused: freeze the last frame and show a Paused badge.
-        if (HasRemoteStream && gap >= PauseAfter)
-        {
-            EnterPausedState();
-            return;
-        }
-
-        // Paused → Idle: give up, clear the tile to the empty state.
-        if (IsRemotePaused && gap >= PauseAfter + IdleAfter)
-        {
-            ClearRemoteStream(null);
+            try { await tile.DisposeAsync().ConfigureAwait(true); } catch { }
         }
     }
 
@@ -712,29 +660,16 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private string BuildIncomingStats(double elapsedSeconds)
     {
-        var receiver = _streamReceiver;
-        if (receiver is null || receiver.FramesDecoded == 0) return "no incoming stream";
+        if (Tiles.Count == 0) return "no incoming stream";
 
-        var currentFrames = receiver.FramesDecoded;
-        var currentBytes = receiver.EncodedByteCount;
-        var deltaFrames = currentFrames - _statsPrevReceiverFrames;
-        var deltaBytes = currentBytes - _statsPrevReceiverBytes;
-        _statsPrevReceiverFrames = currentFrames;
-        _statsPrevReceiverBytes = currentBytes;
-
-        var fps = deltaFrames / elapsedSeconds;
-        var mbps = deltaBytes * 8.0 / elapsedSeconds / 1_000_000.0;
-
-        var core =
-            $"codec:  {receiver.Codec}\n" +
-            $"size:   {receiver.LastWidth}x{receiver.LastHeight}\n" +
-            $"fps:    {fps:F1}\n" +
-            $"rate:   {mbps:F2} Mbps\n" +
-            $"frames: {receiver.FramesDecoded}";
-
-        return string.IsNullOrEmpty(RemoteRenderStatsLine)
-            ? core
-            : core + "\n" + RemoteRenderStatsLine;
+        var sb = new System.Text.StringBuilder();
+        foreach (var tile in Tiles)
+        {
+            tile.UpdateStats(elapsedSeconds);
+            if (sb.Length > 0) sb.Append("\n\n");
+            sb.Append(tile.DisplayName).Append(":\n").Append(tile.Stats);
+        }
+        return sb.ToString();
     }
 
     private void OnServerError(ErrorCode code, string message)
@@ -744,37 +679,355 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnConnectionLost(string? reason)
     {
+        // Don't kick off a reconnect if the user is on their way out.
+        if (_leavingIntentionally) return;
+
+        _dispatcher.BeginInvoke(new Action(async () =>
+        {
+            StatusMessage = null;
+            ConnectionDotBrush = System.Windows.Media.Brushes.OrangeRed;
+            IsReconnecting = true;
+            ReconnectMessage = "Reconnecting…";
+
+            // If we were publishing at the drop, stash the stream id so the
+            // reconnect path can re-emit StreamStarted with the same id and
+            // viewers keep their tile instead of unmounting + remounting.
+            _wasSharingBeforeDisconnect = IsSharing;
+            _stashedStreamIdForResume = _localStreamId;
+
+            // Pause the encoder pipeline — it was shipping bytes to a PC that
+            // no longer exists. The capture source stays running so the
+            // self-preview keeps painting; we rebuild the encoder + rewire it
+            // to the new PC on successful resume.
+            if (_captureStreamer is not null)
+            {
+                try { _captureStreamer.Stop(); } catch { }
+                try { _captureStreamer.Dispose(); } catch { }
+                _captureStreamer = null;
+            }
+
+            // Tear down local media state tied to the dead signaling client.
+            // The server side is equivalent: our SfuPeer + our subscriber PCs
+            // are disposed on entry to the server grace window. A successful
+            // resume rebuilds both sides from scratch.
+            await DisposeAllSubscribersAsync().ConfigureAwait(true);
+            if (_webRtc is not null)
+            {
+                try { await _webRtc.DisposeAsync().ConfigureAwait(true); } catch { }
+                _webRtc = null;
+            }
+            _negotiationStarted = false;
+
+            _reconnectCts?.Cancel();
+            _reconnectCts = new CancellationTokenSource();
+            _ = ReconnectLoopAsync(_reconnectCts.Token);
+        }));
+    }
+
+    private void SubscribeSignalingEvents(SignalingClient client)
+    {
+        client.PeerJoined += OnPeerJoined;
+        client.PeerLeft += OnPeerLeft;
+        client.ServerError += OnServerError;
+        client.ConnectionLost += OnConnectionLost;
+        client.StreamStartedReceived += OnStreamStartedReceived;
+        client.StreamEndedReceived += OnStreamEndedReceived;
+        client.SdpOfferReceived += OnSdpOfferReceived;
+        client.PeerConnectionStateChanged += OnPeerConnectionStateChanged;
+        client.ResumeFailedReceived += OnResumeFailedReceived;
+    }
+
+    private void UnsubscribeSignalingEvents(SignalingClient client)
+    {
+        client.PeerJoined -= OnPeerJoined;
+        client.PeerLeft -= OnPeerLeft;
+        client.ServerError -= OnServerError;
+        client.ConnectionLost -= OnConnectionLost;
+        client.StreamStartedReceived -= OnStreamStartedReceived;
+        client.StreamEndedReceived -= OnStreamEndedReceived;
+        client.SdpOfferReceived -= OnSdpOfferReceived;
+        client.PeerConnectionStateChanged -= OnPeerConnectionStateChanged;
+        client.ResumeFailedReceived -= OnResumeFailedReceived;
+    }
+
+    private void OnPeerConnectionStateChanged(PeerConnectionState state)
+    {
         _dispatcher.BeginInvoke(new Action(() =>
         {
-            StatusMessage = string.IsNullOrEmpty(reason)
-                ? "Disconnected."
-                : $"Disconnected: {reason}";
-            ConnectionDotBrush = System.Windows.Media.Brushes.OrangeRed;
+            var peer = Peers.FirstOrDefault(p => p.PeerId == state.PeerId);
+            if (peer is null) return;
+            peer.IsConnected = state.IsConnected;
         }));
+    }
+
+    private void OnResumeFailedReceived(ResumeFailed failure)
+    {
+        // The server rejected our resume attempt. No point in retrying further —
+        // the slot is gone. Signal the reconnect loop to stop and navigate home.
+        _dispatcher.BeginInvoke(new Action(() =>
+        {
+            ReconnectMessage = failure.Reason switch
+            {
+                ResumeFailedReason.Expired => "Reconnect timed out. Returning to home…",
+                ResumeFailedReason.RoomGone => "Room closed. Returning to home…",
+                _ => "Session unrecognized. Returning to home…",
+            };
+            _reconnectCts?.Cancel();
+            // Delay the nav-away slightly so the message is readable.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(1500).ConfigureAwait(false);
+                await _dispatcher.InvokeAsync(NavigateHome);
+            });
+        }));
+    }
+
+    /// <summary>
+    /// Reconnect loop with capped exponential backoff. On each attempt we build
+    /// a brand-new <see cref="SignalingClient"/> (the old one is one-shot), send
+    /// <c>ClientHello</c> + <c>ResumeSession</c>, and swap it into place on
+    /// success. Gives up silently when <paramref name="ct"/> fires — either
+    /// because we left intentionally or because a <c>ResumeFailed</c> came in.
+    /// </summary>
+    private async Task ReconnectLoopAsync(CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + (_resumeTtl > TimeSpan.Zero ? _resumeTtl : TimeSpan.FromSeconds(20));
+        var delayMs = 500;
+        var rng = new Random();
+
+        while (!ct.IsCancellationRequested)
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                // Fall out of the loop and navigate away. Server has torn down
+                // the slot; presenting a fresh JoinRoom would surface a
+                // RoomNotFound in a typical case.
+                await _dispatcher.InvokeAsync(() =>
+                {
+                    ReconnectMessage = "Reconnect timed out. Returning to home…";
+                });
+                await Task.Delay(1000, CancellationToken.None).ConfigureAwait(false);
+                await _dispatcher.InvokeAsync(NavigateHome);
+                return;
+            }
+
+            SignalingClient? candidate = null;
+            try
+            {
+                candidate = _signalingFactory();
+                // Subscribe events BEFORE connect — catches an early ConnectionLost
+                // emitted during the hello/resume handshake.
+                SubscribeSignalingEvents(candidate);
+
+                var profile = _identity.LoadOrCreate();
+                var hello = new ClientHello(profile.UserId, profile.DisplayName, ProtocolVersion.Current);
+                await candidate.ConnectAsync(_settings.ServerUri, hello, ct).ConfigureAwait(false);
+
+                // Ask the server to rebind us to our existing room slot.
+                await candidate.ResumeSessionAsync(RoomId, _resumeToken, ct).ConfigureAwait(false);
+
+                // Wait for either RoomJoined (success) or ResumeFailed (route via event).
+                var tcs = new TaskCompletionSource<RoomJoined>(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnResumedJoined(RoomJoined rj) => tcs.TrySetResult(rj);
+                candidate.RoomJoined += OnResumedJoined;
+
+                try
+                {
+                    using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var completed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5), waitCts.Token))
+                        .ConfigureAwait(false);
+                    if (completed != tcs.Task)
+                    {
+                        throw new TimeoutException("Server did not respond to ResumeSession within 5s");
+                    }
+
+                    var rj = await tcs.Task.ConfigureAwait(false);
+
+                    // Swap the signaling client under the dispatcher so event
+                    // handlers see the new instance first.
+                    await _dispatcher.InvokeAsync(async () =>
+                    {
+                        var old = _signaling;
+                        UnsubscribeSignalingEvents(old);
+                        _signaling = candidate;
+                        candidate = null; // ownership transferred
+                        try { await old.DisposeAsync().ConfigureAwait(true); } catch { }
+
+                        _resumeToken = rj.ResumeToken ?? _resumeToken;
+                        _resumeTtl = rj.ResumeTtl != default ? rj.ResumeTtl : _resumeTtl;
+
+                        // Merge the fresh roster snapshot into Peers. Any new
+                        // peers the server knows about get added; IsConnected
+                        // flags sync back to the server's authoritative view.
+                        ApplyRosterSnapshot(rj.Peers);
+
+                        // Rebuild the main PC, then — if we were publishing at
+                        // the drop — restart the capture streamer against it
+                        // and re-announce StreamStarted with the original
+                        // StreamId so viewers keep their tile.
+                        _ = StartWebRtcAsync().ContinueWith(async _ =>
+                        {
+                            if (_wasSharingBeforeDisconnect && _localCaptureSource is not null && _webRtc is not null)
+                            {
+                                await _dispatcher.InvokeAsync(() => RestoreSharingAfterResumeAsync()).Task.ConfigureAwait(false);
+                            }
+                            _wasSharingBeforeDisconnect = false;
+                            _stashedStreamIdForResume = null;
+                        });
+
+                        IsReconnecting = false;
+                        ConnectionDotBrush = System.Windows.Media.Brushes.LimeGreen;
+                        StatusMessage = null;
+                    }).Task.ConfigureAwait(false);
+
+                    return;
+                }
+                finally
+                {
+                    candidate?.RoomJoined -= OnResumedJoined;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (candidate is not null)
+                {
+                    UnsubscribeSignalingEvents(candidate);
+                    try { await candidate.DisposeAsync().ConfigureAwait(false); } catch { }
+                }
+                return;
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[room] reconnect attempt failed: {ex.Message}");
+                if (candidate is not null)
+                {
+                    UnsubscribeSignalingEvents(candidate);
+                    try { await candidate.DisposeAsync().ConfigureAwait(false); } catch { }
+                }
+            }
+
+            // Capped exponential backoff with a ±20% jitter so a room full of
+            // simultaneously-dropped clients don't all hammer on the same ticks.
+            var jitter = 1.0 + (rng.NextDouble() * 0.4 - 0.2);
+            var wait = Math.Min(10_000, (int)(delayMs * jitter));
+            try { await Task.Delay(wait, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+            delayMs = Math.Min(10_000, delayMs * 2);
+        }
+    }
+
+    private void ApplyRosterSnapshot(IReadOnlyList<PeerInfo> snapshot)
+    {
+        // Add any peers we don't already know about, update existing ones.
+        foreach (var info in snapshot)
+        {
+            var vm = Peers.FirstOrDefault(p => p.PeerId == info.PeerId);
+            if (vm is null)
+            {
+                Peers.Add(new PeerViewModel(info.PeerId, info.DisplayName, info.IsHost, info.PeerId == YourPeerId)
+                {
+                    IsStreaming = info.IsStreaming,
+                    IsConnected = info.IsConnected,
+                });
+            }
+            else
+            {
+                vm.DisplayName = info.DisplayName;
+                vm.IsHost = info.IsHost;
+                vm.IsStreaming = info.IsStreaming;
+                vm.IsConnected = info.IsConnected;
+            }
+        }
+
+        // Drop any peers the server no longer knows about.
+        for (var i = Peers.Count - 1; i >= 0; i--)
+        {
+            if (snapshot.All(s => s.PeerId != Peers[i].PeerId))
+            {
+                Peers.RemoveAt(i);
+            }
+        }
+
+        HostPeerId = Peers.FirstOrDefault(p => p.IsHost)?.PeerId;
+        UpdateYouAreHost();
+    }
+
+    /// <summary>
+    /// Rebuild the <see cref="CaptureStreamer"/> against the freshly-negotiated
+    /// main PC and re-emit <see cref="StreamStarted"/> with the preserved
+    /// StreamId so viewers don't unmount + remount their tile. The capture
+    /// source kept running during the drop, so self-preview never flickered.
+    /// </summary>
+    private async Task RestoreSharingAfterResumeAsync()
+    {
+        if (_webRtc is null || _localCaptureSource is null) return;
+
+        try
+        {
+            var session = _webRtc;
+            var streamer = new CaptureStreamer(
+                _localCaptureSource,
+                (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload),
+                _settings.Video,
+                _encoderFactory);
+            _captureStreamer = streamer;
+            streamer.Start();
+
+            // Reuse the original stream id so the server's fan-out semantics
+            // (viewers already have a tile for this PeerId) keep working across
+            // the drop. Without this the viewers would see StreamEnded at the
+            // grace boundary, but because we resume first the server never
+            // emits one.
+            var streamId = _stashedStreamIdForResume ?? Guid.NewGuid().ToString("N");
+            _localStreamId = streamId;
+
+            await _signaling.SendStreamStartedAsync(
+                streamId,
+                StreamKind.Screen,
+                hasAudio: false,
+                nominalFrameRate: _settings.Video.TargetFrameRate)
+                .ConfigureAwait(true);
+
+            DebugLog.Write($"[room] re-emitted StreamStarted after resume (streamId={streamId})");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[room] failed to restore sharing after resume: {ex.Message}");
+            StatusMessage = $"Failed to resume share: {ex.Message}";
+            await StopSharingInternalAsync().ConfigureAwait(true);
+        }
+    }
+
+    private void NavigateHome()
+    {
+        _leavingIntentionally = true;
+        _reconnectCts?.Cancel();
+        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider);
+        _navigation.NavigateTo(home);
     }
 
     [RelayCommand]
     private async Task LeaveRoomAsync()
     {
-        _signaling.PeerJoined -= OnPeerJoined;
-        _signaling.PeerLeft -= OnPeerLeft;
-        _signaling.ServerError -= OnServerError;
-        _signaling.ConnectionLost -= OnConnectionLost;
-        _signaling.StreamStartedReceived -= OnStreamStartedReceived;
-        _signaling.StreamEndedReceived -= OnStreamEndedReceived;
-        StopStaleFrameTimer();
+        // Short-circuit the reconnect loop so a WS drop racing with Leave
+        // doesn't spin up a resume attempt after we've asked to go home.
+        _leavingIntentionally = true;
+        _reconnectCts?.Cancel();
+
+        UnsubscribeSignalingEvents(_signaling);
         StopStatsTimer();
 
         await StopSharingInternalAsync().ConfigureAwait(true);
 
-        if (_streamReceiver is not null)
+        // Signal intentional departure so the server bypasses the reconnect
+        // grace window and the other peers don't see us as "disconnected" for
+        // 20 seconds before the PeerLeft actually arrives.
+        if (_signaling.IsConnected)
         {
-            try { _streamReceiver.FrameArrived -= OnRemoteFrameArrived; } catch { }
-            try { _streamReceiver.TextureArrived -= OnRemoteTextureArrived; } catch { }
-            await _streamReceiver.DisposeAsync().ConfigureAwait(true);
-            _streamReceiver = null;
-            OnPropertyChanged(nameof(StreamReceiver));
+            try { await _signaling.LeaveRoomAsync().ConfigureAwait(true); } catch { }
         }
+
+        await DisposeAllSubscribersAsync().ConfigureAwait(true);
         if (_webRtc is not null)
         {
             await _webRtc.DisposeAsync().ConfigureAwait(true);

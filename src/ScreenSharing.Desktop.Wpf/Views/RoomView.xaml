@@ -36,25 +36,42 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <Border Grid.Column="0"
-                        Background="{DynamicResource ControlFillColorSecondaryBrush}"
-                        CornerRadius="14"
-                        Padding="12,6">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Ellipse Width="8" Height="8"
-                                 Fill="{Binding ConnectionDotBrush}"
-                                 VerticalAlignment="Center" Margin="0,0,10,0" />
-                        <TextBlock Text="{Binding RoomId}"
-                                   FontFamily="Cascadia Mono, Consolas"
-                                   FontSize="15" FontWeight="SemiBold"
-                                   VerticalAlignment="Center" />
-                        <ui:Button Appearance="Transparent"
-                                   Icon="{ui:SymbolIcon Symbol=Copy24}"
-                                   ToolTip="Copy room ID"
-                                   Click="OnCopyRoomIdClick"
-                                   Padding="4" Margin="6,0,0,0" />
-                    </StackPanel>
-                </Border>
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <Border Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                            CornerRadius="14"
+                            Padding="12,6">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Width="8" Height="8"
+                                     Fill="{Binding ConnectionDotBrush}"
+                                     VerticalAlignment="Center" Margin="0,0,10,0" />
+                            <TextBlock Text="{Binding RoomId}"
+                                       FontFamily="Cascadia Mono, Consolas"
+                                       FontSize="15" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" />
+                            <ui:Button Appearance="Transparent"
+                                       Icon="{ui:SymbolIcon Symbol=Copy24}"
+                                       ToolTip="Copy room ID"
+                                       Click="OnCopyRoomIdClick"
+                                       Padding="4" Margin="6,0,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Reconnect chip: visible only while the client is inside
+                         the server-side grace window trying to resume. -->
+                    <Border Background="#FFB78100"
+                            CornerRadius="14"
+                            Padding="10,6"
+                            Margin="8,0,0,0"
+                            Visibility="{Binding IsReconnecting, Converter={StaticResource BoolToVisibility}}">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ui:SymbolIcon Symbol="ArrowSync24" FontSize="14" Foreground="White"
+                                           VerticalAlignment="Center" />
+                            <TextBlock Text="{Binding ReconnectMessage}"
+                                       Foreground="White" FontWeight="SemiBold" FontSize="12"
+                                       VerticalAlignment="Center" Margin="8,0,0,0" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
 
                 <ui:Button Grid.Column="2"
                            Appearance="Secondary"
@@ -75,7 +92,7 @@
                            Margin="8,0,0,0" />
             </Grid>
 
-            <!-- Video area: row 0 stretches (remote stream),
+            <!-- Video area: row 0 stretches (publisher tile grid),
                  row 1 is Auto (self preview, only when sharing). -->
             <Grid Grid.Row="1">
                 <Grid.RowDefinitions>
@@ -87,27 +104,73 @@
                         CornerRadius="8" ClipToBounds="True"
                         Background="Black">
                     <Grid>
-                        <rendering:D3DImageVideoRenderer x:Name="RemoteRenderer"
-                                                         Receiver="{Binding StreamReceiver}"
-                                                         NominalFrameRate="{Binding RemoteNominalFrameRate}"
-                                                         Visibility="{Binding HasRemoteVideo, Converter={StaticResource BoolToVisibility}}" />
+                        <!-- Empty-state text when no publishers are mounted. Hidden
+                             once at least one tile is in the grid. -->
+                        <TextBlock Text="{Binding MediaStatus, TargetNullValue='Waiting for a streamer...'}"
+                                   Foreground="#CCFFFFFF"
+                                   FontSize="14"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Visibility="{Binding HasAnyTile, Converter={StaticResource InvertBoolToVisibility}}" />
 
-                        <Grid Background="#80000000"
-                              Visibility="{Binding IsRemotePaused, Converter={StaticResource BoolToVisibility}}"
-                              IsHitTestVisible="False">
-                            <Border HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Background="#CC1E1E1E"
-                                    CornerRadius="16"
-                                    Padding="20,10">
-                                <StackPanel Orientation="Horizontal">
-                                    <ui:SymbolIcon Symbol="Pause24" FontSize="18" Foreground="White"
-                                                   VerticalAlignment="Center" />
-                                    <TextBlock Text="Paused" Foreground="White"
-                                               FontWeight="SemiBold" FontSize="14"
-                                               VerticalAlignment="Center" Margin="10,0,0,0" />
-                                </StackPanel>
-                            </Border>
-                        </Grid>
+                        <!-- Publisher tile grid. UniformGrid columns/rows are driven
+                             by TileLayoutConverter based on Tiles.Count. -->
+                        <ItemsControl ItemsSource="{Binding Tiles}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <UniformGrid Columns="{Binding TileCount, Converter={StaticResource TileLayoutColumns}}"
+                                                 Rows="{Binding TileCount, Converter={StaticResource TileLayoutRows}}" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:PublisherTileViewModel}">
+                                    <Border Margin="2" CornerRadius="6" ClipToBounds="True"
+                                            Background="#FF101010">
+                                        <Grid>
+                                            <rendering:D3DImageVideoRenderer Receiver="{Binding Receiver}"
+                                                                             NominalFrameRate="{Binding NominalFrameRate}"
+                                                                             Visibility="{Binding HasFirstFrame, Converter={StaticResource BoolToVisibility}}" />
+
+                                            <!-- Connecting placeholder before the first frame. -->
+                                            <TextBlock Text="Connecting…"
+                                                       Foreground="#AAFFFFFF"
+                                                       FontSize="13"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                       Visibility="{Binding HasFirstFrame, Converter={StaticResource InvertBoolToVisibility}}" />
+
+                                            <!-- Paused overlay — stream stalled, last frame frozen. -->
+                                            <Grid Background="#80000000"
+                                                  Visibility="{Binding IsPaused, Converter={StaticResource BoolToVisibility}}"
+                                                  IsHitTestVisible="False">
+                                                <Border HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                        Background="#CC1E1E1E"
+                                                        CornerRadius="14"
+                                                        Padding="16,8">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <ui:SymbolIcon Symbol="Pause24" FontSize="16" Foreground="White"
+                                                                       VerticalAlignment="Center" />
+                                                        <TextBlock Text="Paused" Foreground="White"
+                                                                   FontWeight="SemiBold" FontSize="13"
+                                                                   VerticalAlignment="Center" Margin="8,0,0,0" />
+                                                    </StackPanel>
+                                                </Border>
+                                            </Grid>
+
+                                            <!-- Display-name chip, bottom-left. -->
+                                            <Border HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                                                    Margin="8"
+                                                    Background="#99000000"
+                                                    CornerRadius="6"
+                                                    Padding="8,3"
+                                                    IsHitTestVisible="False">
+                                                <TextBlock Text="{Binding DisplayName}"
+                                                           Foreground="White"
+                                                           FontSize="11" FontWeight="SemiBold" />
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
                     </Grid>
                 </Border>
 
@@ -177,7 +240,17 @@
                                 <Border Background="{DynamicResource ControlFillColorSecondaryBrush}"
                                         CornerRadius="20"
                                         Padding="6,4,12,4"
-                                        Margin="0,0,8,0">
+                                        Margin="0,0,8,0"
+                                        ToolTip="{Binding IsConnected, Converter={StaticResource PeerConnectionTooltip}}">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsConnected}" Value="False">
+                                                    <Setter Property="Opacity" Value="0.45" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
                                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                         <Border Width="32" Height="32" CornerRadius="16"
                                                 Background="{DynamicResource AccentFillColorDefaultBrush}">

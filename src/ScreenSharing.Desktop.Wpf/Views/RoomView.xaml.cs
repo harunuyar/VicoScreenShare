@@ -11,9 +11,9 @@ public partial class RoomView : UserControl
 {
     private DispatcherTimer? _paintStatsTimer;
 
-    // Per-renderer previous counters so the input/painted deltas
-    // produce a clean fps reading instead of leaking across tiles.
-    private long _remotePrevPainted, _remotePrevInput;
+    // Previous counters for self-preview renderer only. Per-tile paint fps is
+    // Phase 6 polish — the ItemsControl-mounted D3D renderers would need a
+    // per-item attached property or behavior to feed their counters back.
     private long _selfPrevPainted, _selfPrevInput;
     private DateTime _prevTickUtc = DateTime.MinValue;
 
@@ -59,9 +59,6 @@ public partial class RoomView : UserControl
         var elapsed = Math.Max(0.001, (now - _prevTickUtc).TotalSeconds);
         _prevTickUtc = now;
 
-        vm.RemoteRenderStatsLine = SnapshotRenderer(
-            FindName("RemoteRenderer") as D3DImageVideoRenderer,
-            ref _remotePrevInput, ref _remotePrevPainted, elapsed);
         vm.SelfRenderStatsLine = SnapshotRenderer(
             FindName("SelfRenderer") as D3DImageVideoRenderer,
             ref _selfPrevInput, ref _selfPrevPainted, elapsed);

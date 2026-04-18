@@ -78,6 +78,40 @@ public sealed class Room
         }
     }
 
+    /// <summary>
+    /// Flip a peer's <see cref="RoomPeer.IsConnected"/> under the room lock. When
+    /// transitioning to disconnected, stamps <see cref="RoomPeer.DisconnectedAtUtc"/>;
+    /// when transitioning back to connected (resume), clears it. Returns true iff
+    /// the flag actually changed, so the caller can broadcast
+    /// <c>PeerConnectionState</c> exactly once.
+    /// </summary>
+    public bool TrySetPeerConnected(Guid peerId, bool isConnected)
+    {
+        lock (_lock)
+        {
+            var peer = _peers.FirstOrDefault(p => p.PeerId == peerId);
+            if (peer is null) return false;
+            if (peer.IsConnected == isConnected) return false;
+            peer.IsConnected = isConnected;
+            peer.DisconnectedAtUtc = isConnected ? null : DateTime.UtcNow;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Find a peer by their current resume token. Returns null if no peer holds
+    /// this token (either never issued, or already rotated away by a prior
+    /// successful resume).
+    /// </summary>
+    public RoomPeer? FindByResumeToken(string token)
+    {
+        if (string.IsNullOrEmpty(token)) return null;
+        lock (_lock)
+        {
+            return _peers.FirstOrDefault(p => p.ResumeToken == token);
+        }
+    }
+
     public RemovePeerResult RemovePeer(Guid peerId)
     {
         lock (_lock)

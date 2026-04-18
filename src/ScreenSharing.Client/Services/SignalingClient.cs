@@ -47,11 +47,24 @@ public sealed class SignalingClient : IAsyncDisposable
     public event Action<Guid, Guid?>? PeerLeft;
     public event Action<ErrorCode, string>? ServerError;
     public event Action<string?>? ConnectionLost;
-    public event Action<string>? SdpOfferReceived;
-    public event Action<string>? SdpAnswerReceived;
-    public event Action<string>? IceCandidateReceived;
+    /// <summary>
+    /// SDP offer from the server. The payload carries both the SDP and a nullable
+    /// <see cref="SdpOffer.SubscriptionId"/>: null means the main PC (client-initiated
+    /// flow), a Guid "N" string means a subscriber PC the server is driving for a
+    /// specific publisher — the client must create a fresh RecvOnly PC and answer.
+    /// </summary>
+    public event Action<SdpOffer>? SdpOfferReceived;
+    public event Action<SdpAnswer>? SdpAnswerReceived;
+    public event Action<IceCandidate>? IceCandidateReceived;
     public event Action<StreamStarted>? StreamStartedReceived;
     public event Action<StreamEnded>? StreamEndedReceived;
+
+    /// <summary>Fired when any peer in the current room transitions into or out
+    /// of the server-side reconnect grace window.</summary>
+    public event Action<PeerConnectionState>? PeerConnectionStateChanged;
+
+    /// <summary>Fired when a <c>ResumeSession</c> attempt is rejected by the server.</summary>
+    public event Action<ResumeFailed>? ResumeFailedReceived;
 
     public bool IsConnected =>
         Volatile.Read(ref _state) == StateConnected && _socket?.State == WebSocketState.Open;
@@ -110,14 +123,29 @@ public sealed class SignalingClient : IAsyncDisposable
     public Task JoinRoomAsync(string roomId, CancellationToken ct = default) =>
         SendAsync(MessageType.JoinRoom, new JoinRoom(roomId), ct);
 
-    public Task SendSdpOfferAsync(string sdp, CancellationToken ct = default) =>
-        SendAsync(MessageType.SdpOffer, new SdpOffer(sdp), ct);
+    /// <summary>
+    /// Announce an intentional departure to the server so the peer is evicted
+    /// immediately rather than sitting in the reconnect grace window.
+    /// </summary>
+    public Task LeaveRoomAsync(CancellationToken ct = default) =>
+        SendAsync(MessageType.LeaveRoom, new LeaveRoom(), ct);
 
-    public Task SendSdpAnswerAsync(string sdp, CancellationToken ct = default) =>
-        SendAsync(MessageType.SdpAnswer, new SdpAnswer(sdp), ct);
+    /// <summary>
+    /// Attempt to rebind to an existing room/peer slot within the server-side
+    /// grace window. On failure the server replies with <c>ResumeFailed</c> and
+    /// the caller must fall back to a fresh <see cref="JoinRoomAsync"/>.
+    /// </summary>
+    public Task ResumeSessionAsync(string roomId, string resumeToken, CancellationToken ct = default) =>
+        SendAsync(MessageType.ResumeSession, new ResumeSession(roomId, resumeToken), ct);
 
-    public Task SendIceCandidateAsync(string candidateJson, CancellationToken ct = default) =>
-        SendAsync(MessageType.IceCandidate, new IceCandidate(candidateJson, null, null), ct);
+    public Task SendSdpOfferAsync(string sdp, string? subscriptionId = null, CancellationToken ct = default) =>
+        SendAsync(MessageType.SdpOffer, new SdpOffer(sdp, subscriptionId), ct);
+
+    public Task SendSdpAnswerAsync(string sdp, string? subscriptionId = null, CancellationToken ct = default) =>
+        SendAsync(MessageType.SdpAnswer, new SdpAnswer(sdp, subscriptionId), ct);
+
+    public Task SendIceCandidateAsync(string candidateJson, string? subscriptionId = null, CancellationToken ct = default) =>
+        SendAsync(MessageType.IceCandidate, new IceCandidate(candidateJson, null, null, subscriptionId), ct);
 
     /// <summary>
     /// Announce that this client has started a media stream. Server rewrites the
@@ -254,17 +282,17 @@ public sealed class SignalingClient : IAsyncDisposable
 
             case MessageType.SdpOffer:
                 var offer = envelope.Payload.Deserialize<SdpOffer>(ProtocolJson.Options);
-                if (offer is not null) SdpOfferReceived?.Invoke(offer.Sdp);
+                if (offer is not null) SdpOfferReceived?.Invoke(offer);
                 break;
 
             case MessageType.SdpAnswer:
                 var answer = envelope.Payload.Deserialize<SdpAnswer>(ProtocolJson.Options);
-                if (answer is not null) SdpAnswerReceived?.Invoke(answer.Sdp);
+                if (answer is not null) SdpAnswerReceived?.Invoke(answer);
                 break;
 
             case MessageType.IceCandidate:
                 var ice = envelope.Payload.Deserialize<IceCandidate>(ProtocolJson.Options);
-                if (ice is not null) IceCandidateReceived?.Invoke(ice.Candidate);
+                if (ice is not null) IceCandidateReceived?.Invoke(ice);
                 break;
 
             case MessageType.StreamStarted:
@@ -275,6 +303,16 @@ public sealed class SignalingClient : IAsyncDisposable
             case MessageType.StreamEnded:
                 var ended = envelope.Payload.Deserialize<StreamEnded>(ProtocolJson.Options);
                 if (ended is not null) StreamEndedReceived?.Invoke(ended);
+                break;
+
+            case MessageType.PeerConnectionState:
+                var pcs = envelope.Payload.Deserialize<PeerConnectionState>(ProtocolJson.Options);
+                if (pcs is not null) PeerConnectionStateChanged?.Invoke(pcs);
+                break;
+
+            case MessageType.ResumeFailed:
+                var rf = envelope.Payload.Deserialize<ResumeFailed>(ProtocolJson.Options);
+                if (rf is not null) ResumeFailedReceived?.Invoke(rf);
                 break;
         }
     }

@@ -31,6 +31,14 @@ public sealed partial class PeerViewModel : ObservableObject
     private bool _isStreaming;
 
     /// <summary>
+    /// False during the server-side reconnect grace window — their WebSocket
+    /// dropped but their room slot is still reserved. Member chips render
+    /// ghosted until they resume (or the window expires and they're evicted).
+    /// </summary>
+    [ObservableProperty]
+    private bool _isConnected = true;
+
+    /// <summary>
     /// First 1-2 characters of the display name, uppercased, for the
     /// circular avatar on the chip. Recomputed when DisplayName changes.
     /// </summary>

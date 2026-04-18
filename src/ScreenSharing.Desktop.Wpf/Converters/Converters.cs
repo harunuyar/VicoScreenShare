@@ -46,6 +46,65 @@ public sealed class InvertBoolToVisibilityConverter : IValueConverter
 }
 
 /// <summary>
+/// Tile-count → UniformGrid columns/rows. One converter per dimension so a
+/// single Int32 source binding drives both <c>Columns</c> and <c>Rows</c>.
+/// Layout rules: 1→1x1, 2→1x2, 3-4→2x2, 5-9→3x3, 10+→ceil(N/4) rows × 4 cols.
+/// </summary>
+public sealed class TileLayoutColumnsConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        var count = value is int n ? Math.Max(1, n) : 1;
+        return count switch
+        {
+            1 => 1,
+            2 => 2,
+            <= 4 => 2,
+            <= 9 => 3,
+            _ => 4,
+        };
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+/// <summary>
+/// Tooltip for a peer chip: null (no tooltip) when connected, a friendly
+/// "reconnecting" line while the peer is in the server's grace window.
+/// </summary>
+public sealed class PeerConnectionTooltipConverter : IValueConverter
+{
+    public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is bool b && !b)
+        {
+            return "Reconnecting…";
+        }
+        return null;
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+public sealed class TileLayoutRowsConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        var count = value is int n ? Math.Max(1, n) : 1;
+        return count switch
+        {
+            1 => 1,
+            2 => 1,
+            <= 4 => 2,
+            <= 9 => 3,
+            _ => (count + 3) / 4,
+        };
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
+/// <summary>
 /// Maps a view model to the matching <see cref="System.Windows.Controls.UserControl"/>.
 /// Used by <c>MainWindow.xaml</c>'s ContentControl so the shell can render
 /// whichever VM <see cref="NavigationService"/> currently points at.

@@ -37,18 +37,18 @@ public sealed class SfuPeer : IAsyncDisposable
             },
         });
 
-        // The SFU must have a track to pair with whatever direction the client's
-        // offer proposes. A SendRecv track matches both a streamer's sendonly
-        // offer (server answers with recvonly) and a viewer's recvonly offer
-        // (server answers with sendonly). SIPSorcery requires tracks to exist
-        // before setRemoteDescription, otherwise the media-type matcher returns
-        // NoMatchingMediaType.
+        // The main SfuPeer PC is now RecvOnly from the server's perspective.
+        // It receives the client's outbound publish stream, nothing else —
+        // fan-out to viewers happens on dedicated SfuSubscriberPeer PCs (one
+        // per (viewer, publisher) pair), which carry their own SSRCs so the
+        // viewer can demux naturally without multi-track SDP gymnastics or
+        // dynamic renegotiation. The client's offer will still be SendRecv or
+        // SendOnly; RecvOnly on our side is the correct matching direction.
         //
         // Advertise ALL codecs the clients might pick (VP8 baseline and H.264
         // via Media Foundation on Windows) so the SDP intersection always has
         // at least one format in common regardless of which codec the client
-        // chose in its settings. The SFU stays codec-agnostic for fan-out —
-        // RTP packets are forwarded byte-for-byte via SendRtpRaw.
+        // chose in its settings.
         var videoCapabilities = new List<SDPAudioVideoMediaFormat>
         {
             new(new VideoFormat(VideoCodecsEnum.VP8, 96)),
@@ -58,7 +58,7 @@ public sealed class SfuPeer : IAsyncDisposable
             SDPMediaTypesEnum.video,
             isRemote: false,
             capabilities: videoCapabilities,
-            streamStatus: MediaStreamStatusEnum.SendRecv);
+            streamStatus: MediaStreamStatusEnum.RecvOnly);
         _pc.addTrack(videoTrack);
 
         _pc.onicecandidate += OnLocalIceCandidate;

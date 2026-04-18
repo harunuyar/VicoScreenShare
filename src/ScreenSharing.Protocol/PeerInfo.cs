@@ -6,4 +6,5 @@ public sealed record PeerInfo(
     Guid PeerId,
     string DisplayName,
     bool IsHost,
-    bool IsStreaming);
+    bool IsStreaming,
+    bool IsConnected = true);

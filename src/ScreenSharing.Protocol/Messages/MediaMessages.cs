@@ -3,18 +3,25 @@ using System;
 namespace ScreenSharing.Protocol.Messages;
 
 /// <summary>
-/// SDP offer routed through the server between a peer and the SFU. The server maintains one
-/// <c>RTCPeerConnection</c> per peer, so offers/answers flow between the client and the server,
-/// not peer-to-peer.
+/// SDP offer routed through the server. Two flows use the same message:
+/// <list type="bullet">
+/// <item>Client-initiated, <see cref="SubscriptionId"/> = null — negotiates the client's
+/// "main" peer connection (used for its own outbound screen share).</item>
+/// <item>Server-initiated, <see cref="SubscriptionId"/> = the publisher's PeerId as
+/// string-N format — negotiates a per-publisher subscriber peer connection. The server
+/// creates one such PC per (viewer, publisher) pair so fan-out happens on dedicated
+/// tracks with dedicated SSRCs; the viewer answers by building a matching RecvOnly PC.</item>
+/// </list>
 /// </summary>
-public sealed record SdpOffer(string Sdp);
+public sealed record SdpOffer(string Sdp, string? SubscriptionId = null);
 
-public sealed record SdpAnswer(string Sdp);
+public sealed record SdpAnswer(string Sdp, string? SubscriptionId = null);
 
 public sealed record IceCandidate(
     string Candidate,
     string? SdpMid,
-    int? SdpMLineIndex);
+    int? SdpMLineIndex,
+    string? SubscriptionId = null);
 
 public enum StreamKind
 {

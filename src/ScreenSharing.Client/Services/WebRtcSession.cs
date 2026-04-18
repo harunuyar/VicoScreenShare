@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using ScreenSharing.Client.Media.Codecs;
+using ScreenSharing.Protocol.Messages;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
@@ -41,20 +42,29 @@ public sealed class WebRtcSession : IAsyncDisposable
             },
         });
 
-        // Advertise the preferred codec first, followed by VP8 as a universal
-        // fallback. WebRTC codec selection is driven by intersection order, so
-        // listing the user's pick at index 0 means both peers agree on it
-        // whenever both sides support it — and if the other side only knows
-        // VP8, the intersection still has one common entry and negotiation
-        // doesn't fail with VideoIncompatible.
+        // Advertise the preferred codec first, followed by the other as a
+        // universal fallback. WebRTC codec selection is driven by intersection
+        // order, so listing the user's pick at index 0 means both peers agree
+        // on it whenever both sides support it.
+        //
+        // CRITICAL: The payload-type assignment MUST match the server's
+        // convention (VP8=96, H264=102). Server-side SfuPeer + SfuSubscriberPeer
+        // use those fixed PTs; when the server forwards a publisher's RTP
+        // byte-for-byte to a subscriber, it copies the ORIGINAL payload type
+        // from the inbound packet. If the publisher negotiated H264=96 here
+        // but the subscriber PC has 96 mapped to VP8, the subscriber decodes
+        // the bytes as the wrong codec and frames never produce output.
         var preferred = MapCodec(codec);
-        var capabilities = new List<SDPAudioVideoMediaFormat>
+        var capabilities = new List<SDPAudioVideoMediaFormat>();
+        if (preferred == VideoCodecsEnum.VP8)
         {
-            new(new VideoFormat(preferred, 96)),
-        };
-        if (preferred != VideoCodecsEnum.VP8)
+            capabilities.Add(new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.VP8, 96)));
+            capabilities.Add(new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H264, 102)));
+        }
+        else
         {
-            capabilities.Add(new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.VP8, 97)));
+            capabilities.Add(new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.H264, 102)));
+            capabilities.Add(new SDPAudioVideoMediaFormat(new VideoFormat(VideoCodecsEnum.VP8, 96)));
         }
 
         var direction = role switch
@@ -92,7 +102,12 @@ public sealed class WebRtcSession : IAsyncDisposable
         var timeout = answerTimeout ?? TimeSpan.FromSeconds(10);
 
         var answerTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnAnswer(string sdp) => answerTcs.TrySetResult(sdp);
+        void OnAnswer(SdpAnswer a)
+        {
+            // Only the main-PC answer completes this task; subscriber-PC answers
+            // never flow back to the client (client is the answerer there).
+            if (string.IsNullOrEmpty(a.SubscriptionId)) answerTcs.TrySetResult(a.Sdp);
+        }
         _signaling.SdpAnswerReceived += OnAnswer;
         _pc.onconnectionstatechange += OnPcStateChanged;
 
@@ -157,9 +172,12 @@ public sealed class WebRtcSession : IAsyncDisposable
         catch { /* best-effort during teardown */ }
     }
 
-    private void OnRemoteIceCandidate(string candidateJson)
+    private void OnRemoteIceCandidate(IceCandidate ice)
     {
-        if (_disposed || string.IsNullOrWhiteSpace(candidateJson)) return;
+        if (_disposed || ice is null || string.IsNullOrWhiteSpace(ice.Candidate)) return;
+
+        // Main PC only consumes candidates tagged for the main PC (null id).
+        if (!string.IsNullOrEmpty(ice.SubscriptionId)) return;
 
         lock (_candidateLock)
         {
@@ -167,12 +185,12 @@ public sealed class WebRtcSession : IAsyncDisposable
             {
                 // Trickled server candidate arrived before NegotiateAsync applied
                 // setRemoteDescription(answer); buffer and flush after.
-                _pendingRemoteCandidates.Add(candidateJson);
+                _pendingRemoteCandidates.Add(ice.Candidate);
                 return;
             }
         }
 
-        ApplyRemoteCandidateInternal(candidateJson);
+        ApplyRemoteCandidateInternal(ice.Candidate);
     }
 
     private void ApplyRemoteCandidateInternal(string candidateJson)
