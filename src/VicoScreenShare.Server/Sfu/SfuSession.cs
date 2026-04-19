@@ -145,6 +145,33 @@ public sealed class SfuSession : IAsyncDisposable
     public bool IsPublishing(Guid peerId) => _publishers.ContainsKey(peerId);
 
     /// <summary>
+    /// Worst <c>fraction-lost</c> (byte, 0-255 per RFC 3550) across every
+    /// downstream subscriber for <paramref name="publisherPeerId"/>, as last
+    /// observed from each viewer's RTCP Receiver Reports. Drives the periodic
+    /// <c>DownstreamLossReport</c> the server pushes up to the publisher so
+    /// the publisher's adaptive-bitrate controller can respond to congestion
+    /// on the SFU → viewer hop (which the publisher's own upstream RRs are
+    /// blind to).
+    /// </summary>
+    public byte GetWorstDownstreamFractionLost(Guid publisherPeerId)
+    {
+        byte worst = 0;
+        foreach (var kv in _subscribers)
+        {
+            if (kv.Key.publisher != publisherPeerId)
+            {
+                continue;
+            }
+            var v = kv.Value.LatestFractionLost;
+            if (v > worst)
+            {
+                worst = v;
+            }
+        }
+        return worst;
+    }
+
+    /// <summary>
     /// Client-driven subscribe: viewer wants to (re-)receive this publisher's
     /// stream. No-op if the publisher isn't currently streaming or if a
     /// subscription already exists. Fires the usual SubscriberReady event so

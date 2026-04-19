@@ -129,6 +129,8 @@ public sealed class WsSession
             return;
         }
 
+        StopDownstreamLossReporter();
+
         // Detach SFU hooks — this WsSession is about to die, it shouldn't drive
         // more subscriber offers. A resumed session re-attaches fresh.
         var sfuSession = _currentSfuSession;
@@ -773,6 +775,56 @@ public sealed class WsSession
         {
             AttachSfuSessionHooks(sfu);
             await sfu.OnPublisherStartedAsync(PeerId).ConfigureAwait(false);
+            StartDownstreamLossReporter(sfu);
+        }
+    }
+
+    private CancellationTokenSource? _downstreamLossCts;
+
+    /// <summary>
+    /// While this peer is publishing, poll the SFU's aggregated "worst
+    /// subscriber fraction-lost" and push a <see cref="Protocol.Messages.DownstreamLossReport"/>
+    /// back to the publisher every second. The publisher's adaptive-bitrate
+    /// controller consumes this as a second loss signal (alongside the
+    /// upstream RR it already sees), so congestion on the server→subscriber
+    /// hop reduces the encoder's target bitrate even though the publisher's
+    /// own upstream link is clean.
+    /// </summary>
+    private void StartDownstreamLossReporter(SfuSession sfu)
+    {
+        StopDownstreamLossReporter();
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        _downstreamLossCts = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), cts.Token).ConfigureAwait(false);
+                    var worst = sfu.GetWorstDownstreamFractionLost(PeerId);
+                    var fraction = worst / 256.0;
+                    try
+                    {
+                        await SendAsync(MessageType.DownstreamLossReport,
+                            new DownstreamLossReport(PeerId, fraction))
+                            .ConfigureAwait(false);
+                    }
+                    catch { /* socket dying */ }
+                }
+            }
+            catch (OperationCanceledException) { /* expected on teardown */ }
+        }, cts.Token);
+    }
+
+    private void StopDownstreamLossReporter()
+    {
+        var cts = _downstreamLossCts;
+        _downstreamLossCts = null;
+        if (cts is not null)
+        {
+            try { cts.Cancel(); } catch { }
+            try { cts.Dispose(); } catch { }
         }
     }
 
@@ -810,6 +862,7 @@ public sealed class WsSession
         {
             await sfu.OnPublisherStoppedAsync(PeerId).ConfigureAwait(false);
         }
+        StopDownstreamLossReporter();
     }
 
     private async Task HandleSubscribeAsync(MessageEnvelope envelope)

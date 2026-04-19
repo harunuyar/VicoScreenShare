@@ -1078,6 +1078,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         client.PeerConnectionStateChanged += OnPeerConnectionStateChanged;
         client.ResumeFailedReceived += OnResumeFailedReceived;
         client.RequestKeyframeReceived += OnRequestKeyframeReceived;
+        client.DownstreamLossReportReceived += OnDownstreamLossReportReceived;
     }
 
     private void UnsubscribeSignalingEvents(SignalingClient client)
@@ -1092,6 +1093,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         client.PeerConnectionStateChanged -= OnPeerConnectionStateChanged;
         client.ResumeFailedReceived -= OnResumeFailedReceived;
         client.RequestKeyframeReceived -= OnRequestKeyframeReceived;
+        client.DownstreamLossReportReceived -= OnDownstreamLossReportReceived;
     }
 
     private void OnRequestKeyframeReceived(RequestKeyframe _)
@@ -1105,6 +1107,19 @@ public sealed partial class RoomViewModel : ViewModelBase
             _captureStreamer?.RequestKeyframe();
         }
         catch { /* encoder tearing down */ }
+    }
+
+    private void OnDownstreamLossReportReceived(DownstreamLossReport report)
+    {
+        // Server's aggregate of the worst subscriber-side loss across this
+        // publisher's downstream viewers. Feed it to the same bitrate
+        // controller that already consumes upstream RRs — the controller
+        // naturally takes the worst-case reaction.
+        try
+        {
+            _bitrateController?.Observe(report.FractionLost);
+        }
+        catch { /* controller lifecycle race */ }
     }
 
     private void OnPeerConnectionStateChanged(PeerConnectionState state)

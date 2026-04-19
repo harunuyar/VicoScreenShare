@@ -69,3 +69,16 @@ public sealed record Subscribe(Guid PublisherPeerId);
 /// starts again, every viewer auto-subscribes again.
 /// </summary>
 public sealed record Unsubscribe(Guid PublisherPeerId);
+
+/// <summary>
+/// Server → publisher. Periodic aggregate of the WORST fraction-lost across all
+/// of this publisher's downstream subscribers, as observed on the SFU's own RR
+/// feedback from each viewer's PC. The publisher's adaptive-bitrate controller
+/// treats this as an additional loss input (separate from its own upstream RR
+/// loss), which is how a self-hosted SFU addresses the case where the
+/// publisher→server hop is clean but one subscriber's link can't keep up.
+/// Value is in <c>[0.0, 1.0]</c>.
+/// </summary>
+public sealed record DownstreamLossReport(
+    Guid PublisherPeerId,
+    double FractionLost);

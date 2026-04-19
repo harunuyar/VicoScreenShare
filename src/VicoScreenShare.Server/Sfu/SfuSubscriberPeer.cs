@@ -61,11 +61,21 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
 
         _pc.onicecandidate += OnLocalIceCandidate;
         _pc.onconnectionstatechange += OnConnectionStateChange;
+        _pc.OnReceiveReport += OnViewerReceiveReport;
     }
 
     public Guid ViewerPeerId { get; }
     public Guid PublisherPeerId { get; }
     public RTCPeerConnection PeerConnection => _pc;
+
+    /// <summary>
+    /// Latest fraction-lost value the viewer reported for this subscriber's
+    /// video stream (RFC 3550 byte, 0 = no loss, 255 ≈ 100% loss). Set from
+    /// the RTCP Receiver Report handler; read by the SFU's aggregator when
+    /// synthesizing a <c>DownstreamLossReport</c> for the upstream publisher.
+    /// Zero until the first RR arrives.
+    /// </summary>
+    public byte LatestFractionLost { get; private set; }
 
     /// <summary>Subscription id used in protocol messages — the publisher's PeerId in N-format.</summary>
     public string SubscriptionId => PublisherPeerId.ToString("N");
@@ -151,6 +161,32 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         }
 
         ApplyRemoteCandidateInternal(candidateJson);
+    }
+
+    private void OnViewerReceiveReport(System.Net.IPEndPoint endpoint, SDPMediaTypesEnum mediaType, RTCPCompoundPacket report)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        if (mediaType != SDPMediaTypesEnum.video)
+        {
+            return;
+        }
+        var rr = report.ReceiverReport;
+        if (rr?.ReceptionReports is null)
+        {
+            return;
+        }
+        byte worst = 0;
+        foreach (var sample in rr.ReceptionReports)
+        {
+            if (sample.FractionLost > worst)
+            {
+                worst = sample.FractionLost;
+            }
+        }
+        LatestFractionLost = worst;
     }
 
     private void OnLocalIceCandidate(RTCIceCandidate candidate)

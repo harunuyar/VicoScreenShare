@@ -167,6 +167,18 @@
                     </StackPanel>
                 </ui:Card>
 
+                <ui:Card Margin="0,12,0,0" Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <StackPanel>
+                        <TextBlock Text="Adaptive bitrate" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12" Margin="0,0,0,8"
+                                   Text="When on, the publisher lowers its encoder bitrate if any viewer is losing packets (either on the upstream link or server-to-viewer). Frees a struggling viewer; slightly reduces quality while active. Turn off to force the configured target bitrate." />
+                        <ui:ToggleSwitch IsChecked="{Binding EnableAdaptiveBitrate}"
+                                         OffContent="Off — always use the configured target bitrate"
+                                         OnContent="On — respond to downstream congestion" />
+                    </StackPanel>
+                </ui:Card>
+
                 <ui:InfoBar Title="Settings"
                             Message="{Binding StatusMessage}"
                             Severity="Informational"

@@ -151,6 +151,12 @@ public sealed class SignalingClient : IAsyncDisposable
     /// doesn't wait for the next natural GOP boundary.</summary>
     public event Action<RequestKeyframe>? RequestKeyframeReceived;
 
+    /// <summary>Periodic aggregate of the worst downstream subscriber loss
+    /// for THIS client's publisher stream. Fed to the adaptive-bitrate
+    /// controller so server→viewer congestion throttles the encoder even
+    /// though the publisher→server hop is clean.</summary>
+    public event Action<DownstreamLossReport>? DownstreamLossReportReceived;
+
     /// <summary>Fired when any peer in the current room transitions into or out
     /// of the server-side reconnect grace window.</summary>
     public event Action<PeerConnectionState>? PeerConnectionStateChanged;
@@ -480,6 +486,15 @@ public sealed class SignalingClient : IAsyncDisposable
                 if (kf is not null)
                 {
                     RequestKeyframeReceived?.Invoke(kf);
+                }
+
+                break;
+
+            case MessageType.DownstreamLossReport:
+                var dlr = envelope.Payload.Deserialize<DownstreamLossReport>(ProtocolJson.Options);
+                if (dlr is not null)
+                {
+                    DownstreamLossReportReceived?.Invoke(dlr);
                 }
 
                 break;

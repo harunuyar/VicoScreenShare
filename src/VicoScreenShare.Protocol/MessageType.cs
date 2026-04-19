@@ -24,4 +24,5 @@ public static class MessageType
     public const string ResumeSession = "resume_session";
     public const string ResumeFailed = "resume_failed";
     public const string PeerConnectionState = "peer_connection_state";
+    public const string DownstreamLossReport = "downstream_loss_report";
 }

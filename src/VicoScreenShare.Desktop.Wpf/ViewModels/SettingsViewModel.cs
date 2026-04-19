@@ -89,6 +89,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _selectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == _settings.Video.Codec && c.IsAvailable)
             ?? CodecOptions.First(c => c.IsAvailable);
         _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 240);
+        _enableAdaptiveBitrate = _settings.Video.EnableAdaptiveBitrate;
 
         // Dirty tracking: any change to a bound setting flips IsDirty to
         // true so the floating Save pill becomes visible. Save() resets
@@ -136,6 +137,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     [ObservableProperty]
     private int _receiveBufferFrames;
+
+    [ObservableProperty]
+    private bool _enableAdaptiveBitrate;
 
     [ObservableProperty]
     private string? _statusMessage;
@@ -188,6 +192,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.Scaler = SelectedScalerMode.Mode;
         _settings.Video.Codec = SelectedCodec.Codec;
         _settings.Video.ReceiveBufferFrames = ReceiveBufferFrames;
+        _settings.Video.EnableAdaptiveBitrate = EnableAdaptiveBitrate;
 
         try
         {
