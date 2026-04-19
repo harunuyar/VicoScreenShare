@@ -27,8 +27,24 @@ public class IdentityStoreTests : IDisposable
         var profile = store.LoadOrCreate();
 
         profile.UserId.Should().NotBe(Guid.Empty);
-        profile.DisplayName.Should().BeEmpty();
+        profile.DisplayName.Should().NotBeNullOrWhiteSpace(
+            "fresh profiles seed DisplayName from Environment.UserName so first-run users don't hit the 'enter a name' block");
         File.Exists(_profilePath).Should().BeFalse("Phase 1 only persists on Save");
+    }
+
+    [Fact]
+    public void LoadOrCreate_upgrades_legacy_profile_with_empty_display_name()
+    {
+        var id = Guid.NewGuid();
+        var store = new IdentityStore(_profilePath);
+        store.Save(new UserProfile { UserId = id, DisplayName = "seed" });
+        // Simulate the legacy on-disk state: same user id, empty display name.
+        File.WriteAllText(_profilePath, $"{{\"userId\":\"{id}\",\"displayName\":\"\"}}");
+
+        var loaded = new IdentityStore(_profilePath).LoadOrCreate();
+
+        loaded.UserId.Should().Be(id);
+        loaded.DisplayName.Should().NotBeNullOrWhiteSpace();
     }
 
     [Fact]

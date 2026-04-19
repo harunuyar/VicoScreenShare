@@ -358,7 +358,13 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private void CommitDisplayName()
     {
-        if (!string.IsNullOrWhiteSpace(DisplayName))
+        if (string.IsNullOrWhiteSpace(DisplayName))
+        {
+            // Refuse empty: snap back to whatever was persisted so the
+            // read-only TextBlock never shows a blank chip.
+            DisplayName = _identity.LoadOrCreate().DisplayName;
+        }
+        else
         {
             SaveDisplayName();
         }

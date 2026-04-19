@@ -75,6 +75,14 @@ public sealed class IdentityStore
                     var parsed = JsonSerializer.Deserialize<UserProfile>(json, JsonOptions);
                     if (parsed is not null && parsed.UserId != Guid.Empty)
                     {
+                        // Legacy profiles saved by the early builds persisted an empty
+                        // display name, which then bubbled up to the join dialog as
+                        // "Enter a display name first." Seed the OS username so the
+                        // app is usable out of the box.
+                        if (string.IsNullOrWhiteSpace(parsed.DisplayName))
+                        {
+                            parsed.DisplayName = DefaultDisplayName();
+                        }
                         _cached = parsed;
                         return _cached;
                     }
@@ -88,10 +96,16 @@ public sealed class IdentityStore
             _cached = new UserProfile
             {
                 UserId = Guid.NewGuid(),
-                DisplayName = string.Empty,
+                DisplayName = DefaultDisplayName(),
             };
             return _cached;
         }
+    }
+
+    private static string DefaultDisplayName()
+    {
+        var user = Environment.UserName;
+        return string.IsNullOrWhiteSpace(user) ? "User" : user;
     }
 
     /// <summary>
