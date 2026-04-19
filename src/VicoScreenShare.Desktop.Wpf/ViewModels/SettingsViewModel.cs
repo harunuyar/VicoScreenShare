@@ -60,13 +60,26 @@ public sealed partial class SettingsViewModel : ViewModelBase
             new ScalerModeOption("Lanczos (sharp text, slower)", ScalerMode.Lanczos),
         };
 
+        // Presets named "widthP@fps" — unambiguous and matches how OBS /
+        // Twitch / YouTube display quality options, which is what users
+        // already know. Bitrates are H.264 screen-content targets roughly
+        // aligned with Twitch's recommended gaming bitrates; user can still
+        // override via the slider. 1-second keyframe interval everywhere —
+        // viewers converge on join in 1 s instead of 2, and a single
+        // keyframe re-sync is less painful on loss-prone links. Bilinear
+        // scaler everywhere — cheap on GPU, right for game/video content;
+        // users who want Lanczos for readable text can pick it in the
+        // Scaler dropdown directly.
         QualityPresets = new[]
         {
-            new QualityPreset("Readable",  1080, 30,  8_000_000,  2.0, ScalerMode.Lanczos),
-            new QualityPreset("Smooth",    1080, 60,  12_000_000, 2.0, ScalerMode.Bilinear),
-            new QualityPreset("High FPS",  1440, 120, 25_000_000, 1.0, ScalerMode.Bilinear),
-            new QualityPreset("4K Cinema", 2160, 30,  40_000_000, 2.0, ScalerMode.Lanczos),
-            new QualityPreset("Potato",    720,  30,  3_000_000,  2.0, ScalerMode.Bilinear),
+            new QualityPreset("720p30",  720,  30,  4_000_000,  1.0, ScalerMode.Bilinear),
+            new QualityPreset("1080p30", 1080, 30,  6_000_000,  1.0, ScalerMode.Bilinear),
+            new QualityPreset("1080p60", 1080, 60,  10_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1080p120",1080, 120, 16_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1440p60", 1440, 60,  18_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1440p120",1440, 120, 28_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("2160p30", 2160, 30,  24_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("2160p60", 2160, 60,  40_000_000, 1.0, ScalerMode.Bilinear),
         };
 
         var catalog = ClientHost.VideoCodecCatalog ?? new VideoCodecCatalog();
