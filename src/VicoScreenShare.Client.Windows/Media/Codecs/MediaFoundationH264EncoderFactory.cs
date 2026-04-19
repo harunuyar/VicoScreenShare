@@ -44,7 +44,16 @@ public sealed class MediaFoundationH264EncoderFactory : IVideoEncoderFactory
 
     public bool SupportsTextureInput => _sharedDevice is not null && IsAvailable;
 
-    public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) =>
-        new MediaFoundationH264Encoder(width, height, targetFps, targetBitrate, gopFrames,
-            useLanczos: Scaler == ScalerMode.Lanczos, externalDevice: _sharedDevice);
+    public IVideoEncoder CreateEncoder(
+        int width,
+        int height,
+        int targetFps,
+        int targetBitrate,
+        int gopFrames,
+        IntraRefreshOptions intraRefresh = default) =>
+        new MediaFoundationH264Encoder(
+            width, height, targetFps, targetBitrate, gopFrames,
+            useLanczos: Scaler == ScalerMode.Lanczos,
+            externalDevice: _sharedDevice,
+            intraRefresh: intraRefresh);
 }

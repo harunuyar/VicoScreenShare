@@ -99,6 +99,11 @@ public sealed class SubscriberSession : IAsyncDisposable
 
         var answer = _pc.createAnswer(null);
         await _pc.setLocalDescription(answer).ConfigureAwait(false);
+        // Raise the kernel UDP receive buffer on this subscriber PC's RTP
+        // socket before any media arrives. Three subscribers on the same box
+        // receiving ~20 Mbit each easily fill a 64 KB default buffer mid-burst,
+        // producing the packet-loss-driven distortion we see on fat pipes.
+        RtpSocketTuning.TryApply(_pc);
 
         await _signaling.SendSdpAnswerAsync(answer.sdp, SubscriptionId).ConfigureAwait(false);
 

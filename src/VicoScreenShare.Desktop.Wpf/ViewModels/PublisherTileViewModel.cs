@@ -180,7 +180,8 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
             $"size:   {r.LastWidth}x{r.LastHeight}\n" +
             $"fps:    {fps:F1}\n" +
             $"rate:   {mbps:F2} Mbps\n" +
-            $"frames: {r.FramesDecoded}";
+            $"frames: {r.FramesDecoded}\n" +
+            $"loss:   {r.RtpLossPercent:F1}% ({r.RtpPacketsInferredLost} / {r.RtpPacketsReceived + r.RtpPacketsInferredLost})";
 
         Stats = string.IsNullOrEmpty(RenderStatsLine) ? core : core + "\n" + RenderStatsLine;
     }

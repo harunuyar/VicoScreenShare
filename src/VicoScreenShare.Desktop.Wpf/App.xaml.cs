@@ -35,6 +35,14 @@ public partial class App : Application
         DebugLog.Reset();
         DebugLog.Write($"== ScreenSharing (WPF) start @ {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==");
 
+        // Opt this process out of Windows background-process throttling as
+        // early as possible — before any media thread starts. See
+        // BackgroundThrottlingOptOut.cs for the rationale. Without this a
+        // backgrounded subscriber window loses ~70% of RTP packets because
+        // the OS slows the receive thread enough for the kernel UDP queue
+        // to overflow.
+        BackgroundThrottlingOptOut.Apply();
+
         // Apply Fluent dark theme before any window materializes so the
         // first paint is already themed — otherwise you get a single
         // frame of default-WPF chrome at startup.

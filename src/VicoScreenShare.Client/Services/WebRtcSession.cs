@@ -119,6 +119,11 @@ public sealed class WebRtcSession : IAsyncDisposable
         {
             var offer = _pc.createOffer(null);
             await _pc.setLocalDescription(offer).ConfigureAwait(false);
+            // Immediately after setLocalDescription the RTP channel exists and
+            // its UDP socket is bound; this is the earliest point we can raise
+            // the kernel receive buffer above the tiny Windows default so a
+            // burst on a high-bitrate link does not silently tail-drop.
+            RtpSocketTuning.TryApply(_pc);
             await _signaling.SendSdpOfferAsync(offer.sdp).ConfigureAwait(false);
 
             using var timeoutCts = new System.Threading.CancellationTokenSource(timeout);

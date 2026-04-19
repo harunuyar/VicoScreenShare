@@ -168,6 +168,12 @@ public sealed class SfuPeer : IAsyncDisposable
 
         var answer = _pc.createAnswer(null);
         await _pc.setLocalDescription(answer).ConfigureAwait(false);
+        // Publisher peer's RTP channel is bound now — raise the kernel
+        // UDP buffers before media starts flowing so bursts don't
+        // overflow the default ~64 KB socket queue and surface as loss
+        // the publisher can't see (the publisher has no RR for the
+        // upstream; only the SFU observes this side's packet drops).
+        RtpSocketTuning.TryApply(_pc, msg => _logger?.LogInformation("{Msg}", msg));
 
         FlushPendingRemoteCandidates();
         return answer.sdp;

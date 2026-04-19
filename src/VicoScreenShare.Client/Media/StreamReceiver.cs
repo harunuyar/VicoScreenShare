@@ -29,6 +29,33 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     private bool _attached;
     private bool _disposed;
 
+    // Decode pipeline: the SIPSorcery receive thread must not block on decode
+    // or renderer callbacks, because backgrounded WPF renderers get DWM-
+    // throttled to ~1 FPS and would stall UDP intake for hundreds of ms, at
+    // which point the kernel socket buffer overflows and packets drop. We
+    // enqueue the encoded frame bytes onto a bounded channel, and a
+    // dedicated worker thread drains the channel synchronously calling the
+    // decoder. Bounded = 30 frames (~500 ms of video) — enough to tolerate
+    // brief renderer stalls, short enough that we'd rather drop a stale
+    // encoded frame than accumulate multi-second delay.
+    private System.Threading.Channels.Channel<PendingEncodedFrame>? _decodeQueue;
+    private System.Threading.Thread? _decodeWorker;
+    private System.Threading.CancellationTokenSource? _decodeCts;
+
+    private readonly record struct PendingEncodedFrame(byte[] Bytes, uint RtpTimestamp, DateTime ArrivalUtc);
+
+    // Per-subscriber RTP packet-level loss tracking. Unlike RTCP RR fraction
+    // lost (which has to travel back through the wire and be trusted), these
+    // counters measure loss at our own receive point by detecting gaps in
+    // the 16-bit RTP sequence number. Wraparound is handled with signed
+    // arithmetic; late/reordered packets don't count as loss. When the SSRC
+    // changes (publisher restart) counters reset.
+    private uint _rtpSsrc;
+    private ushort _rtpLastSeq;
+    private bool _rtpSeqInitialized;
+    private long _rtpPacketsReceived;
+    private long _rtpPacketsInferredLost;
+
     public StreamReceiver(RTCPeerConnection pc, string displayName = "remote")
         : this(pc, new VpxDecoderFactory(), displayName)
     {
@@ -68,6 +95,36 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     /// <summary>Codec tag for the decoder instance powering this receiver.</summary>
     public VideoCodec Codec => _decoder.Codec;
 
+    /// <summary>
+    /// Raw count of video RTP packets whose sequence number arrived in-order
+    /// or with a forward jump (late/reordered packets do not increment this).
+    /// </summary>
+    public long RtpPacketsReceived => System.Threading.Interlocked.Read(ref _rtpPacketsReceived);
+
+    /// <summary>
+    /// Count of video RTP packets inferred lost from forward gaps in the
+    /// 16-bit sequence-number stream. Does not include reordered or late
+    /// packets. Strictly a lower bound on real loss — if a burst lost the
+    /// high end of a wrap cycle, we can't always detect that.
+    /// </summary>
+    public long RtpPacketsInferredLost => System.Threading.Interlocked.Read(ref _rtpPacketsInferredLost);
+
+    /// <summary>
+    /// Lost / (received + lost), as a percentage in 0..100. Returns 0 when
+    /// no packets have flowed yet. This is the direct, local loss readout —
+    /// independent of the RTCP RR chain.
+    /// </summary>
+    public double RtpLossPercent
+    {
+        get
+        {
+            var received = RtpPacketsReceived;
+            var lost = RtpPacketsInferredLost;
+            var total = received + lost;
+            return total == 0 ? 0.0 : 100.0 * lost / total;
+        }
+    }
+
     public event FrameArrivedHandler? FrameArrived;
 
     /// <summary>
@@ -99,10 +156,65 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         }
 
         _attached = true;
+
+        // Spin up the decode worker BEFORE attaching the SIPSorcery event,
+        // otherwise the first OnVideoFrameReceived could find an unready
+        // queue and get dropped.
+        var opts = new System.Threading.Channels.BoundedChannelOptions(30)
+        {
+            // Drop the oldest queued encoded frame when the worker can't
+            // keep up. We'd rather lose a stale frame than let backpressure
+            // reach the receive thread and cause actual UDP packet loss.
+            FullMode = System.Threading.Channels.BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = true,
+        };
+        _decodeQueue = System.Threading.Channels.Channel.CreateBounded<PendingEncodedFrame>(opts);
+        _decodeCts = new System.Threading.CancellationTokenSource();
+        _decodeWorker = new System.Threading.Thread(DecodeWorkerLoop)
+        {
+            IsBackground = true,
+            Name = $"rx-decode {DisplayName}",
+            // AboveNormal so background WPF apps don't starve the decode
+            // loop when their UI thread is lower priority. This is the
+            // thread that does the actual H.264 decode + renderer invoke,
+            // and we want it to get CPU time regardless of window focus.
+            Priority = System.Threading.ThreadPriority.AboveNormal,
+        };
+        _decodeWorker.Start();
+
         _pc.OnVideoFrameReceived += OnVideoFrameReceived;
+        _pc.OnRtpPacketReceived += OnRtpPacketReceived;
         _pc.onconnectionstatechange += OnConnectionStateChange;
         return System.Threading.Tasks.Task.CompletedTask;
     }
+
+    private void DecodeWorkerLoop()
+    {
+        var reader = _decodeQueue!.Reader;
+        var token = _decodeCts!.Token;
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                PendingEncodedFrame pending;
+                try
+                {
+                    pending = reader.ReadAsync(token).AsTask().GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                DecodeAndDispatch(pending);
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[recv {DisplayName}] decode worker threw: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
 
     public System.Threading.Tasks.Task StopAsync()
     {
@@ -113,8 +225,82 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
         _attached = false;
         _pc.OnVideoFrameReceived -= OnVideoFrameReceived;
+        _pc.OnRtpPacketReceived -= OnRtpPacketReceived;
         _pc.onconnectionstatechange -= OnConnectionStateChange;
+
+        // Stop the decode worker. Cancel first to unblock any pending
+        // ReadAsync, complete the channel so the loop exits cleanly, then
+        // join with a short timeout so Dispose doesn't hang if the worker
+        // is stuck in native decode code.
+        try { _decodeCts?.Cancel(); } catch { }
+        try { _decodeQueue?.Writer.TryComplete(); } catch { }
+        try { _decodeWorker?.Join(TimeSpan.FromMilliseconds(500)); } catch { }
+        try { _decodeCts?.Dispose(); } catch { }
+        _decodeCts = null;
+        _decodeWorker = null;
+        _decodeQueue = null;
         return System.Threading.Tasks.Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Raw RTP packet observer — maintains the sequence-gap loss counters
+    /// used by <see cref="RtpLossPercent"/>. Runs on SIPSorcery's receive
+    /// thread; keep this path branch-light and allocation-free.
+    /// </summary>
+    private void OnRtpPacketReceived(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket packet)
+    {
+        if (mediaType != SDPMediaTypesEnum.video || packet is null)
+        {
+            return;
+        }
+
+        var ssrc = packet.Header.SyncSource;
+        var seq = packet.Header.SequenceNumber;
+
+        if (_rtpSsrc != ssrc)
+        {
+            // SSRC change = stream restart (publisher re-joined) or, when
+            // behind an SFU, a new subscriber session being rekeyed. Reset
+            // sequence tracking rather than logging thousands of phantom
+            // gaps.
+            if (_rtpSsrc != 0)
+            {
+                DebugLog.Write($"[recv {DisplayName}] SSRC changed 0x{_rtpSsrc:X8} -> 0x{ssrc:X8} at seq {seq}");
+            }
+            _rtpSsrc = ssrc;
+            _rtpSeqInitialized = false;
+        }
+
+        if (!_rtpSeqInitialized)
+        {
+            _rtpLastSeq = seq;
+            _rtpSeqInitialized = true;
+            System.Threading.Interlocked.Increment(ref _rtpPacketsReceived);
+            return;
+        }
+
+        // Signed 16-bit delta handles the 65535→0 wrap correctly for any
+        // realistic reorder window (< ~32 K packets of skew).
+        var expected = (ushort)(_rtpLastSeq + 1);
+        var diff = (short)(seq - expected);
+
+        if (diff > 0)
+        {
+            // Forward jump → `diff` packets were lost between the last
+            // in-order arrival and this one. Could also include already-
+            // counted reorders; strict lower bound on real loss.
+            System.Threading.Interlocked.Add(ref _rtpPacketsInferredLost, diff);
+            _rtpLastSeq = seq;
+        }
+        else if (diff == 0)
+        {
+            _rtpLastSeq = seq;
+        }
+        // diff < 0: late/reordered arrival. Don't change _rtpLastSeq and
+        // don't count loss — we would've already counted it on the first
+        // forward jump past this slot.
+
+        System.Threading.Interlocked.Increment(ref _rtpPacketsReceived);
     }
 
     public System.Threading.Tasks.ValueTask DisposeAsync()
@@ -152,17 +338,47 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         }
     }
 
+    /// <summary>
+    /// Called on the SIPSorcery UDP receive thread. MUST return quickly —
+    /// this path runs on the same thread that drains the kernel socket
+    /// buffer, so any block here risks packet loss to buffer overflow.
+    /// All we do is stamp the frame and hand it to the decode worker; real
+    /// decode + renderer invocation happens on the dedicated worker thread.
+    /// </summary>
     private void OnVideoFrameReceived(IPEndPoint remote, uint timestamp, byte[] encodedSample, VideoFormat format)
     {
-        if (encodedSample is null || encodedSample.Length == 0)
+        if (encodedSample is null || encodedSample.Length == 0 || _disposed)
         {
             return;
         }
 
+        var queue = _decodeQueue;
+        if (queue is null)
+        {
+            return;
+        }
+
+        // Writer is single-writer (this thread). TryWrite is non-blocking
+        // even on a full channel — FullMode=DropOldest means an old queued
+        // frame gets evicted, freeing room for the new one. This keeps the
+        // receive thread bounded to a few microseconds per callback
+        // regardless of renderer backpressure.
+        queue.Writer.TryWrite(new PendingEncodedFrame(encodedSample, timestamp, DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// Runs on the dedicated decode worker thread. Synchronous call to the
+    /// native decoder + renderer-event invocation. Blocking here is fine —
+    /// it only backs up the decode queue, not the UDP receive path.
+    /// </summary>
+    private void DecodeAndDispatch(PendingEncodedFrame pending)
+    {
+        var encodedSample = pending.Bytes;
+        var arrival = pending.ArrivalUtc;
+
         System.Collections.Generic.IReadOnlyList<DecodedVideoFrame> frames;
-        var now = DateTime.UtcNow;
-        var gap = _lastFrameUtc == DateTime.MinValue ? TimeSpan.Zero : now - _lastFrameUtc;
-        _lastFrameUtc = now;
+        var gap = _lastFrameUtc == DateTime.MinValue ? TimeSpan.Zero : arrival - _lastFrameUtc;
+        _lastFrameUtc = arrival;
         if (gap > TimeSpan.FromSeconds(2))
         {
             DebugLog.Write($"[recv] incoming packet after {gap.TotalSeconds:F1}s gap — stream restarted");
@@ -174,7 +390,7 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         // something we reconstruct per frame here. When the decoder yields
         // multiple outputs in one call (buffered older frame plus a new
         // one) each output carries its OWN original timestamp.
-        var rtpInputTs = TimeSpan.FromTicks((long)timestamp * TimeSpan.TicksPerMillisecond / 90);
+        var rtpInputTs = TimeSpan.FromTicks((long)pending.RtpTimestamp * TimeSpan.TicksPerMillisecond / 90);
 
         int gpuEmittedThisCall;
         lock (_decodeLock)

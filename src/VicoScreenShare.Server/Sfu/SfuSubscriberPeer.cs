@@ -29,6 +29,17 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
     private bool _remoteDescriptionApplied;
     private bool _disposed;
 
+    // Per-subscriber forward-rate counters. Every packet we attempt to forward
+    // through SendForwardedRtp bumps _packetsForwarded + _bytesForwarded. A
+    // background timer logs the delta every 2 s so we can see exactly what
+    // bitrate each subscriber is being fed — definitive answer to "is Azure
+    // keeping up per viewer?" without needing external packet capture.
+    private long _packetsForwarded;
+    private long _bytesForwarded;
+    private long _prevLoggedPackets;
+    private long _prevLoggedBytes;
+    private System.Threading.Timer? _rateLogTimer;
+
     public SfuSubscriberPeer(Guid viewerPeerId, Guid publisherPeerId, ILogger<SfuSubscriberPeer>? logger = null)
     {
         ViewerPeerId = viewerPeerId;
@@ -62,6 +73,40 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         _pc.onicecandidate += OnLocalIceCandidate;
         _pc.onconnectionstatechange += OnConnectionStateChange;
         _pc.OnReceiveReport += OnViewerReceiveReport;
+
+        // Log per-subscriber send rate every 30 s. Useful for ops ("is this
+        // subscriber still being fed at expected bitrate?") without the log
+        // spam of a 2-second tick. Quiet entirely when the connection goes
+        // idle (no packets since last tick).
+        _rateLogTimer = new System.Threading.Timer(
+            _ => LogForwardRate(), null,
+            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    private void LogForwardRate()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        var pkts = System.Threading.Interlocked.Read(ref _packetsForwarded);
+        var bytes = System.Threading.Interlocked.Read(ref _bytesForwarded);
+        var dPkts = pkts - _prevLoggedPackets;
+        var dBytes = bytes - _prevLoggedBytes;
+        _prevLoggedPackets = pkts;
+        _prevLoggedBytes = bytes;
+        if (dPkts == 0)
+        {
+            return;
+        }
+        const double WindowSeconds = 30.0;
+        var mbps = dBytes * 8.0 / WindowSeconds / 1_000_000.0;
+        var pps = dPkts / WindowSeconds;
+        _logger?.LogInformation(
+            "[sfu-send] viewer={Viewer} pub={Pub} 30s: {Pps:F0} pps, {Mbps:F2} Mbps | totals pkts={TotalPkts}",
+            ViewerPeerId.ToString("N").Substring(0, 8),
+            PublisherPeerId.ToString("N").Substring(0, 8),
+            pps, mbps, pkts);
     }
 
     public Guid ViewerPeerId { get; }
@@ -109,6 +154,8 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
                 rtpPacket.Header.Timestamp,
                 rtpPacket.Header.MarkerBit,
                 rtpPacket.Header.PayloadType);
+            System.Threading.Interlocked.Increment(ref _packetsForwarded);
+            System.Threading.Interlocked.Add(ref _bytesForwarded, rtpPacket.Payload?.Length ?? 0);
         }
         catch (Exception ex)
         {
@@ -125,6 +172,11 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
     {
         var offer = _pc.createOffer(null);
         await _pc.setLocalDescription(offer).ConfigureAwait(false);
+        // Subscriber peer's RTP channel is bound now. This is the egress
+        // path the publisher's "down" loss readout is measuring — raising
+        // the kernel send buffer here is the most direct thing we can do
+        // to absorb fan-out bursts before they're dropped on the wire.
+        RtpSocketTuning.TryApply(_pc, msg => _logger?.LogInformation("{Msg}", msg));
         return offer.sdp;
     }
 
@@ -271,6 +323,8 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
 
         _disposed = true;
 
+        try { _rateLogTimer?.Dispose(); } catch { }
+        _rateLogTimer = null;
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }
         try { _pc.onconnectionstatechange -= OnConnectionStateChange; } catch { }
         try { _pc.close(); } catch { }

@@ -84,6 +84,16 @@ public sealed partial class RoomViewModel : ViewModelBase
     private long _statsPrevSenderBytes;
     private DateTime _statsPrevTickUtc = DateTime.MinValue;
 
+    // Latest RTCP-derived loss readings, updated by handlers and sampled by
+    // the stats tick. Both are 0..1 fractions. Upstream = RR from our single
+    // immediate subscriber (the SFU). Downstream = SFU's aggregate of the
+    // worst subscriber-side loss across our publisher's viewers. Either
+    // being non-zero means packets are being dropped somewhere on the path.
+    private double _latestUpstreamLoss;
+    private double _latestDownstreamLoss;
+    private DateTime _latestUpstreamLossUtc = DateTime.MinValue;
+    private DateTime _latestDownstreamLossUtc = DateTime.MinValue;
+
 
     public RoomViewModel(
         SignalingClient signaling,
@@ -693,7 +703,10 @@ public sealed partial class RoomViewModel : ViewModelBase
                     worst = s.FractionLost;
                 }
             }
-            controller.Observe(worst / 256.0);
+            var fraction = worst / 256.0;
+            _latestUpstreamLoss = fraction;
+            _latestUpstreamLossUtc = DateTime.UtcNow;
+            controller.Observe(fraction);
         };
 
         session.PeerConnection.OnReceiveReport += handler;
@@ -983,11 +996,32 @@ public sealed partial class RoomViewModel : ViewModelBase
             $"enc:    {streamer.EncoderWidth}x{streamer.EncoderHeight}\n" +
             $"fps:    {fps:F1} / {streamer.TargetFps}\n" +
             $"rate:   {mbps:F2} / {streamer.TargetBitrate / 1_000_000.0:F1} Mbps\n" +
-            $"frames: {streamer.EncodedFrameCount} ({streamer.FrameCount - streamer.EncodedFrameCount} dropped)";
+            $"frames: {streamer.EncodedFrameCount} ({streamer.FrameCount - streamer.EncodedFrameCount} dropped)\n" +
+            $"loss:   up {FormatLoss(_latestUpstreamLoss, _latestUpstreamLossUtc)}  " +
+            $"down {FormatLoss(_latestDownstreamLoss, _latestDownstreamLossUtc)}";
 
         return string.IsNullOrEmpty(SelfRenderStatsLine)
             ? core
             : core + "\n" + SelfRenderStatsLine;
+    }
+
+    /// <summary>
+    /// Render one of the two loss readings. Shows <c>—</c> when we have
+    /// never received a report on that channel, or when the last report
+    /// is older than ~5 seconds (stale — the peer may have stopped or
+    /// the RTCP side of the link is broken).
+    /// </summary>
+    private static string FormatLoss(double fraction, DateTime lastUtc)
+    {
+        if (lastUtc == DateTime.MinValue)
+        {
+            return "—";
+        }
+        if ((DateTime.UtcNow - lastUtc).TotalSeconds > 5.0)
+        {
+            return "stale";
+        }
+        return $"{fraction * 100.0:F1}%";
     }
 
     private string BuildIncomingStats(double elapsedSeconds)
@@ -1117,6 +1151,8 @@ public sealed partial class RoomViewModel : ViewModelBase
         // naturally takes the worst-case reaction.
         try
         {
+            _latestDownstreamLoss = report.FractionLost;
+            _latestDownstreamLossUtc = DateTime.UtcNow;
             _bitrateController?.Observe(report.FractionLost);
         }
         catch { /* controller lifecycle race */ }

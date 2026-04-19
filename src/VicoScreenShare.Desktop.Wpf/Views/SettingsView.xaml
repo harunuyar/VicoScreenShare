@@ -179,6 +179,26 @@
                     </StackPanel>
                 </ui:Card>
 
+                <ui:Card Margin="0,12,0,0" Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <StackPanel>
+                        <TextBlock Text="Smooth keyframes (intra-refresh)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12" Margin="0,0,0,8"
+                                   Text="Replaces the big periodic keyframe with intra-coded blocks spread across the refresh window below. Eliminates the packet burst that causes sustained distortion on constrained links; new viewers take about one refresh period (≈1 s at default) to see a clean picture instead of getting a correct first frame immediately. H.264 only." />
+                        <ui:ToggleSwitch IsChecked="{Binding EnableIntraRefresh}"
+                                         OffContent="Off — periodic IDR keyframes (default)"
+                                         OnContent="On — cyclic intra-refresh" />
+                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                            <TextBlock Text="Refresh period (frames):" VerticalAlignment="Center" Margin="0,0,12,0" />
+                            <ui:NumberBox Value="{Binding IntraRefreshPeriodFrames, Mode=TwoWay}"
+                                          Minimum="6"
+                                          Maximum="600"
+                                          SpinButtonPlacementMode="Inline"
+                                          Width="120" />
+                        </StackPanel>
+                    </StackPanel>
+                </ui:Card>
+
                 <ui:InfoBar Title="Settings"
                             Message="{Binding StatusMessage}"
                             Severity="Informational"
