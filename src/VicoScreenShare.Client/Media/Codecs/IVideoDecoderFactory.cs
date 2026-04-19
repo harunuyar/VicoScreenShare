@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Client.Media.Codecs;
+namespace VicoScreenShare.Client.Media.Codecs;
 
 /// <summary>
 /// Builds <see cref="IVideoDecoder"/> instances for one specific codec.

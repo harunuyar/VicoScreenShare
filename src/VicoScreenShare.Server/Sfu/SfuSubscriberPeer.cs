@@ -1,13 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.Server.Sfu;
+
+using System;
 using System.Collections.Generic;
-using System.Net;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-
-namespace VicoScreenShare.Server.Sfu;
 
 /// <summary>
 /// Server-side one-way "subscriber" peer connection: sends a single publisher's

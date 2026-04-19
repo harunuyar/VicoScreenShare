@@ -1,6 +1,6 @@
-﻿using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
+namespace VicoScreenShare.Client.Windows.Capture;
+
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using VicoScreenShare.Client.Media;
@@ -11,9 +11,6 @@ using Vortice.DXGI;
 using global::Windows.Graphics;
 using global::Windows.Graphics.Capture;
 using global::Windows.Graphics.DirectX;
-using global::Windows.Graphics.DirectX.Direct3D11;
-
-namespace VicoScreenShare.Client.Windows.Capture;
 
 /// <summary>
 /// Windows.Graphics.Capture-backed implementation of <see cref="ICaptureSource"/>.

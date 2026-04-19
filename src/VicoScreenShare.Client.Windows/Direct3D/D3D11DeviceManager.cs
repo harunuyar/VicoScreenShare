@@ -1,10 +1,10 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Direct3D;
+
+using System;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
-using Windows.Graphics.DirectX.Direct3D11;
-
-namespace VicoScreenShare.Client.Windows.Direct3D;
+using global::Windows.Graphics.DirectX.Direct3D11;
 
 /// <summary>
 /// Owns the single D3D11 device that backs the capture pipeline. Exposes both the

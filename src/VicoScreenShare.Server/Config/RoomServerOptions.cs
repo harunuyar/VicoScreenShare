@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Server.Config;
+namespace VicoScreenShare.Server.Config;
 
 public sealed class RoomServerOptions
 {

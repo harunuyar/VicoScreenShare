@@ -1,6 +1,6 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
-
 namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using CommunityToolkit.Mvvm.ComponentModel;
 
 public abstract class ViewModelBase : ObservableObject
 {

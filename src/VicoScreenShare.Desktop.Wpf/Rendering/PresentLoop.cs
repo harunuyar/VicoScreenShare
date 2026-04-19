@@ -1,12 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.Rendering;
+
+using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
-
-namespace VicoScreenShare.Desktop.App.Rendering;
 
 /// <summary>
 /// Dedicated paint thread that drains a <see cref="TimestampedFrameQueue"/>

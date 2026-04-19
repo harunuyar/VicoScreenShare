@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Media;
+
+using System;
 
 /// <summary>
 /// Converts 8-bit BGRA frames (the format the Windows capture path produces) into
@@ -43,7 +43,7 @@ public static class BgraToI420
         Span<byte> i420Destination)
     {
         if (width <= 0 || height <= 0) throw new ArgumentOutOfRangeException(nameof(width));
-        if (bgraStrideBytes < width * 4) throw new ArgumentOutOfRangeException(nameof(bgraStrideBytes));
+        ArgumentOutOfRangeException.ThrowIfLessThan(bgraStrideBytes, width * 4);
         var required = RequiredOutputSize(width, height);
         if (i420Destination.Length < required)
         {

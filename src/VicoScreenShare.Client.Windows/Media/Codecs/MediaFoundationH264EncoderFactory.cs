@@ -1,8 +1,8 @@
-﻿using VicoScreenShare.Client.Media;
+namespace VicoScreenShare.Client.Windows.Media.Codecs;
+
+using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using Vortice.Direct3D11;
-
-namespace VicoScreenShare.Client.Windows.Media.Codecs;
 
 public sealed class MediaFoundationH264EncoderFactory : IVideoEncoderFactory
 {

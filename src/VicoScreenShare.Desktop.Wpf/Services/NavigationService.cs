@@ -1,7 +1,7 @@
-﻿using System;
-using CommunityToolkit.Mvvm.ComponentModel;
-
 namespace VicoScreenShare.Desktop.App.Services;
+
+using System;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 /// <summary>
 /// Tiny WPF navigation shim: a single <see cref="Current"/> property
@@ -32,13 +32,13 @@ public sealed partial class NavigationService : ObservableObject, INavigationHos
 
     public void NavigateTo(object viewModel)
     {
-        if (viewModel is null) throw new ArgumentNullException(nameof(viewModel));
+        ArgumentNullException.ThrowIfNull(viewModel);
         Current = viewModel;
     }
 
     public void ShowOverlay(object overlayViewModel)
     {
-        if (overlayViewModel is null) throw new ArgumentNullException(nameof(overlayViewModel));
+        ArgumentNullException.ThrowIfNull(overlayViewModel);
         ActiveOverlay = overlayViewModel;
     }
 

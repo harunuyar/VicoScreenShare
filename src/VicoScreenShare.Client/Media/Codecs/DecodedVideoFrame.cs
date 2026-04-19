@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Media.Codecs;
+
+using System;
 
 /// <summary>
 /// One decoded frame as a packed BGRA byte buffer plus the content

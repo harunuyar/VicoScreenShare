@@ -1,4 +1,5 @@
-﻿using System.Net.Sockets;
+namespace VicoScreenShare.Tests.Integration;
+
 using FluentAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -10,9 +11,6 @@ using VicoScreenShare.Client.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server;
-using SIPSorcery.Net;
-
-namespace VicoScreenShare.Tests.Integration;
 
 /// <summary>
 /// Phase 3.2 coverage: drive the full client-side WebRtcSession against a real

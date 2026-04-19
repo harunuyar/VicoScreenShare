@@ -1,8 +1,8 @@
-﻿using FluentAssertions;
+namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Platform;
-
-namespace VicoScreenShare.Tests.Client;
 
 public class CaptureStreamerTests
 {

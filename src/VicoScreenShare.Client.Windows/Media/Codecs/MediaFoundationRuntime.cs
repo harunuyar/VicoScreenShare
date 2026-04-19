@@ -1,8 +1,8 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Media.Codecs;
+
+using System;
 using VicoScreenShare.Client.Diagnostics;
 using Vortice.MediaFoundation;
-
-namespace VicoScreenShare.Client.Windows.Media.Codecs;
 
 /// <summary>
 /// Owns the one-shot <see cref="MediaFactory.MFStartup"/> call that every MF

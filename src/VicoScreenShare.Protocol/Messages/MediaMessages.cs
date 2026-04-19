@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Protocol.Messages;
+
+using System;
 
 /// <summary>
 /// SDP offer routed through the server. Two flows use the same message:

@@ -1,4 +1,6 @@
-﻿using FluentAssertions;
+namespace VicoScreenShare.Tests.Integration;
+
+using FluentAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -12,8 +14,6 @@ using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server;
 using SIPSorcery.Net;
-
-namespace VicoScreenShare.Tests.Integration;
 
 /// <summary>
 /// End-to-end proof: spin up a real server host, connect two clients, have one

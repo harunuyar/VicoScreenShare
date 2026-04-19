@@ -1,16 +1,14 @@
-﻿using System.Net.WebSockets;
+namespace VicoScreenShare.Tests.Integration;
+
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
-
-namespace VicoScreenShare.Tests.Integration;
 
 /// <summary>
 /// Full-stack signaling tests: spin up the real server via WebApplicationFactory and
@@ -20,6 +18,7 @@ namespace VicoScreenShare.Tests.Integration;
 public sealed class SignalingE2ETests : IAsyncLifetime
 {
     private WebApplicationFactory<Program>? _factory;
+    private static readonly string[] expected = new[] { "Alice", "Bob" };
 
     public Task InitializeAsync()
     {
@@ -73,7 +72,7 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         var viewerPayload = viewerJoined.Payload.Deserialize<RoomJoined>(ProtocolJson.Options)!;
         viewerPayload.RoomId.Should().Be(roomId);
         viewerPayload.Peers.Should().HaveCount(2);
-        viewerPayload.Peers.Select(p => p.DisplayName).Should().Contain(new[] { "Alice", "Bob" });
+        viewerPayload.Peers.Select(p => p.DisplayName).Should().Contain(expected);
 
         // Host observes the peer-joined broadcast.
         var broadcast = await ExpectAsync(host, MessageType.PeerJoined, cts.Token);

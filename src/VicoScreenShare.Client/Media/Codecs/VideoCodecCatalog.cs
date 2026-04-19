@@ -1,8 +1,8 @@
-﻿using System;
+namespace VicoScreenShare.Client.Media.Codecs;
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
-
-namespace VicoScreenShare.Client.Media.Codecs;
 
 /// <summary>
 /// Holds the set of video codec implementations the current host supports.

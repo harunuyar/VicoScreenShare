@@ -1,6 +1,6 @@
-﻿using System.Collections.Concurrent;
-
 namespace VicoScreenShare.Server.Signaling;
+
+using System.Collections.Concurrent;
 
 /// <summary>
 /// Global registry of active <see cref="WsSession"/> instances, keyed by peer id.

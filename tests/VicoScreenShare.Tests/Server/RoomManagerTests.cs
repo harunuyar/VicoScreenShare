@@ -1,9 +1,9 @@
-﻿using FluentAssertions;
+namespace VicoScreenShare.Tests.Server;
+
+using FluentAssertions;
 using Microsoft.Extensions.Options;
 using VicoScreenShare.Server.Config;
 using VicoScreenShare.Server.Rooms;
-
-namespace VicoScreenShare.Tests.Server;
 
 public class RoomManagerTests
 {

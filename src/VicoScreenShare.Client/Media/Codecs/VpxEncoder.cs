@@ -1,8 +1,8 @@
-﻿using System;
+namespace VicoScreenShare.Client.Media.Codecs;
+
+using System;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
-
-namespace VicoScreenShare.Client.Media.Codecs;
 
 /// <summary>
 /// libvpx VP8 software encoder wrapped as an <see cref="IVideoEncoder"/>.

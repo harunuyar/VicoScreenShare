@@ -1,9 +1,9 @@
-﻿using System.Text.Json;
+namespace VicoScreenShare.Tests.Protocol;
+
+using System.Text.Json;
 using FluentAssertions;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
-
-namespace VicoScreenShare.Tests.Protocol;
 
 public class ProtocolJsonRoundtripTests
 {

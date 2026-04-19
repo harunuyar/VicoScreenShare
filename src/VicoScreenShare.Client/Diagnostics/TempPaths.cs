@@ -1,7 +1,7 @@
-﻿using System;
-using System.IO;
-
 namespace VicoScreenShare.Client.Diagnostics;
+
+using System;
+using System.IO;
 
 /// <summary>
 /// Single source of truth for the project's temp scratch directory.

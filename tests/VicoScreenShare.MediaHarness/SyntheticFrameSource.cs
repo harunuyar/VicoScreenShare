@@ -1,10 +1,10 @@
-﻿using System;
+namespace VicoScreenShare.MediaHarness;
+
+using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using VicoScreenShare.Client.Platform;
-
-namespace VicoScreenShare.MediaHarness;
 
 /// <summary>
 /// <see cref="ICaptureSource"/> backed by a background thread that raises

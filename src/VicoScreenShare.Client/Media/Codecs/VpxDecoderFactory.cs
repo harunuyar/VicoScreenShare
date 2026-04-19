@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Client.Media.Codecs;
+namespace VicoScreenShare.Client.Media.Codecs;
 
 /// <summary>
 /// Factory for <see cref="VpxDecoder"/>. Always available because libvpx ships

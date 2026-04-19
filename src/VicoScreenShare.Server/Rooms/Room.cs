@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Server.Rooms;
+namespace VicoScreenShare.Server.Rooms;
 
 /// <summary>
 /// Thread-safe in-memory room. All state access is serialized through <see cref="_lock"/>;

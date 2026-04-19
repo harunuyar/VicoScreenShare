@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Media;
+
+using System;
 
 /// <summary>
 /// Credit-based frame rate admission gate. Holds a running "accepted

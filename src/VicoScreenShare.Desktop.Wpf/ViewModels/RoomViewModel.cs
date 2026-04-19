@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
@@ -16,8 +18,6 @@ using VicoScreenShare.Client.Services;
 using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
-
-namespace VicoScreenShare.Desktop.App.ViewModels;
 
 /// <summary>
 /// Room session view model. Owns the WebRTC peer connection, the stream

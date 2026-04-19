@@ -1,18 +1,16 @@
-﻿using System.Net.WebSockets;
+namespace VicoScreenShare.Tests.Integration;
+
+using System.Net.WebSockets;
 using FluentAssertions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using VicoScreenShare.Client;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
-
-namespace VicoScreenShare.Tests.Integration;
 
 /// <summary>
 /// Client-side lifecycle tests. The SignalingClient is one-shot: each connect

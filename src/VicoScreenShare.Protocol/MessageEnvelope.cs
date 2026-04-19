@@ -1,6 +1,6 @@
-﻿using System.Text.Json;
-
 namespace VicoScreenShare.Protocol;
+
+using System.Text.Json;
 
 /// <summary>
 /// Wire envelope for every signaling message. <see cref="Type"/> is the discriminator

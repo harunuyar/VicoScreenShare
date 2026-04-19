@@ -1,8 +1,8 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
 using CommunityToolkit.Mvvm.ComponentModel;
 using VicoScreenShare.Client.Services;
-
-namespace VicoScreenShare.Desktop.App.ViewModels;
 
 /// <summary>
 /// Row in the HomeView connection picker. Observable mirror of one

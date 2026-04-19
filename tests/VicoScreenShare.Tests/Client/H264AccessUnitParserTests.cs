@@ -1,7 +1,7 @@
-﻿using FluentAssertions;
-using VicoScreenShare.Client.Media.Codecs;
-
 namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
+using VicoScreenShare.Client.Media.Codecs;
 
 public class H264AccessUnitParserTests
 {

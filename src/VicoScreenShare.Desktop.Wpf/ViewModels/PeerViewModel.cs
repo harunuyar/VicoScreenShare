@@ -1,7 +1,7 @@
-﻿using System;
-using CommunityToolkit.Mvvm.ComponentModel;
-
 namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 public sealed partial class PeerViewModel : ObservableObject
 {

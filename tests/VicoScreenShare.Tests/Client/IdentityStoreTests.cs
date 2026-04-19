@@ -1,7 +1,7 @@
-﻿using FluentAssertions;
-using VicoScreenShare.Client.Services;
-
 namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
+using VicoScreenShare.Client.Services;
 
 public class IdentityStoreTests : IDisposable
 {

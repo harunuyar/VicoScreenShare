@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Desktop.App.Services;
+namespace VicoScreenShare.Desktop.App.Services;
 
 /// <summary>
 /// Abstracts how view models ask the shell to switch screens. Same

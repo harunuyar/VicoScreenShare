@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -7,9 +9,6 @@ using VicoScreenShare.Client;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Services;
-using VicoScreenShare.Desktop.App.Services;
-
-namespace VicoScreenShare.Desktop.App.ViewModels;
 
 public sealed partial class SettingsViewModel : ViewModelBase
 {

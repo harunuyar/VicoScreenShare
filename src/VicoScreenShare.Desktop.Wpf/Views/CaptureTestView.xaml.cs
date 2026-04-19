@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.Views;
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading.Tasks;
@@ -14,12 +16,9 @@ using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Client.Windows.Capture;
 using VicoScreenShare.Client.Windows.Media.Codecs;
-using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Desktop.App.ViewModels;
 using Vortice.Direct3D11;
-using Windows.Graphics.Capture;
-
-namespace VicoScreenShare.Desktop.App.Views;
+using global::Windows.Graphics.Capture;
 
 /// <summary>
 /// Standalone diagnostic page: capture → render, with no SFU, no

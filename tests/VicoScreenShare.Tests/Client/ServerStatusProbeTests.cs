@@ -1,10 +1,10 @@
-﻿using FluentAssertions;
+namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Server.Config;
-
-namespace VicoScreenShare.Tests.Client;
 
 /// <summary>
 /// Exercises <see cref="ServerStatusProbe"/> against a real in-process server,

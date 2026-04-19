@@ -1,12 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.Server.Sfu;
+
+using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Text.Json;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-
-namespace VicoScreenShare.Server.Sfu;
 
 /// <summary>
 /// One server-side <see cref="RTCPeerConnection"/> paired to a client. Handles the

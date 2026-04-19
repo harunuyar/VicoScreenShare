@@ -1,8 +1,8 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
 using CommunityToolkit.Mvvm.Input;
 using VicoScreenShare.Desktop.App.Services;
-
-namespace VicoScreenShare.Desktop.App.ViewModels;
 
 /// <summary>
 /// Tiny navigation-routing view model for the capture-test page. The

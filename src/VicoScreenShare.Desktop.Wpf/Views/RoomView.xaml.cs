@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.Views;
+
+using System;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -6,8 +8,6 @@ using System.Windows.Input;
 using System.Windows.Threading;
 using VicoScreenShare.Desktop.App.Rendering;
 using VicoScreenShare.Desktop.App.ViewModels;
-
-namespace VicoScreenShare.Desktop.App.Views;
 
 public partial class RoomView : UserControl
 {

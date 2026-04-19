@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App;
+
+using System;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -6,8 +8,6 @@ using VicoScreenShare.Client;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Desktop.App.ViewModels;
-
-namespace VicoScreenShare.Desktop.App;
 
 public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 {

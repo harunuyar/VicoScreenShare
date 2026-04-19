@@ -1,10 +1,10 @@
-﻿using System;
+namespace VicoScreenShare.Client.Media;
+
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
-
-namespace VicoScreenShare.Client.Media;
 
 /// <summary>
 /// Playout queue for decoded frames, ordered strictly by content

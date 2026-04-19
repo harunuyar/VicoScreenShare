@@ -1,7 +1,7 @@
-﻿using System;
-using System.IO;
-
 namespace VicoScreenShare.Client.Diagnostics;
+
+using System;
+using System.IO;
 
 /// <summary>
 /// Tiny file-backed logger for debug-only output. The Desktop.Windows host is

@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Protocol;
+
+using System;
 
 public sealed record PeerInfo(
     Guid PeerId,

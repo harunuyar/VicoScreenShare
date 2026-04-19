@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Server.Rooms;
+namespace VicoScreenShare.Server.Rooms;
 
 /// <summary>Server-side record of a peer inside a room.</summary>
 public sealed class RoomPeer

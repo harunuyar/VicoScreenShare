@@ -1,10 +1,10 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Direct3D;
+
+using System;
 using VicoScreenShare.Client.Diagnostics;
 using Vortice;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
-
-namespace VicoScreenShare.Client.Windows.Direct3D;
 
 /// <summary>
 /// GPU-side BGRA → BGRA scaler built on the Direct3D 11 Video Processor.

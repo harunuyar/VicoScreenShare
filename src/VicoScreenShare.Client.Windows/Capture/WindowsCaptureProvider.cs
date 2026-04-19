@@ -1,10 +1,10 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Capture;
+
+using System;
 using System.Threading.Tasks;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Windows.Direct3D;
-using Windows.Graphics.Capture;
-
-namespace VicoScreenShare.Client.Windows.Capture;
+using global::Windows.Graphics.Capture;
 
 /// <summary>
 /// <see cref="ICaptureProvider"/> backed by <c>Windows.Graphics.Capture</c>. Shows

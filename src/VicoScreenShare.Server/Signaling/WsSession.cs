@@ -1,4 +1,6 @@
-﻿using System.Buffers;
+namespace VicoScreenShare.Server.Signaling;
+
+using System.Buffers;
 using System.IO;
 using System.Net.WebSockets;
 using System.Text;
@@ -9,8 +11,6 @@ using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
 using VicoScreenShare.Server.Rooms;
 using VicoScreenShare.Server.Sfu;
-
-namespace VicoScreenShare.Server.Signaling;
 
 /// <summary>
 /// One WebSocket session. Owns a reader loop, a serialized writer loop driven by a

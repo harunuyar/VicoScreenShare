@@ -1,11 +1,11 @@
-﻿using System;
+namespace VicoScreenShare.Client.Services;
+
+using System;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-
-namespace VicoScreenShare.Client.Services;
 
 /// <summary>
 /// Observable liveness state for a saved server. Drives the colored dot +

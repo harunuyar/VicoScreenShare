@@ -1,7 +1,7 @@
-﻿using System;
-using System.Threading.Tasks;
-
 namespace VicoScreenShare.Client.Platform;
+
+using System;
+using System.Threading.Tasks;
 
 /// <summary>
 /// Handler for captured frames. The span is valid only for the duration of the call;

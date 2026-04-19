@@ -1,11 +1,11 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Direct3D;
+
+using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using VicoScreenShare.Client.Diagnostics;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
-
-namespace VicoScreenShare.Client.Windows.Direct3D;
 
 /// <summary>
 /// GPU-side BGRA → BGRA downscaler using a separable Lanczos3 compute

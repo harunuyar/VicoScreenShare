@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Client.Media.Codecs;
+namespace VicoScreenShare.Client.Media.Codecs;
 
 /// <summary>
 /// The wire codec a stream uses. Selected per-publisher; receivers look up the

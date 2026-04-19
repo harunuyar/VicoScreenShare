@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Media;
+
+using System;
 
 /// <summary>
 /// Area-average BGRA downscale used to clamp oversized captures (4K monitors,

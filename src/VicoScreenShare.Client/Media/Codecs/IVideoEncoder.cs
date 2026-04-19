@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Media.Codecs;
+
+using System;
 
 /// <summary>
 /// One encoded video frame with the **content** timestamp it was captured

@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Media.Codecs;
+
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -12,8 +14,6 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.MediaFoundation;
 using IVideoEncoder = VicoScreenShare.Client.Media.Codecs.IVideoEncoder;
-
-namespace VicoScreenShare.Client.Windows.Media.Codecs;
 
 /// <summary>
 /// H.264 encoder wrapping a Media Foundation <see cref="IMFTransform"/>.

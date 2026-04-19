@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Client.Services;
+
+using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -6,8 +8,6 @@ using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Protocol.Messages;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-
-namespace VicoScreenShare.Client.Services;
 
 /// <summary>
 /// Client-side wrapper around a single <see cref="RTCPeerConnection"/> plus the

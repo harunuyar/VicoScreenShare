@@ -1,12 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
-
-namespace VicoScreenShare.Desktop.App.ViewModels;
 
 /// <summary>
 /// One tile in the Room's publisher grid. Wraps a <see cref="SubscriberSession"/>

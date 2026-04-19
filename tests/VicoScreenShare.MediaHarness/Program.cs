@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.MediaHarness;
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -19,12 +21,9 @@ using VicoScreenShare.Client.Windows.Media.Codecs;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server;
-using SIPSorcery.Net;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
-
-namespace VicoScreenShare.MediaHarness;
 
 /// <summary>
 /// Headless console driver for the encoder pipeline. Lets us run end-to-end

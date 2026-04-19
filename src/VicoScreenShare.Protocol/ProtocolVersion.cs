@@ -1,4 +1,4 @@
-﻿namespace VicoScreenShare.Protocol;
+namespace VicoScreenShare.Protocol;
 
 public static class ProtocolVersion
 {

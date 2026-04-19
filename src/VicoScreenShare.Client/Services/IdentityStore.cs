@@ -1,9 +1,9 @@
-﻿using System;
+namespace VicoScreenShare.Client.Services;
+
+using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-
-namespace VicoScreenShare.Client.Services;
 
 /// <summary>
 /// Persists the local profile (stable user id + display name) to
@@ -101,7 +101,7 @@ public sealed class IdentityStore
     /// </summary>
     public void Save(UserProfile profile)
     {
-        if (profile is null) throw new ArgumentNullException(nameof(profile));
+        ArgumentNullException.ThrowIfNull(profile);
         if (profile.UserId == Guid.Empty)
         {
             throw new ArgumentException("UserId must be set before saving.", nameof(profile));

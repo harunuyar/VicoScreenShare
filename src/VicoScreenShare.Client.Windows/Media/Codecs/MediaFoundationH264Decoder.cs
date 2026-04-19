@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Client.Windows.Media.Codecs;
+
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using VicoScreenShare.Client.Diagnostics;
@@ -7,8 +9,6 @@ using VicoScreenShare.Client.Windows.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.MediaFoundation;
-
-namespace VicoScreenShare.Client.Windows.Media.Codecs;
 
 /// <summary>
 /// H.264 decoder on top of Media Foundation's H.264 decoder MFT. Hardware

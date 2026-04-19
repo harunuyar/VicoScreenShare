@@ -1,7 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-
 namespace VicoScreenShare.Client.Media.Codecs;
+
+using System;
+using System.Collections.Generic;
 
 /// <summary>
 /// Normalizes H.264 encoder output into individual Annex B access units.

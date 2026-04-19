@@ -1,8 +1,9 @@
-﻿using System.Net.WebSockets;
+namespace VicoScreenShare.Tests.Integration;
+
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using VicoScreenShare.Protocol;
@@ -10,8 +11,6 @@ using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-
-namespace VicoScreenShare.Tests.Integration;
 
 /// <summary>
 /// Phase 3.1 coverage: prove the SFU handshake round-trip works. A client sends a

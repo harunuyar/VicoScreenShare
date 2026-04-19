@@ -1,9 +1,8 @@
-﻿using FluentAssertions;
-using VicoScreenShare.Client;
+namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Services;
-
-namespace VicoScreenShare.Tests.Client;
 
 public class SettingsStoreTests : IDisposable
 {

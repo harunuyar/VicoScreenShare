@@ -1,16 +1,14 @@
-﻿using System.Net.WebSockets;
+namespace VicoScreenShare.Tests.Integration;
+
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
-
-namespace VicoScreenShare.Tests.Integration;
 
 /// <summary>
 /// Verifies the shared-password gate the operator configures via

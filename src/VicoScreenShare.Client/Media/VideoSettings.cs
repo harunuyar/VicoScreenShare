@@ -1,6 +1,6 @@
-﻿using VicoScreenShare.Client.Media.Codecs;
-
 namespace VicoScreenShare.Client.Media;
+
+using VicoScreenShare.Client.Media.Codecs;
 
 /// <summary>
 /// User-configurable video pipeline settings. Drives the encoder's target

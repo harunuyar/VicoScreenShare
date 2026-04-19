@@ -1,8 +1,8 @@
-﻿using System;
+namespace VicoScreenShare.Client;
+
+using System;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
-
-namespace VicoScreenShare.Client;
 
 /// <summary>
 /// Process-global bag of host-provided factories. Populated by the

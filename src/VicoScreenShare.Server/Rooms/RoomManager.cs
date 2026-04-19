@@ -1,11 +1,11 @@
-﻿using System.Collections.Concurrent;
+namespace VicoScreenShare.Server.Rooms;
+
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using VicoScreenShare.Server.Config;
 using VicoScreenShare.Server.Sfu;
-
-namespace VicoScreenShare.Server.Rooms;
 
 public sealed class RoomManager
 {

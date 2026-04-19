@@ -1,10 +1,10 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.Views;
+
+using System;
 using System.Windows;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Desktop.App.ViewModels;
-
-namespace VicoScreenShare.Desktop.App.Views;
 
 /// <summary>
 /// Opens Settings as an in-window modal overlay. All three entry points

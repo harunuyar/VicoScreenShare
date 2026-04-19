@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Platform;
+
+using System;
 
 /// <summary>
 /// Single captured frame handed off from an <see cref="ICaptureSource"/> to its

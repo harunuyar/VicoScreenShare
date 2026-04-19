@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Client.Media;
+
+using System;
 
 /// <summary>
 /// Converts planar I420 (YUV420p) frames back into 8-bit BGRA, the format Avalonia's
@@ -22,7 +22,7 @@ public static class I420ToBgra
         int bgraStrideBytes)
     {
         if (width <= 0 || height <= 0) throw new ArgumentOutOfRangeException(nameof(width));
-        if (bgraStrideBytes < width * 4) throw new ArgumentOutOfRangeException(nameof(bgraStrideBytes));
+        ArgumentOutOfRangeException.ThrowIfLessThan(bgraStrideBytes, width * 4);
         var chromaWidth = (width + 1) / 2;
         var chromaHeight = (height + 1) / 2;
         var required = width * height + 2 * chromaWidth * chromaHeight;

@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.Rendering;
+
+using System;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
@@ -10,8 +12,6 @@ using Vortice;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.Mathematics;
-
-namespace VicoScreenShare.Desktop.App.Rendering;
 
 /// <summary>
 /// Hosts a child Win32 HWND with its own DXGI swap chain and presents

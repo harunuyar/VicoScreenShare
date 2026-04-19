@@ -1,6 +1,6 @@
-﻿using System.Threading.Tasks;
-
 namespace VicoScreenShare.Client.Platform;
+
+using System.Threading.Tasks;
 
 /// <summary>
 /// Platform-neutral entry point for screen / window capture. The Windows

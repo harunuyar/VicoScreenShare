@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Client.Services;
+
+using System;
 using System.Buffers;
 using System.IO;
 using System.Net.WebSockets;
@@ -9,8 +11,6 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
-
-namespace VicoScreenShare.Client.Services;
 
 /// <summary>
 /// One-shot WebSocket signaling client. Each instance owns a single connection
@@ -100,8 +100,8 @@ public sealed class SignalingClient : IAsyncDisposable
 
         _socket = socket;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _readerTask = Task.Run(() => RunReaderAsync(_cts.Token));
-        _writerTask = Task.Run(() => RunWriterAsync(_cts.Token));
+        _readerTask = Task.Run(() => RunReaderAsync(_cts.Token), ct);
+        _writerTask = Task.Run(() => RunWriterAsync(_cts.Token), ct);
         Volatile.Write(ref _state, StateConnected);
 
         try

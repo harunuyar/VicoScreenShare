@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App;
+
+using System;
 using System.Windows;
 using VicoScreenShare.Client;
 using VicoScreenShare.Client.Diagnostics;
@@ -8,8 +10,6 @@ using VicoScreenShare.Client.Windows.Direct3D;
 using VicoScreenShare.Client.Windows.Media.Codecs;
 using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
-
-namespace VicoScreenShare.Desktop.App;
 
 public partial class App : Application
 {

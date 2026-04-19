@@ -1,7 +1,7 @@
-﻿using System.Text.Json;
-using VicoScreenShare.Protocol;
-
 namespace VicoScreenShare.Server.Signaling;
+
+using System.Text.Json;
+using VicoScreenShare.Protocol;
 
 /// <summary>
 /// Thin helpers over <see cref="ProtocolJson.Options"/> for wrapping payloads in the

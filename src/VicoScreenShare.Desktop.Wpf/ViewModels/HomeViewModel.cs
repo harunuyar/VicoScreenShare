@@ -1,8 +1,8 @@
-﻿using System;
-using System.Collections.Generic;
+namespace VicoScreenShare.Desktop.App.ViewModels;
+
+using System;
 using System.Collections.ObjectModel;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -11,8 +11,6 @@ using VicoScreenShare.Client.Services;
 using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
-
-namespace VicoScreenShare.Desktop.App.ViewModels;
 
 public sealed partial class HomeViewModel : ViewModelBase
 {

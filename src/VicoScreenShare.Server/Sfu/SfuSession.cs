@@ -1,13 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.Server.Sfu;
+
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
-using SIPSorceryMedia.Abstractions;
-
-namespace VicoScreenShare.Server.Sfu;
 
 /// <summary>
 /// Per-room SFU session. Owns:

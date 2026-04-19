@@ -1,11 +1,11 @@
-﻿using System;
+namespace VicoScreenShare.Client.Media;
+
+using System;
 using System.Diagnostics;
 using System.Threading;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
-
-namespace VicoScreenShare.Client.Media;
 
 /// <summary>
 /// Bridges a platform <see cref="ICaptureSource"/> to a SIPSorcery send path.

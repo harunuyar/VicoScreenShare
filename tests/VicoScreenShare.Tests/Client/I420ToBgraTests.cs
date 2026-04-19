@@ -1,7 +1,7 @@
-﻿using FluentAssertions;
-using VicoScreenShare.Client.Media;
-
 namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
+using VicoScreenShare.Client.Media;
 
 public class I420ToBgraTests
 {

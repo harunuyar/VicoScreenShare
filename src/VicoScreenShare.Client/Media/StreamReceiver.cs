@@ -1,12 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.Client.Media;
+
+using System;
 using System.Net;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-
-namespace VicoScreenShare.Client.Media;
 
 /// <summary>
 /// Receiver-side counterpart to <see cref="CaptureStreamer"/>. Subscribes to an

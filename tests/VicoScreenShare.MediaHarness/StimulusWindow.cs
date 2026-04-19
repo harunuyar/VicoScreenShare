@@ -1,12 +1,12 @@
-﻿using System;
+namespace VicoScreenShare.MediaHarness;
+
+using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.Mathematics;
-
-namespace VicoScreenShare.MediaHarness;
 
 /// <summary>
 /// A topmost popup window backed by a D3D11 swap chain, driven by a

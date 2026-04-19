@@ -1,9 +1,9 @@
-﻿using System;
-using System.Runtime.InteropServices;
-using Windows.Graphics.Capture;
-using WinRT;
-
 namespace VicoScreenShare.MediaHarness;
+
+using System;
+using System.Runtime.InteropServices;
+using global::Windows.Graphics.Capture;
+using WinRT;
 
 /// <summary>
 /// Gets a <see cref="GraphicsCaptureItem"/> for the primary monitor without

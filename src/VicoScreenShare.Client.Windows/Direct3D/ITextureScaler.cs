@@ -1,7 +1,7 @@
-﻿using System;
-using Vortice.Direct3D11;
-
 namespace VicoScreenShare.Client.Windows.Direct3D;
+
+using System;
+using Vortice.Direct3D11;
 
 /// <summary>
 /// Common interface for GPU-side texture scalers. Both

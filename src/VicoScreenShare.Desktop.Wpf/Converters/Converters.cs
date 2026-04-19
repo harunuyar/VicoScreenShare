@@ -1,4 +1,6 @@
-﻿using System;
+namespace VicoScreenShare.Desktop.App.Converters;
+
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
@@ -6,8 +8,6 @@ using System.Windows.Data;
 using System.Windows.Media;
 using VicoScreenShare.Desktop.App.ViewModels;
 using VicoScreenShare.Desktop.App.Views;
-
-namespace VicoScreenShare.Desktop.App.Converters;
 
 /// <summary>
 /// Small set of value converters the XAML needs. Kept in one file.

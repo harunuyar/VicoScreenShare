@@ -1,7 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-
 namespace VicoScreenShare.Client.Media.Codecs;
+
+using System;
+using System.Collections.Generic;
 
 /// <summary>
 /// Video decoder for a specific codec. <see cref="Decode"/> may return zero,

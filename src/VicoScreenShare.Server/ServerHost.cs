@@ -1,16 +1,14 @@
-﻿using System.Net.WebSockets;
+namespace VicoScreenShare.Server;
+
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Server.Config;
 using VicoScreenShare.Server.Rooms;
 using VicoScreenShare.Server.Signaling;
-
-namespace VicoScreenShare.Server;
 
 /// <summary>
 /// Reusable server setup extracted from <c>Program.cs</c>. Lets integration tests

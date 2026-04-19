@@ -1,11 +1,11 @@
-﻿using System;
+namespace VicoScreenShare.Client.Services;
+
+using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
-
-namespace VicoScreenShare.Client.Services;
 
 /// <summary>
 /// Persists <see cref="ClientSettings"/> to a JSON file under
@@ -84,7 +84,7 @@ public sealed class SettingsStore
 
     public void Save(ClientSettings settings)
     {
-        if (settings is null) throw new ArgumentNullException(nameof(settings));
+        ArgumentNullException.ThrowIfNull(settings);
 
         lock (_lock)
         {

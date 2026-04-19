@@ -1,7 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-
 namespace VicoScreenShare.Protocol.Messages;
+
+using System;
+using System.Collections.Generic;
 
 public sealed record CreateRoom();
 

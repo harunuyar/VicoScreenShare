@@ -1,6 +1,6 @@
-﻿using System;
-
 namespace VicoScreenShare.Protocol.Messages;
+
+using System;
 
 /// <summary>
 /// First message sent by the client after the WebSocket opens. Establishes identity for the session.

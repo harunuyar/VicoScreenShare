@@ -1,8 +1,8 @@
-﻿using FluentAssertions;
+namespace VicoScreenShare.Tests.Client;
+
+using FluentAssertions;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
-
-namespace VicoScreenShare.Tests.Client;
 
 public class TimestampedFrameQueueTests
 {

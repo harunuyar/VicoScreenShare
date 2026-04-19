@@ -1,9 +1,9 @@
-﻿using System;
+namespace VicoScreenShare.Client.Services;
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using VicoScreenShare.Client.Media;
-
-namespace VicoScreenShare.Client.Services;
 
 /// <summary>
 /// Runtime configuration for the client app. Holds the small set of values

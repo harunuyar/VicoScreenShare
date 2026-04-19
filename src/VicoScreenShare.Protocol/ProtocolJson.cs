@@ -1,7 +1,7 @@
-﻿using System.Text.Json;
-using System.Text.Json.Serialization;
-
 namespace VicoScreenShare.Protocol;
+
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 /// <summary>
 /// Canonical <see cref="JsonSerializerOptions"/> for every wire message.
