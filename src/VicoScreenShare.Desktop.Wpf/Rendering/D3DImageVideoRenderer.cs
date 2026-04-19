@@ -640,6 +640,21 @@ public sealed class D3DImageVideoRenderer : HwndHost
     private bool[]? _ringSlotInUse;
     private int _swapChainWidth;
     private int _swapChainHeight;
+
+    // Last successfully-painted source texture + its dimensions. Used to
+    // re-present from the same content after a swap-chain resize when no
+    // new frame has arrived. Without this, a resize stretches the old
+    // back-buffer contents to the new swap chain dimensions and the
+    // aspect ratio visibly breaks until the next frame arrives — which,
+    // on a static source (e.g. a browser tab that hasn't updated in a
+    // few seconds), can be a long wait. The texture reference here is
+    // non-owning; it points at either _uploadTexture (CPU path) or a
+    // ring slot (GPU path), both of which persist long enough for a
+    // post-resize repaint. Cleared whenever the pointed-at texture is
+    // disposed or the ring tears down.
+    private ID3D11Texture2D? _lastPaintedTexture;
+    private int _lastPaintedSourceWidth;
+    private int _lastPaintedSourceHeight;
     private ICaptureSource? _attachedReceiver;
     private ICaptureSource? _attachedLocalSource;
     private readonly object _renderLock = new();
@@ -817,6 +832,9 @@ public sealed class D3DImageVideoRenderer : HwndHost
             _disposed = true;
             DetachReceiver();
             DetachLocalSource();
+            _lastPaintedTexture = null;
+            _lastPaintedSourceWidth = 0;
+            _lastPaintedSourceHeight = 0;
             _scaler?.Dispose(); _scaler = null;
             _uploadTexture?.Dispose(); _uploadTexture = null;
             if (_textureRing is not null)
@@ -943,6 +961,30 @@ public sealed class D3DImageVideoRenderer : HwndHost
                     $"[renderer] swap chain resized {_swapChainWidth}x{_swapChainHeight} -> {newW}x{newH}");
                 _swapChainWidth = newW;
                 _swapChainHeight = newH;
+
+                // Re-present the last painted frame at the new swap chain
+                // dimensions so the aspect ratio is correct even when the
+                // source is static (e.g. a browser tab with no redraws).
+                // Without this the resized back buffer stretches the old
+                // content until the next frame arrives, which for a quiet
+                // source could be seconds.
+                if (_lastPaintedTexture is not null
+                    && _lastPaintedSourceWidth > 0
+                    && _lastPaintedSourceHeight > 0)
+                {
+                    try
+                    {
+                        PaintSourceTextureLocked(
+                            _lastPaintedTexture,
+                            _lastPaintedSourceWidth,
+                            _lastPaintedSourceHeight);
+                    }
+                    catch (Exception repaintEx)
+                    {
+                        VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+                            $"[renderer] post-resize repaint threw: {repaintEx.Message}");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -954,6 +996,9 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 _uploadTexture = null;
                 _uploadWidth = 0;
                 _uploadHeight = 0;
+                _lastPaintedTexture = null;
+                _lastPaintedSourceWidth = 0;
+                _lastPaintedSourceHeight = 0;
                 // New swap chain = new DXGI PresentCount baseline next time
                 // we can successfully query stats on the rebuilt chain.
                 _presentBaselineCaptured = false;
@@ -1330,6 +1375,12 @@ public sealed class D3DImageVideoRenderer : HwndHost
             // Submission counter only. Actual "user sees it" count comes
             // from IDXGISwapChain.GetFrameStatistics → PaintedFrameCount.
             PresentSubmissionCount++;
+            // Remember this source + its dimensions so a subsequent swap
+            // chain resize can re-present with the correct aspect ratio
+            // even if no new frame arrives (e.g. a static browser tab).
+            _lastPaintedTexture = source;
+            _lastPaintedSourceWidth = width;
+            _lastPaintedSourceHeight = height;
         }
         catch (Exception ex)
         {
@@ -1436,6 +1487,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
             // Submission counter only. Actual "user sees it" count comes
             // from IDXGISwapChain.GetFrameStatistics → PaintedFrameCount.
             PresentSubmissionCount++;
+            // Same sticky "last painted" reference as the GPU path so a
+            // later resize-without-new-frame repaints correctly.
+            _lastPaintedTexture = _uploadTexture;
+            _lastPaintedSourceWidth = width;
+            _lastPaintedSourceHeight = height;
         }
         catch (Exception ex)
         {
@@ -1569,6 +1625,13 @@ public sealed class D3DImageVideoRenderer : HwndHost
             return;
         }
 
+        // If the slot we're about to rebuild held the current
+        // last-painted reference, invalidate it first — the repaint path
+        // would otherwise chase a disposed COM wrapper.
+        if (ReferenceEquals(_lastPaintedTexture, _textureRing[slot]))
+        {
+            _lastPaintedTexture = null;
+        }
         _textureRing[slot]?.Dispose();
         var desc = new Texture2DDescription
         {
@@ -1595,6 +1658,12 @@ public sealed class D3DImageVideoRenderer : HwndHost
             return;
         }
 
+        // Clear the repaint reference if it was pointing at the upload
+        // texture we're about to dispose.
+        if (ReferenceEquals(_lastPaintedTexture, _uploadTexture))
+        {
+            _lastPaintedTexture = null;
+        }
         _uploadTexture?.Dispose();
         // DEFAULT usage + ShaderResource + RenderTarget. D3D11 Video
         // Processor rejects its input with E_INVALIDARG unless the source
