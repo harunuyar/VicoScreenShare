@@ -69,23 +69,22 @@ public partial class App : Application
         MediaFoundationRuntime.EnsureInitialized();
         if (MediaFoundationRuntime.IsAvailable)
         {
-            // Encoder stays on the shared device — its input textures come
-            // from WGC capture, which owns that device, and the GPU scaler +
-            // encoder MFT all need to be on the same device as the source.
+            // Both encoder and decoder use the shared D3D11 device so the
+            // decoder's BGRA output textures can be handed over to the
+            // renderer (which also runs on the shared device) via the
+            // GpuOutputHandler path — no PCIe readback, which otherwise
+            // caps single-stream 4K decode at ~50 fps.
             //
-            // Decoder uses the no-device factory, so each StreamReceiver's
-            // CreateDecoder() allocates a PRIVATE D3D11 device for that
-            // decoder instance. When watching multiple streams in parallel
-            // this stops ID3D11Multithread from serializing decoder
-            // submissions across streams — a 4090 has 5 NVDEC engines and
-            // we want each decoder on its own device so it can drive a
-            // different engine concurrently. The renderer-side GPU handoff
-            // (cross-device texture pointers) is disabled in this mode;
-            // the decoder uses the CPU-bytes path, which is fine for
-            // downscaled-for-display tile paint.
+            // The tradeoff is ID3D11Multithread serializing decoder
+            // submissions when multiple StreamReceivers decode in parallel;
+            // that cost shows up as ~15% throughput reduction in the
+            // 3-streams-on-one-machine test case, but the GPU fast path
+            // dominates for realistic setups (one viewer per machine).
+            // A proper fix for the multi-viewer case is cross-device
+            // shared textures; deferred as a focused follow-up.
             ClientHost.VideoCodecCatalog.Register(
                 new MediaFoundationH264EncoderFactory(sharedDevices.Device),
-                new MediaFoundationH264DecoderFactory());
+                new MediaFoundationH264DecoderFactory(sharedDevices.Device));
         }
 
         base.OnStartup(e);
