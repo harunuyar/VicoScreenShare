@@ -39,6 +39,14 @@ public sealed class LossBasedBitrateController
     private readonly int _targetBitrate;
     private readonly int _minBitrate;
     private readonly Func<TimeSpan> _clock;
+    // Observe() is called from at least two different threads — the upstream
+    // RTCP Receiver Report callback (reader thread) and the server-pushed
+    // DownstreamLossReport handler (signaling thread). Both mutate
+    // _currentBitrate and _lastAdjustAt, so all access is serialized on
+    // this lock. Held across BitrateChanged because the subscriber is a
+    // fast stateless encoder setter — a long-running handler here would
+    // need a different design anyway.
+    private readonly object _gate = new();
     private int _currentBitrate;
     private TimeSpan _lastAdjustAt;
 
@@ -59,7 +67,10 @@ public sealed class LossBasedBitrateController
         _lastAdjustAt = TimeSpan.MinValue;
     }
 
-    public int CurrentBitrate => _currentBitrate;
+    public int CurrentBitrate
+    {
+        get { lock (_gate) { return _currentBitrate; } }
+    }
 
     public event Action<int>? BitrateChanged;
 
@@ -67,41 +78,54 @@ public sealed class LossBasedBitrateController
     /// Feed one RR's reported fraction-lost. Values are clamped to
     /// <c>[0, 1]</c>. Adjustments happen at most once per
     /// <see cref="Interval"/> — earlier calls are observed but not acted
-    /// on until the cooldown clears.
+    /// on until the cooldown clears. Safe to call from multiple threads
+    /// concurrently; all state mutation is serialized on an internal lock.
     /// </summary>
     public void Observe(double fractionLost)
     {
-        var now = _clock();
-        if (_lastAdjustAt != TimeSpan.MinValue && now - _lastAdjustAt < Interval)
+        int? bitrateToEmit = null;
+        lock (_gate)
         {
-            return;
-        }
+            var now = _clock();
+            if (_lastAdjustAt != TimeSpan.MinValue && now - _lastAdjustAt < Interval)
+            {
+                return;
+            }
 
-        var loss = Math.Clamp(fractionLost, 0.0, 1.0);
-        int next;
-        if (loss > HighLossThreshold)
-        {
-            next = (int)Math.Floor(_currentBitrate * DownScale);
-        }
-        else if (loss < LowLossThreshold)
-        {
-            next = (int)Math.Ceiling(_currentBitrate * UpScale);
-        }
-        else
-        {
-            // Hold zone — rate's fine, but still stamp the adjust time so
-            // the next out-of-zone observation gets a proper cooldown.
+            var loss = Math.Clamp(fractionLost, 0.0, 1.0);
+            int next;
+            if (loss > HighLossThreshold)
+            {
+                next = (int)Math.Floor(_currentBitrate * DownScale);
+            }
+            else if (loss < LowLossThreshold)
+            {
+                next = (int)Math.Ceiling(_currentBitrate * UpScale);
+            }
+            else
+            {
+                // Hold zone — rate's fine, but still stamp the adjust time so
+                // the next out-of-zone observation gets a proper cooldown.
+                _lastAdjustAt = now;
+                return;
+            }
+
+            next = Math.Clamp(next, _minBitrate, _targetBitrate);
             _lastAdjustAt = now;
-            return;
+            if (next == _currentBitrate)
+            {
+                return;
+            }
+            _currentBitrate = next;
+            bitrateToEmit = next;
         }
-
-        next = Math.Clamp(next, _minBitrate, _targetBitrate);
-        _lastAdjustAt = now;
-        if (next == _currentBitrate)
+        // Raise the event outside the lock so a slow subscriber (the
+        // encoder's UpdateBitrate does native MFT work) can't stall the
+        // next Observe on a different thread. By the time we're here, the
+        // state mutation is committed.
+        if (bitrateToEmit is int value)
         {
-            return;
+            BitrateChanged?.Invoke(value);
         }
-        _currentBitrate = next;
-        BitrateChanged?.Invoke(next);
     }
 }

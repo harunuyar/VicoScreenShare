@@ -44,17 +44,10 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     private readonly record struct PendingEncodedFrame(byte[] Bytes, uint RtpTimestamp, DateTime ArrivalUtc);
 
-    // Per-subscriber RTP packet-level loss tracking. Unlike RTCP RR fraction
-    // lost (which has to travel back through the wire and be trusted), these
-    // counters measure loss at our own receive point by detecting gaps in
-    // the 16-bit RTP sequence number. Wraparound is handled with signed
-    // arithmetic; late/reordered packets don't count as loss. When the SSRC
-    // changes (publisher restart) counters reset.
-    private uint _rtpSsrc;
-    private ushort _rtpLastSeq;
-    private bool _rtpSeqInitialized;
-    private long _rtpPacketsReceived;
-    private long _rtpPacketsInferredLost;
+    // RFC 3550 §A.3 sequence-stats for this receiver's incoming video RTP.
+    // Derived loss, reorder-aware — see RtpSequenceStats for the math.
+    private readonly RtpSequenceStats _rtpStats = new();
+    private uint _lastLoggedSsrc;
 
     public StreamReceiver(RTCPeerConnection pc, string displayName = "remote")
         : this(pc, new VpxDecoderFactory(), displayName)
@@ -95,35 +88,17 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     /// <summary>Codec tag for the decoder instance powering this receiver.</summary>
     public VideoCodec Codec => _decoder.Codec;
 
-    /// <summary>
-    /// Raw count of video RTP packets whose sequence number arrived in-order
-    /// or with a forward jump (late/reordered packets do not increment this).
-    /// </summary>
-    public long RtpPacketsReceived => System.Threading.Interlocked.Read(ref _rtpPacketsReceived);
+    /// <summary>Total RTP video packets seen, including reorders.</summary>
+    public long RtpPacketsReceived => _rtpStats.Received;
+
+    /// <summary>Reorder-aware inferred loss (see <see cref="RtpSequenceStats"/>).</summary>
+    public long RtpPacketsInferredLost => _rtpStats.Lost;
 
     /// <summary>
-    /// Count of video RTP packets inferred lost from forward gaps in the
-    /// 16-bit sequence-number stream. Does not include reordered or late
-    /// packets. Strictly a lower bound on real loss — if a burst lost the
-    /// high end of a wrap cycle, we can't always detect that.
+    /// Loss% from the local packet observer, independent of the RTCP RR
+    /// chain. 0..100.
     /// </summary>
-    public long RtpPacketsInferredLost => System.Threading.Interlocked.Read(ref _rtpPacketsInferredLost);
-
-    /// <summary>
-    /// Lost / (received + lost), as a percentage in 0..100. Returns 0 when
-    /// no packets have flowed yet. This is the direct, local loss readout —
-    /// independent of the RTCP RR chain.
-    /// </summary>
-    public double RtpLossPercent
-    {
-        get
-        {
-            var received = RtpPacketsReceived;
-            var lost = RtpPacketsInferredLost;
-            var total = received + lost;
-            return total == 0 ? 0.0 : 100.0 * lost / total;
-        }
-    }
+    public double RtpLossPercent => _rtpStats.LossPercent;
 
     public event FrameArrivedHandler? FrameArrived;
 
@@ -257,50 +232,16 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         var ssrc = packet.Header.SyncSource;
         var seq = packet.Header.SequenceNumber;
 
-        if (_rtpSsrc != ssrc)
+        // One-shot log on SSRC transition. Lock-free because Observe itself
+        // is the authoritative tracker of SSRC changes; this comparison only
+        // drives a diagnostic line and tolerates races.
+        if (_lastLoggedSsrc != 0 && _lastLoggedSsrc != ssrc)
         {
-            // SSRC change = stream restart (publisher re-joined) or, when
-            // behind an SFU, a new subscriber session being rekeyed. Reset
-            // sequence tracking rather than logging thousands of phantom
-            // gaps.
-            if (_rtpSsrc != 0)
-            {
-                DebugLog.Write($"[recv {DisplayName}] SSRC changed 0x{_rtpSsrc:X8} -> 0x{ssrc:X8} at seq {seq}");
-            }
-            _rtpSsrc = ssrc;
-            _rtpSeqInitialized = false;
+            DebugLog.Write($"[recv {DisplayName}] SSRC changed 0x{_lastLoggedSsrc:X8} -> 0x{ssrc:X8} at seq {seq}");
         }
+        _lastLoggedSsrc = ssrc;
 
-        if (!_rtpSeqInitialized)
-        {
-            _rtpLastSeq = seq;
-            _rtpSeqInitialized = true;
-            System.Threading.Interlocked.Increment(ref _rtpPacketsReceived);
-            return;
-        }
-
-        // Signed 16-bit delta handles the 65535→0 wrap correctly for any
-        // realistic reorder window (< ~32 K packets of skew).
-        var expected = (ushort)(_rtpLastSeq + 1);
-        var diff = (short)(seq - expected);
-
-        if (diff > 0)
-        {
-            // Forward jump → `diff` packets were lost between the last
-            // in-order arrival and this one. Could also include already-
-            // counted reorders; strict lower bound on real loss.
-            System.Threading.Interlocked.Add(ref _rtpPacketsInferredLost, diff);
-            _rtpLastSeq = seq;
-        }
-        else if (diff == 0)
-        {
-            _rtpLastSeq = seq;
-        }
-        // diff < 0: late/reordered arrival. Don't change _rtpLastSeq and
-        // don't count loss — we would've already counted it on the first
-        // forward jump past this slot.
-
-        System.Threading.Interlocked.Increment(ref _rtpPacketsReceived);
+        _rtpStats.Observe(ssrc, seq);
     }
 
     public System.Threading.Tasks.ValueTask DisposeAsync()

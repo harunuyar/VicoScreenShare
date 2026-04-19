@@ -125,4 +125,51 @@ public sealed class LossBasedBitrateControllerTests
         changes.Count.Should().Be(2,
             because: "only the two down-steps should have fired the event; the holds should not");
     }
+
+    [Fact]
+    public void Concurrent_observe_calls_from_many_threads_do_not_corrupt_state()
+    {
+        // Two callers fire Observe from different threads — the RTCP RR
+        // handler and the DownstreamLossReport handler do this in production.
+        // Pre-lock, read-then-write of _currentBitrate and _lastAdjustAt was
+        // racy; a concurrent run could drive the bitrate below the floor or
+        // raise BitrateChanged with an intermediate value. Post-lock, the
+        // final CurrentBitrate must still be within the documented bounds
+        // and no event should ever fire outside them.
+        //
+        // We deliberately advance the injected clock from both threads to
+        // defeat the cooldown gate and maximize the window for a race.
+        long tickMs = 0;
+        var c = new LossBasedBitrateController(12_000_000, 500_000,
+            () => TimeSpan.FromMilliseconds(System.Threading.Interlocked.Read(ref tickMs)));
+
+        var outOfRange = 0;
+        c.BitrateChanged += b =>
+        {
+            if (b < 500_000 || b > 12_000_000)
+            {
+                System.Threading.Interlocked.Increment(ref outOfRange);
+            }
+        };
+
+        const int PerThread = 500;
+        void Worker(double loss)
+        {
+            for (var i = 0; i < PerThread; i++)
+            {
+                System.Threading.Interlocked.Add(ref tickMs, 1500);
+                c.Observe(loss);
+            }
+        }
+
+        System.Threading.Tasks.Parallel.Invoke(
+            () => Worker(0.30),   // would keep driving down
+            () => Worker(0.00),   // would keep driving up
+            () => Worker(0.30),
+            () => Worker(0.00));
+
+        c.CurrentBitrate.Should().BeInRange(500_000, 12_000_000);
+        outOfRange.Should().Be(0,
+            because: "BitrateChanged must never fire with a value outside [min, target]");
+    }
 }

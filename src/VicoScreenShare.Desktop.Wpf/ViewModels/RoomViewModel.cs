@@ -526,27 +526,29 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private async Task CreateOrReplaceSubscriberAsync(Guid publisherPeerId, string offerSdp)
     {
-        // Capture the publisher's display-name and announced cadence while the
-        // subscriber is wired up; defaults if neither is known yet (the peer may
-        // have left the roster after sending the offer, or StreamStarted arrived
-        // after the SdpOffer on the signaling stream).
-        var existingPeer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
-        var displayName = existingPeer?.DisplayName ?? $"Publisher {publisherPeerId:N}".Substring(0, 16);
-        var nominalFps = _announcedFrameRates.TryGetValue(publisherPeerId, out var fps) ? fps : 60;
-
-        PublisherTileViewModel? toDispose = null;
-        lock (Tiles)
+        // This runs on the SignalingClient reader thread (event-raised from
+        // the WS read loop). Peers, _announcedFrameRates and Tiles are all
+        // UI-bound / UI-thread-mutated, so reading them here without a
+        // marshal is a data race. Marshal the snapshot over once, then do
+        // the heavy PC setup off the UI thread and swap the tile in via a
+        // second InvokeAsync at the end.
+        var snapshot = await _uiDispatcher.InvokeAsync(() =>
         {
+            var existingPeer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
+            var displayName = existingPeer?.DisplayName
+                ?? $"Publisher {publisherPeerId:N}".Substring(0, 16);
+            var nominalFps = _announcedFrameRates.TryGetValue(publisherPeerId, out var fps) ? fps : 60;
             // If a tile already exists for this publisher, we're replacing its
             // underlying PC (re-offer path — Phase 5 uses this on publisher
             // reconnect). Take the old one out and dispose it after we've swapped
             // in the replacement so the grid doesn't flicker.
-            var existing = Tiles.FirstOrDefault(t => t.PublisherPeerId == publisherPeerId);
-            if (existing is not null)
-            {
-                toDispose = existing;
-            }
-        }
+            var existingTile = Tiles.FirstOrDefault(t => t.PublisherPeerId == publisherPeerId);
+            return (displayName, nominalFps, toDispose: existingTile);
+        }).ConfigureAwait(true);
+
+        var displayName = snapshot.displayName;
+        var nominalFps = snapshot.nominalFps;
+        var toDispose = snapshot.toDispose;
 
         var session = new SubscriberSession(_signaling, publisherPeerId, _decoderFactory,
             displayName: displayName);
@@ -761,6 +763,13 @@ public sealed partial class RoomViewModel : ViewModelBase
         DebugLog.Write($"[room] RebuildMediaGraphAsync — codec switch {_sessionCodec} -> {_settings.Video.Codec}");
         MediaStatus = "Switching codec...";
 
+        // Snapshot every publisher we're currently watching BEFORE we tear
+        // down the subscriber tiles. After the PC rebuild we have to re-send
+        // Subscribe for each of them — otherwise the viewer silently drops
+        // the stream on any codec change, a regression the user would only
+        // discover by noticing blank tiles.
+        var watching = Tiles.Select(t => t.PublisherPeerId).ToArray();
+
         await StopSharingInternalAsync().ConfigureAwait(true);
 
         MediaStatus = "Switching codec...";
@@ -782,7 +791,28 @@ public sealed partial class RoomViewModel : ViewModelBase
         }
 
         _negotiationStarted = false;
-        _ = StartWebRtcAsync();
+        await StartWebRtcAsync().ConfigureAwait(true);
+
+        // Re-subscribe to every publisher we were watching pre-rebuild. The
+        // server responds with a fresh SdpOffer tagged with each publisher's
+        // SubscriptionId, which OnSdpOfferReceived routes into
+        // CreateOrReplaceSubscriberAsync to rebuild the tile on the new
+        // decoder.
+        foreach (var publisherPeerId in watching)
+        {
+            if (!_signaling.IsConnected)
+            {
+                break;
+            }
+            try
+            {
+                await _signaling.SendSubscribeAsync(publisherPeerId).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[room] re-subscribe after codec rebuild failed for {publisherPeerId:N}: {ex.Message}");
+            }
+        }
     }
 
     private async Task StopSharingInternalAsync()
@@ -1189,7 +1219,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             _ = Task.Run(async () =>
             {
                 await Task.Delay(1500).ConfigureAwait(false);
-                await _uiDispatcher.InvokeAsync(NavigateHome);
+                await _uiDispatcher.InvokeAsync(NavigateHomeAsync);
             });
         });
     }
@@ -1219,7 +1249,7 @@ public sealed partial class RoomViewModel : ViewModelBase
                     ReconnectMessage = "Reconnect timed out. Returning to home…";
                 });
                 await Task.Delay(1000, CancellationToken.None).ConfigureAwait(false);
-                await _uiDispatcher.InvokeAsync(NavigateHome);
+                await _uiDispatcher.InvokeAsync(NavigateHomeAsync);
                 return;
             }
 
@@ -1389,6 +1419,12 @@ public sealed partial class RoomViewModel : ViewModelBase
             _captureStreamer = streamer;
             streamer.Start();
 
+            // Restore the adaptive-bitrate controller on the freshly-rebuilt
+            // PC. Normal share path does this at line 622 right after Start;
+            // the resume path was missing this call, so congestion control
+            // silently disappeared after every WS reconnect.
+            StartAdaptiveBitrate(session, streamer);
+
             // Reuse the original stream id so the server's fan-out semantics
             // (viewers already have a tile for this PeerId) keep working across
             // the drop. Without this the viewers would see StreamEnded at the
@@ -1414,19 +1450,20 @@ public sealed partial class RoomViewModel : ViewModelBase
         }
     }
 
-    private void NavigateHome()
+    /// <summary>
+    /// Tear down every room-scoped resource the VM owns. Called from both the
+    /// user-initiated leave path and the give-up-and-go-home path (resume
+    /// failed, reconnect timed out). Pre-fix the reconnect paths called
+    /// NavigateHome directly and leaked capture/streamer/webrtc/signaling.
+    /// </summary>
+    /// <param name="announceLeave">
+    /// True when the user explicitly asked to leave — we tell the server so
+    /// it bypasses the reconnect grace window. False when we've already given
+    /// up on the signaling connection and can't (or shouldn't) inform the
+    /// server.
+    /// </param>
+    private async Task TeardownRoomResourcesAsync(bool announceLeave)
     {
-        _leavingIntentionally = true;
-        _reconnectCts?.Cancel();
-        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider);
-        _navigation.NavigateTo(home);
-    }
-
-    [RelayCommand]
-    private async Task LeaveRoomAsync()
-    {
-        // Short-circuit the reconnect loop so a WS drop racing with Leave
-        // doesn't spin up a resume attempt after we've asked to go home.
         _leavingIntentionally = true;
         _reconnectCts?.Cancel();
 
@@ -1435,10 +1472,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         await StopSharingInternalAsync().ConfigureAwait(true);
 
-        // Signal intentional departure so the server bypasses the reconnect
-        // grace window and the other peers don't see us as "disconnected" for
-        // 20 seconds before the PeerLeft actually arrives.
-        if (_signaling.IsConnected)
+        if (announceLeave && _signaling.IsConnected)
         {
             try { await _signaling.LeaveRoomAsync().ConfigureAwait(true); } catch { }
         }
@@ -1446,12 +1480,24 @@ public sealed partial class RoomViewModel : ViewModelBase
         await DisposeAllSubscribersAsync().ConfigureAwait(true);
         if (_webRtc is not null)
         {
-            await _webRtc.DisposeAsync().ConfigureAwait(true);
+            try { await _webRtc.DisposeAsync().ConfigureAwait(true); } catch { }
             _webRtc = null;
         }
 
-        await _signaling.DisposeAsync();
+        try { await _signaling.DisposeAsync().ConfigureAwait(true); } catch { }
+    }
 
+    private async Task NavigateHomeAsync()
+    {
+        await TeardownRoomResourcesAsync(announceLeave: false).ConfigureAwait(true);
+        var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider);
+        _navigation.NavigateTo(home);
+    }
+
+    [RelayCommand]
+    private async Task LeaveRoomAsync()
+    {
+        await TeardownRoomResourcesAsync(announceLeave: true).ConfigureAwait(true);
         var home = new HomeViewModel(_identity, _signalingFactory, _navigation, _settings, _settingsStore, _captureProvider);
         _navigation.NavigateTo(home);
     }

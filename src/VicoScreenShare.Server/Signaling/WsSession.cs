@@ -99,7 +99,11 @@ public sealed class WsSession
             try { await writerTask.ConfigureAwait(false); } catch { }
             try { await heartbeatTask.ConfigureAwait(false); } catch { }
             await BeginPeerGraceOrLeaveAsync().ConfigureAwait(false);
-            _sessions.Remove(PeerId);
+            // Identity-compared remove: if a resumed session has already
+            // rebound to this PeerId and added itself, the registry slot no
+            // longer points at `this`, so Remove is a no-op. Pre-fix this
+            // used key-only remove and the new session got evicted.
+            _sessions.Remove(this);
             await SafeCloseAsync().ConfigureAwait(false);
         }
     }
@@ -429,8 +433,9 @@ public sealed class WsSession
                 // Rebind this session's PeerId to the original peer's. Any future
                 // broadcasts (including PeerConnectionState below) and SFU routing
                 // needs to find us under the SAME id that remote peers already know.
-                var oldPeerId = PeerId;
-                _sessions.Remove(oldPeerId);
+                // Identity-compare remove evicts our own placeholder entry (we're
+                // still `this` at the old id), then we mutate PeerId and re-add.
+                _sessions.Remove(this);
                 PeerId = peer.PeerId;
                 _sessions.Add(this);
 
