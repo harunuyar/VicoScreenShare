@@ -197,11 +197,20 @@ public sealed class SfuSession : IAsyncDisposable
         }
 
         // Let WsSession drive the SDP offer out to the viewer tagged with
-        // publisherPeerId as SubscriptionId.
+        // publisherPeerId as SubscriptionId. SubscriberReady is a multicast
+        // Func<T, Task> — Delegate.Invoke only returns the last handler's Task,
+        // so fan out explicitly so every handler's Task is observed. Individual
+        // handler failures are logged but don't abort the other handlers.
         var handler = SubscriberReady;
         if (handler is not null)
         {
-            try { await handler.Invoke(sub).ConfigureAwait(false); }
+            var invocationList = handler.GetInvocationList();
+            var tasks = new Task[invocationList.Length];
+            for (var i = 0; i < invocationList.Length; i++)
+            {
+                tasks[i] = ((Func<SfuSubscriberPeer, Task>)invocationList[i])(sub);
+            }
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); }
             catch (Exception ex)
             {
                 _loggerFactory?.CreateLogger<SfuSession>()?

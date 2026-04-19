@@ -47,17 +47,109 @@ public sealed class SignalingClient : IAsyncDisposable
     public event Action<Guid>? PeerLeft;
     public event Action<ErrorCode, string>? ServerError;
     public event Action<string?>? ConnectionLost;
+    // SdpOfferReceived and IceCandidateReceived are the only two events that
+    // can fire on the reader thread before the final consumer (RoomViewModel)
+    // has wired up its handlers — the Home→Room navigation opens a window
+    // where the server has already pushed offers for in-progress publishers
+    // but no subscriber is attached yet. Buffer any payloads that arrive with
+    // no listener and flush them the moment a handler attaches, so late
+    // joiners actually receive streams that started before they joined.
+    private readonly object _bufferedOfferLock = new();
+    private Action<SdpOffer>? _sdpOfferReceived;
+    private readonly List<SdpOffer> _bufferedOffers = new();
+
     /// <summary>
     /// SDP offer from the server. The payload carries both the SDP and a nullable
     /// <see cref="SdpOffer.SubscriptionId"/>: null means the main PC (client-initiated
     /// flow), a Guid "N" string means a subscriber PC the server is driving for a
     /// specific publisher — the client must create a fresh RecvOnly PC and answer.
+    /// Self-buffers: offers delivered before any handler is attached are replayed
+    /// synchronously when the first handler subscribes.
     /// </summary>
-    public event Action<SdpOffer>? SdpOfferReceived;
+    public event Action<SdpOffer>? SdpOfferReceived
+    {
+        add
+        {
+            if (value is null)
+            {
+                return;
+            }
+            List<SdpOffer> toFlush;
+            lock (_bufferedOfferLock)
+            {
+                _sdpOfferReceived += value;
+                if (_bufferedOffers.Count == 0)
+                {
+                    return;
+                }
+                toFlush = new List<SdpOffer>(_bufferedOffers);
+                _bufferedOffers.Clear();
+            }
+            foreach (var offer in toFlush)
+            {
+                value(offer);
+            }
+        }
+        remove
+        {
+            lock (_bufferedOfferLock)
+            {
+                _sdpOfferReceived -= value;
+            }
+        }
+    }
+
     public event Action<SdpAnswer>? SdpAnswerReceived;
-    public event Action<IceCandidate>? IceCandidateReceived;
+
+    private readonly object _bufferedIceLock = new();
+    private Action<IceCandidate>? _iceCandidateReceived;
+    private readonly List<IceCandidate> _bufferedIce = new();
+
+    /// <summary>
+    /// Remote ICE candidate from the server. Self-buffers: candidates delivered
+    /// before any handler is attached are replayed synchronously when the first
+    /// handler subscribes, so candidates racing ahead of the Home→Room transition
+    /// still reach the eventual SubscriberSession.
+    /// </summary>
+    public event Action<IceCandidate>? IceCandidateReceived
+    {
+        add
+        {
+            if (value is null)
+            {
+                return;
+            }
+            List<IceCandidate> toFlush;
+            lock (_bufferedIceLock)
+            {
+                _iceCandidateReceived += value;
+                if (_bufferedIce.Count == 0)
+                {
+                    return;
+                }
+                toFlush = new List<IceCandidate>(_bufferedIce);
+                _bufferedIce.Clear();
+            }
+            foreach (var ice in toFlush)
+            {
+                value(ice);
+            }
+        }
+        remove
+        {
+            lock (_bufferedIceLock)
+            {
+                _iceCandidateReceived -= value;
+            }
+        }
+    }
     public event Action<StreamStarted>? StreamStartedReceived;
     public event Action<StreamEnded>? StreamEndedReceived;
+
+    /// <summary>Server-initiated keyframe request on behalf of a newly-connected
+    /// subscriber. The publishing client flushes an IDR so the late joiner
+    /// doesn't wait for the next natural GOP boundary.</summary>
+    public event Action<RequestKeyframe>? RequestKeyframeReceived;
 
     /// <summary>Fired when any peer in the current room transitions into or out
     /// of the server-side reconnect grace window.</summary>
@@ -324,7 +416,16 @@ public sealed class SignalingClient : IAsyncDisposable
                 var offer = envelope.Payload.Deserialize<SdpOffer>(ProtocolJson.Options);
                 if (offer is not null)
                 {
-                    SdpOfferReceived?.Invoke(offer);
+                    Action<SdpOffer>? offerHandler;
+                    lock (_bufferedOfferLock)
+                    {
+                        offerHandler = _sdpOfferReceived;
+                        if (offerHandler is null)
+                        {
+                            _bufferedOffers.Add(offer);
+                        }
+                    }
+                    offerHandler?.Invoke(offer);
                 }
 
                 break;
@@ -342,7 +443,16 @@ public sealed class SignalingClient : IAsyncDisposable
                 var ice = envelope.Payload.Deserialize<IceCandidate>(ProtocolJson.Options);
                 if (ice is not null)
                 {
-                    IceCandidateReceived?.Invoke(ice);
+                    Action<IceCandidate>? iceHandler;
+                    lock (_bufferedIceLock)
+                    {
+                        iceHandler = _iceCandidateReceived;
+                        if (iceHandler is null)
+                        {
+                            _bufferedIce.Add(ice);
+                        }
+                    }
+                    iceHandler?.Invoke(ice);
                 }
 
                 break;
@@ -361,6 +471,15 @@ public sealed class SignalingClient : IAsyncDisposable
                 if (ended is not null)
                 {
                     StreamEndedReceived?.Invoke(ended);
+                }
+
+                break;
+
+            case MessageType.RequestKeyframe:
+                var kf = envelope.Payload.Deserialize<RequestKeyframe>(ProtocolJson.Options);
+                if (kf is not null)
+                {
+                    RequestKeyframeReceived?.Invoke(kf);
                 }
 
                 break;

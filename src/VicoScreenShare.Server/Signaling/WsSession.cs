@@ -886,6 +886,24 @@ public sealed class WsSession
         sfu.SubscriberReady += _subscriberReadyHandler;
     }
 
+    /// <summary>
+    /// Ship a <see cref="RequestKeyframe"/> to this session's peer, asking their
+    /// publisher-side <c>CaptureStreamer</c> to flush an IDR on the next frame.
+    /// Called by another session when a new subscriber for this publisher's
+    /// stream finishes ICE+DTLS setup — without this the late joiner waits up
+    /// to one GOP (default 2 s, configurable up to 10 s) for the next natural
+    /// keyframe, which is the dominant "takes ages to see video" symptom.
+    /// </summary>
+    public Task SendRequestKeyframeAsync()
+    {
+        var streamId = _currentStreamId;
+        if (string.IsNullOrEmpty(streamId))
+        {
+            return Task.CompletedTask;
+        }
+        return SendAsync(MessageType.RequestKeyframe, new RequestKeyframe(streamId));
+    }
+
     private async Task OnSubscriberReadyAsync(SfuSubscriberPeer sub)
     {
         // Only drive offers to the viewer this subscriber is paired with.
@@ -894,15 +912,47 @@ public sealed class WsSession
             return;
         }
 
-        // Wire ICE forwarding for this subscriber instance. SfuSession fires
-        // SubscriberReady exactly once per SfuSubscriberPeer (EnsureSubscriberAsync
-        // dedups at the dict layer) and the handler closure dies with the sub
-        // when it's disposed, so no guard is needed here — and adding one keyed
-        // by SubscriptionId would break repub, since SubscriptionId is the
-        // publisher's PeerId and stays stable across stop/restart.
+        // When this subscriber's PC finishes ICE+DTLS, ask the publisher for a
+        // fresh keyframe so this viewer doesn't have to wait for the next
+        // natural GOP boundary (up to 2 s by default).
+        var publisherPeerId = sub.PublisherPeerId;
+        sub.Connected += () =>
+        {
+            var publisherSession = _sessions.Get(publisherPeerId);
+            if (publisherSession is null)
+            {
+                return;
+            }
+            try
+            {
+                _ = publisherSession.SendRequestKeyframeAsync();
+            }
+            catch { /* publisher tearing down */ }
+        };
+
+        // ICE candidates must NOT reach the client before the SdpOffer that
+        // creates the matching SubscriberSession — otherwise they're dispatched
+        // to an event with no subscribers and silently dropped, and ICE on the
+        // client side starves. SIPSorcery starts gathering inside
+        // CreateOfferAsync's setLocalDescription, so candidates fire before the
+        // offer is queued on the wire. Buffer them locally until the offer has
+        // been sent, then flush in order.
         var subscriptionId = sub.SubscriptionId;
+        var pendingCandidates = new List<string>();
+        var candidateLock = new object();
+        var offerSent = false;
+
         sub.LocalIceCandidateReady += candidateJson =>
         {
+            lock (candidateLock)
+            {
+                if (!offerSent)
+                {
+                    pendingCandidates.Add(candidateJson);
+                    return;
+                }
+            }
+
             try
             {
                 _ = SendAsync(MessageType.IceCandidate,
@@ -916,6 +966,20 @@ public sealed class WsSession
             var offerSdp = await sub.CreateOfferAsync().ConfigureAwait(false);
             await SendAsync(MessageType.SdpOffer, new SdpOffer(offerSdp, sub.SubscriptionId))
                 .ConfigureAwait(false);
+
+            List<string> toFlush;
+            lock (candidateLock)
+            {
+                offerSent = true;
+                toFlush = new List<string>(pendingCandidates);
+                pendingCandidates.Clear();
+            }
+            foreach (var candidateJson in toFlush)
+            {
+                await SendAsync(MessageType.IceCandidate,
+                    new IceCandidate(candidateJson, null, null, subscriptionId))
+                    .ConfigureAwait(false);
+            }
         }
         catch (Exception ex)
         {

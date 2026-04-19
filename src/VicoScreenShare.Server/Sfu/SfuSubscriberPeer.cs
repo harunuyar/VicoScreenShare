@@ -72,6 +72,12 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
     /// <summary>Fired whenever the subscriber PC gathers a local ICE candidate for the viewer.</summary>
     public event Action<string>? LocalIceCandidateReady;
 
+    /// <summary>Fires once when the subscriber PC reaches the Connected state,
+    /// i.e. ICE + DTLS are up and media is now traversable. Used to trigger a
+    /// keyframe request upstream so the viewer doesn't wait up to a full GOP
+    /// for the next natural IDR.</summary>
+    public event Action? Connected;
+
     /// <summary>
     /// Forward a received RTP packet from the upstream publisher out to the viewer.
     /// Called by <see cref="SfuSession"/> for every packet that the paired
@@ -159,10 +165,26 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         }
     }
 
+    private bool _connectedFired;
+
     private void OnConnectionStateChange(RTCPeerConnectionState state)
     {
         _logger?.LogInformation("SfuSubscriberPeer {Viewer}<-{Publisher} state: {State}",
             ViewerPeerId, PublisherPeerId, state);
+
+        if (state == RTCPeerConnectionState.connected && !_connectedFired)
+        {
+            _connectedFired = true;
+            try
+            {
+                Connected?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogDebug(ex, "SfuSubscriberPeer {Viewer}<-{Publisher} Connected handler threw",
+                    ViewerPeerId, PublisherPeerId);
+            }
+        }
     }
 
     private void FlushPendingRemoteCandidates()

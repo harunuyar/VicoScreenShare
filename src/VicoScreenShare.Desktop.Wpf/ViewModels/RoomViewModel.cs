@@ -994,6 +994,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         client.SdpOfferReceived += OnSdpOfferReceived;
         client.PeerConnectionStateChanged += OnPeerConnectionStateChanged;
         client.ResumeFailedReceived += OnResumeFailedReceived;
+        client.RequestKeyframeReceived += OnRequestKeyframeReceived;
     }
 
     private void UnsubscribeSignalingEvents(SignalingClient client)
@@ -1007,6 +1008,20 @@ public sealed partial class RoomViewModel : ViewModelBase
         client.SdpOfferReceived -= OnSdpOfferReceived;
         client.PeerConnectionStateChanged -= OnPeerConnectionStateChanged;
         client.ResumeFailedReceived -= OnResumeFailedReceived;
+        client.RequestKeyframeReceived -= OnRequestKeyframeReceived;
+    }
+
+    private void OnRequestKeyframeReceived(RequestKeyframe _)
+    {
+        // Server asked us to flush an IDR for a newly-connected subscriber.
+        // Only meaningful when we're actively publishing. Bypass the dispatcher
+        // — CaptureStreamer.RequestKeyframe() is cheap and thread-safe, and we
+        // want it in flight before the next encoder input.
+        try
+        {
+            _captureStreamer?.RequestKeyframe();
+        }
+        catch { /* encoder tearing down */ }
     }
 
     private void OnPeerConnectionStateChanged(PeerConnectionState state)
