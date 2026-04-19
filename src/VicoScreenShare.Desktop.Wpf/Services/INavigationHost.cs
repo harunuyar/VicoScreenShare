@@ -19,4 +19,12 @@ public interface INavigationHost
     void ShowOverlay(object overlayViewModel);
 
     void CloseOverlay();
+
+    /// <summary>
+    /// Process-wide UI dispatcher, captured on the UI thread at composition
+    /// time. View models receive this instead of calling
+    /// <c>Dispatcher.CurrentDispatcher</c> themselves, so a VM constructed
+    /// on a thread-pool thread can't accidentally bind to a dead dispatcher.
+    /// </summary>
+    IUiDispatcher UiDispatcher { get; }
 }

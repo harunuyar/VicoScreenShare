@@ -1,6 +1,7 @@
 namespace VicoScreenShare.Desktop.App.Services;
 
 using System;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 /// <summary>
@@ -15,6 +16,18 @@ using CommunityToolkit.Mvvm.ComponentModel;
 /// </summary>
 public sealed partial class NavigationService : ObservableObject, INavigationHost
 {
+    public NavigationService()
+    {
+        // NavigationService is instantiated from MainWindow.xaml as the
+        // window's DataContext, which WPF constructs on the UI thread.
+        // Capture the UI dispatcher here, exactly once, and flow it to every
+        // view model via the INavigationHost interface. View models never
+        // call Dispatcher.CurrentDispatcher themselves.
+        UiDispatcher = new WpfUiDispatcher(Dispatcher.CurrentDispatcher);
+    }
+
+    public IUiDispatcher UiDispatcher { get; }
+
     [ObservableProperty]
     private object? _current;
 

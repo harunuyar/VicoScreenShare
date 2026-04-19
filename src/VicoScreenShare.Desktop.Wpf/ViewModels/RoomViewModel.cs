@@ -39,7 +39,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     private readonly ClientSettings _settings;
     private readonly SettingsStore _settingsStore;
     private readonly ICaptureProvider? _captureProvider;
-    private readonly Dispatcher _dispatcher;
+    private readonly IUiDispatcher _uiDispatcher;
 
     private WebRtcSession? _webRtc;
     private ICaptureSource? _localCaptureSource;
@@ -102,7 +102,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _settings = settings;
         _settingsStore = settingsStore;
         _captureProvider = captureProvider;
-        _dispatcher = Dispatcher.CurrentDispatcher;
+        _uiDispatcher = navigation.UiDispatcher;
 
         var catalog = ClientHost.VideoCodecCatalog ?? new VideoCodecCatalog();
         var resolved = catalog.ResolveOrFallback(settings.Video.Codec);
@@ -552,9 +552,9 @@ public sealed partial class RoomViewModel : ViewModelBase
             return;
         }
 
-        var tile = new PublisherTileViewModel(session, displayName, nominalFps);
+        var tile = new PublisherTileViewModel(session, displayName, nominalFps, _navigation.UiDispatcher);
 
-        await _dispatcher.InvokeAsync(() =>
+        await _uiDispatcher.InvokeAsync(() =>
         {
             if (toDispose is not null)
             {
@@ -568,7 +568,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             // If the media status was "Waiting for a streamer…" etc, clear it so
             // the grid takes over the empty state region.
             MediaStatus = null;
-        }).Task.ConfigureAwait(true);
+        }).ConfigureAwait(true);
 
         if (toDispose is not null)
         {
@@ -725,7 +725,7 @@ public sealed partial class RoomViewModel : ViewModelBase
     public void OnRoomIdCopied()
     {
         CopyButtonText = "Copied!";
-        var timer = new DispatcherTimer(DispatcherPriority.Normal, _dispatcher)
+        var timer = new DispatcherTimer(DispatcherPriority.Normal, ((WpfUiDispatcher)_uiDispatcher).Dispatcher)
         {
             Interval = TimeSpan.FromSeconds(1.5),
         };
@@ -816,16 +816,16 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnLocalCaptureClosed()
     {
-        _dispatcher.BeginInvoke(new Action(async () =>
+        _uiDispatcher.Post(async () =>
         {
             StatusMessage = "Capture source closed.";
             await StopSharingInternalAsync().ConfigureAwait(true);
-        }));
+        });
     }
 
     private void OnPeerJoined(PeerInfo peer)
     {
-        _dispatcher.BeginInvoke(new Action(() =>
+        _uiDispatcher.Post(() =>
         {
             if (Peers.Any(p => p.PeerId == peer.PeerId))
             {
@@ -833,12 +833,12 @@ public sealed partial class RoomViewModel : ViewModelBase
             }
 
             Peers.Add(new PeerViewModel(peer.PeerId, peer.DisplayName, peer.PeerId == YourPeerId));
-        }));
+        });
     }
 
     private void OnPeerLeft(Guid peerId)
     {
-        _dispatcher.BeginInvoke(new Action(async () =>
+        _uiDispatcher.Post(async () =>
         {
             var existing = Peers.FirstOrDefault(p => p.PeerId == peerId);
             if (existing is not null)
@@ -850,13 +850,13 @@ public sealed partial class RoomViewModel : ViewModelBase
             await DisposeTileAsync(peerId).ConfigureAwait(true);
 
             _announcedFrameRates.Remove(peerId);
-        }));
+        });
     }
 
     private void OnStreamStartedReceived(StreamStarted message)
     {
         DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId}, nominalFps={message.NominalFrameRate})");
-        _dispatcher.BeginInvoke(new Action(() =>
+        _uiDispatcher.Post(() =>
         {
             SetPeerStreaming(message.PeerId, true);
 
@@ -885,13 +885,13 @@ public sealed partial class RoomViewModel : ViewModelBase
             {
                 existingTile.NominalFrameRate = fps;
             }
-        }));
+        });
     }
 
     private void OnStreamEndedReceived(StreamEnded message)
     {
         DebugLog.Write($"[room] StreamEnded received from {message.PeerId}");
-        _dispatcher.BeginInvoke(new Action(async () =>
+        _uiDispatcher.Post(async () =>
         {
             SetPeerStreaming(message.PeerId, false);
             _announcedFrameRates.Remove(message.PeerId);
@@ -899,7 +899,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             // Drop the subscription + tile for this publisher. Server has
             // already torn down its matching SfuSubscriberPeer on its side.
             await DisposeTileAsync(message.PeerId).ConfigureAwait(true);
-        }));
+        });
     }
 
     /// <summary>Dispose a single tile for the given publisher, if one exists.</summary>
@@ -934,7 +934,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         }
 
         _statsPrevTickUtc = DateTime.UtcNow;
-        _statsTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
+        _statsTimer = new DispatcherTimer(DispatcherPriority.Background, ((WpfUiDispatcher)_uiDispatcher).Dispatcher)
         {
             Interval = TimeSpan.FromMilliseconds(500),
         };
@@ -1013,7 +1013,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnServerError(ErrorCode code, string message)
     {
-        _dispatcher.BeginInvoke(new Action(() => StatusMessage = $"Server error: {message}"));
+        _uiDispatcher.Post(() => StatusMessage = $"Server error: {message}");
     }
 
     private void OnConnectionLost(string? reason)
@@ -1024,7 +1024,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             return;
         }
 
-        _dispatcher.BeginInvoke(new Action(async () =>
+        _uiDispatcher.Post(async () =>
         {
             StatusMessage = null;
             ConnectionDotBrush = System.Windows.Media.Brushes.OrangeRed;
@@ -1063,7 +1063,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             _reconnectCts?.Cancel();
             _reconnectCts = new CancellationTokenSource();
             _ = ReconnectLoopAsync(_reconnectCts.Token);
-        }));
+        });
     }
 
     private void SubscribeSignalingEvents(SignalingClient client)
@@ -1124,7 +1124,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void OnPeerConnectionStateChanged(PeerConnectionState state)
     {
-        _dispatcher.BeginInvoke(new Action(() =>
+        _uiDispatcher.Post(() =>
         {
             var peer = Peers.FirstOrDefault(p => p.PeerId == state.PeerId);
             if (peer is null)
@@ -1133,14 +1133,14 @@ public sealed partial class RoomViewModel : ViewModelBase
             }
 
             peer.IsConnected = state.IsConnected;
-        }));
+        });
     }
 
     private void OnResumeFailedReceived(ResumeFailed failure)
     {
         // The server rejected our resume attempt. No point in retrying further —
         // the slot is gone. Signal the reconnect loop to stop and navigate home.
-        _dispatcher.BeginInvoke(new Action(() =>
+        _uiDispatcher.Post(() =>
         {
             ReconnectMessage = failure.Reason switch
             {
@@ -1153,9 +1153,9 @@ public sealed partial class RoomViewModel : ViewModelBase
             _ = Task.Run(async () =>
             {
                 await Task.Delay(1500).ConfigureAwait(false);
-                await _dispatcher.InvokeAsync(NavigateHome);
+                await _uiDispatcher.InvokeAsync(NavigateHome);
             });
-        }));
+        });
     }
 
     /// <summary>
@@ -1178,12 +1178,12 @@ public sealed partial class RoomViewModel : ViewModelBase
                 // Fall out of the loop and navigate away. Server has torn down
                 // the slot; presenting a fresh JoinRoom would surface a
                 // RoomNotFound in a typical case.
-                await _dispatcher.InvokeAsync(() =>
+                await _uiDispatcher.InvokeAsync(() =>
                 {
                     ReconnectMessage = "Reconnect timed out. Returning to home…";
                 });
                 await Task.Delay(1000, CancellationToken.None).ConfigureAwait(false);
-                await _dispatcher.InvokeAsync(NavigateHome);
+                await _uiDispatcher.InvokeAsync(NavigateHome);
                 return;
             }
 
@@ -1226,7 +1226,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
                     // Swap the signaling client under the dispatcher so event
                     // handlers see the new instance first.
-                    await _dispatcher.InvokeAsync(async () =>
+                    await _uiDispatcher.InvokeAsync(async () =>
                     {
                         var old = _signaling;
                         UnsubscribeSignalingEvents(old);
@@ -1250,7 +1250,7 @@ public sealed partial class RoomViewModel : ViewModelBase
                         {
                             if (_wasSharingBeforeDisconnect && _localCaptureSource is not null && _webRtc is not null)
                             {
-                                await _dispatcher.InvokeAsync(() => RestoreSharingAfterResumeAsync()).Task.ConfigureAwait(false);
+                                await _uiDispatcher.InvokeAsync(() => RestoreSharingAfterResumeAsync()).ConfigureAwait(false);
                             }
                             _wasSharingBeforeDisconnect = false;
                             _stashedStreamIdForResume = null;
@@ -1259,7 +1259,7 @@ public sealed partial class RoomViewModel : ViewModelBase
                         IsReconnecting = false;
                         ConnectionDotBrush = System.Windows.Media.Brushes.LimeGreen;
                         StatusMessage = null;
-                    }).Task.ConfigureAwait(false);
+                    }).ConfigureAwait(false);
 
                     return;
                 }

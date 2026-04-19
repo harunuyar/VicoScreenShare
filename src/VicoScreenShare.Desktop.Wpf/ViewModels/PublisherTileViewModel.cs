@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
+using VicoScreenShare.Desktop.App.Services;
 
 /// <summary>
 /// One tile in the Room's publisher grid. Wraps a <see cref="SubscriberSession"/>
@@ -28,7 +29,7 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
     private static readonly TimeSpan IdleAfter = TimeSpan.FromSeconds(5);
 
     private readonly SubscriberSession _session;
-    private readonly Dispatcher _dispatcher;
+    private readonly IUiDispatcher _uiDispatcher;
     private readonly DispatcherTimer _staleTimer;
     private readonly FrameArrivedHandler _frameHandler;
     private readonly TextureArrivedHandler _textureHandler;
@@ -39,10 +40,14 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
     private DateTime _statsPrevTickUtc = DateTime.MinValue;
     private bool _disposed;
 
-    public PublisherTileViewModel(SubscriberSession session, string displayName, int nominalFrameRate)
+    public PublisherTileViewModel(
+        SubscriberSession session,
+        string displayName,
+        int nominalFrameRate,
+        IUiDispatcher uiDispatcher)
     {
         _session = session;
-        _dispatcher = Dispatcher.CurrentDispatcher;
+        _uiDispatcher = uiDispatcher ?? throw new ArgumentNullException(nameof(uiDispatcher));
         _displayName = displayName;
         _nominalFrameRate = nominalFrameRate > 0 ? nominalFrameRate : 60;
 
@@ -51,7 +56,14 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
         _session.Receiver.FrameArrived += _frameHandler;
         _session.Receiver.TextureArrived += _textureHandler;
 
-        _staleTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
+        // DispatcherTimer needs a WPF Dispatcher instance — WpfUiDispatcher
+        // is the single place that owns one, so reach in there for the
+        // timer constructor. Every other dispatcher concern in this VM
+        // goes through IUiDispatcher, independent of WPF specifics.
+        var wpfDispatcher = (uiDispatcher as WpfUiDispatcher)?.Dispatcher
+            ?? throw new InvalidOperationException(
+                "PublisherTileViewModel requires a WpfUiDispatcher to construct its DispatcherTimer.");
+        _staleTimer = new DispatcherTimer(DispatcherPriority.Background, wpfDispatcher)
         {
             Interval = TimeSpan.FromMilliseconds(500),
         };
@@ -110,14 +122,7 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
             return;
         }
 
-        if (_dispatcher.CheckAccess())
-        {
-            EnterActive();
-        }
-        else
-        {
-            _dispatcher.BeginInvoke(new Action(EnterActive));
-        }
+        _uiDispatcher.Post(EnterActive);
     }
 
     private void EnterActive()
