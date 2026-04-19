@@ -61,12 +61,13 @@
                   KeyDown="OnOverlayKeyDown"
                   MouseDown="OnOverlayBackdropMouseDown">
                 <Border Width="460"
+                        MaxHeight="640"
                         Margin="0,64,16,16"
                         Background="{DynamicResource ApplicationBackgroundBrush}"
                         CornerRadius="8"
                         BorderThickness="1"
                         BorderBrush="{DynamicResource ControlElevationBorderBrush}"
-                        HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                        HorizontalAlignment="Right" VerticalAlignment="Top"
                         ClipToBounds="True"
                         MouseDown="OnOverlayCardMouseDown">
                     <Border.Effect>
