@@ -196,39 +196,38 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
-    public void Nack_knobs_round_trip_through_save_and_load()
+    public void Adaptive_bitrate_knobs_round_trip_through_save_and_load()
     {
         var store = new SettingsStore(_settingsPath);
         var original = new ClientSettings
         {
             Video = new VideoSettings
             {
-                EnableNackRtx = false,
-                NackHistoryPackets = 64,
+                EnableAdaptiveBitrate = false,
+                MinAdaptiveBitrate = 800_000,
             },
         };
         store.Save(original);
 
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
 
-        loaded.Video.EnableNackRtx.Should().BeFalse();
-        loaded.Video.NackHistoryPackets.Should().Be(64);
+        loaded.Video.EnableAdaptiveBitrate.Should().BeFalse();
+        loaded.Video.MinAdaptiveBitrate.Should().Be(800_000);
     }
 
     [Fact]
-    public void Nack_history_out_of_range_snaps_to_default_on_load()
+    public void Min_adaptive_bitrate_out_of_range_snaps_to_default()
     {
         var store = new SettingsStore(_settingsPath);
         store.Save(new ClientSettings
         {
             Video = new VideoSettings
             {
-                NackHistoryPackets = 999999,
+                MinAdaptiveBitrate = -1,
             },
         });
 
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
-
-        loaded.Video.NackHistoryPackets.Should().Be(128);
+        loaded.Video.MinAdaptiveBitrate.Should().Be(500_000);
     }
 }

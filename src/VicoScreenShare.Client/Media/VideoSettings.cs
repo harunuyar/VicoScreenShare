@@ -78,24 +78,22 @@ public sealed class VideoSettings
     public int ReceiveBufferFrames { get; set; } = 5;
 
     /// <summary>
-    /// Master switch for RTP-layer feedback: NACK (receiver reports lost
-    /// sequence numbers) + RTX (sender retransmits from a small history
-    /// buffer). When on, the SDP profile advertises <c>SAVPF</c> and both
-    /// peers negotiate <c>rtcp-fb: nack</c>. Provides meaningful loss
-    /// recovery on networks where keyframe packets are tail-dropped.
+    /// Master switch for RTCP-RR-driven adaptive bitrate. When on, the
+    /// publisher reads the receiver's reported fraction-lost on inbound
+    /// RTCP RRs and steps the encoder bitrate down on sustained loss
+    /// (with gradual recovery up to <see cref="TargetBitrate"/> as loss
+    /// clears). Turns "12 Mbps keyframe bursts into a 3 Mbps link" from
+    /// a permanent stall into a self-correcting quality reduction.
     /// Default on; flip off for A/B troubleshooting.
     /// </summary>
-    public bool EnableNackRtx { get; set; } = true;
+    public bool EnableAdaptiveBitrate { get; set; } = true;
 
     /// <summary>
-    /// Number of recent outbound RTP packets the SFU retains per subscriber
-    /// so it can service a NACK without round-tripping to the publisher.
-    /// ≈128 covers about 160 ms of typical 60 fps traffic, which is enough
-    /// for one NACK RTT on a home link. Larger = deeper recovery window at
-    /// the cost of memory.
+    /// Lower bound the adaptive bitrate controller is allowed to step down
+    /// to. Stops the loop from driving quality into the floor on extremely
+    /// bad links. Bits per second. Default 500 kbps.
     /// </summary>
-    public int NackHistoryPackets { get; set; } = 128;
-
+    public int MinAdaptiveBitrate { get; set; } = 500_000;
 }
 
 /// <summary>

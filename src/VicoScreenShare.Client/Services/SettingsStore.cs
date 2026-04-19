@@ -125,8 +125,8 @@ public sealed class SettingsStore
         public ScalerMode Scaler { get; set; } = ScalerMode.Bilinear;
         public VideoCodec Codec { get; set; } = VideoCodec.H264;
         public int ReceiveBufferFrames { get; set; } = 5;
-        public bool EnableNackRtx { get; set; } = true;
-        public int NackHistoryPackets { get; set; } = 128;
+        public bool EnableAdaptiveBitrate { get; set; } = true;
+        public int MinAdaptiveBitrate { get; set; } = 500_000;
 
         // Legacy fields kept so existing settings.json files migrate instead
         // of silently dropping back to defaults. Only read on load — never
@@ -149,8 +149,8 @@ public sealed class SettingsStore
             Scaler = source.Video.Scaler,
             Codec = source.Video.Codec,
             ReceiveBufferFrames = source.Video.ReceiveBufferFrames,
-            EnableNackRtx = source.Video.EnableNackRtx,
-            NackHistoryPackets = source.Video.NackHistoryPackets,
+            EnableAdaptiveBitrate = source.Video.EnableAdaptiveBitrate,
+            MinAdaptiveBitrate = source.Video.MinAdaptiveBitrate,
         };
 
         public ClientSettings ToClientSettings()
@@ -167,8 +167,8 @@ public sealed class SettingsStore
                     Scaler = Scaler,
                     Codec = Codec,
                     ReceiveBufferFrames = ReceiveBufferFrames > 0 && ReceiveBufferFrames <= 240 ? ReceiveBufferFrames : 5,
-                    EnableNackRtx = EnableNackRtx,
-                    NackHistoryPackets = NackHistoryPackets > 0 && NackHistoryPackets <= 4096 ? NackHistoryPackets : 128,
+                    EnableAdaptiveBitrate = EnableAdaptiveBitrate,
+                    MinAdaptiveBitrate = MinAdaptiveBitrate > 0 && MinAdaptiveBitrate <= 50_000_000 ? MinAdaptiveBitrate : 500_000,
                 },
             };
 
