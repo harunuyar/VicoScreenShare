@@ -578,6 +578,23 @@ public sealed class D3DImageVideoRenderer : HwndHost
     private D3D11VideoScaler? _scaler;
     private int _uploadWidth;
     private int _uploadHeight;
+
+    // GPU texture ring: owned BGRA textures used as the hand-off buffer
+    // for the GPU decode path. OnTextureArrived GPU-copies the decoder's
+    // texture into one of these slots and enqueues the slot index onto the
+    // playout queue; PaintFromQueue dequeues and paints from the slot on
+    // the present thread, then releases the slot back to the pool. This
+    // is what makes ReceiveBufferFrames work on the GPU path — without
+    // the ring we'd have to either paint inline (bypassing the buffer) or
+    // round-trip through byte[] (killing GPU perf).
+    //
+    // Lazy-allocated: size matches _playoutQueue.MaxCapacity, but each
+    // slot's underlying texture is only created on first use. In steady
+    // state with ReceiveBufferFrames=5, only ~5-10 slots are ever hot.
+    private ID3D11Texture2D?[]? _textureRing;
+    private int[]? _ringSlotWidth;
+    private int[]? _ringSlotHeight;
+    private bool[]? _ringSlotInUse;
     private int _swapChainWidth;
     private int _swapChainHeight;
     private ICaptureSource? _attachedReceiver;
@@ -681,6 +698,18 @@ public sealed class D3DImageVideoRenderer : HwndHost
             DetachLocalSource();
             _scaler?.Dispose(); _scaler = null;
             _uploadTexture?.Dispose(); _uploadTexture = null;
+            if (_textureRing is not null)
+            {
+                for (var i = 0; i < _textureRing.Length; i++)
+                {
+                    _textureRing[i]?.Dispose();
+                    _textureRing[i] = null;
+                }
+                _textureRing = null;
+                _ringSlotWidth = null;
+                _ringSlotHeight = null;
+                _ringSlotInUse = null;
+            }
             _swapChain?.Dispose(); _swapChain = null;
             // _device and _context are borrowed from App.SharedDevices.
             // This renderer can be instantiated more than once (main
@@ -981,6 +1010,7 @@ public sealed class D3DImageVideoRenderer : HwndHost
             return;
         }
 
+        int slot;
         try
         {
             lock (_renderLock)
@@ -1005,17 +1035,39 @@ public sealed class D3DImageVideoRenderer : HwndHost
                         $"[renderer] gpu-frame #{count} {width}x{height} -> {_swapChainWidth}x{_swapChainHeight}");
                 }
 
-                EnsureUploadTextureLocked(width, height);
+                // Receiver path: GPU-copy into an owned ring slot, then
+                // push onto the playout queue. PaintFromQueue drains it
+                // on the present thread, honoring ReceiveBufferFrames.
+                // Local-preview path: paint inline (queue isn't used by
+                // self-preview — it's a confirmation tile, not a paced
+                // feed). _attachedReceiver is null for the preview path.
+                if (_attachedReceiver is null)
+                {
+                    EnsureUploadTextureLocked(width, height);
+                    using var previewSource = new ID3D11Texture2D(nativeTexture);
+                    _context.CopyResource(_uploadTexture!, previewSource);
+                    PaintUploadedTextureLocked(width, height);
+                    return;
+                }
+
+                slot = AcquireRingSlotLocked();
+                if (slot < 0)
+                {
+                    // Ring is saturated and SkipToLatest didn't free
+                    // anything (pathological — paint thread is completely
+                    // stalled). Drop this frame rather than block.
+                    return;
+                }
+
+                EnsureRingSlotTextureLocked(slot, width, height);
 
                 // Wrapping the caller's pointer AddRefs the underlying
                 // COM object (Vortice's ComObject ctor). Disposing the
                 // wrapper Releases. CopyResource queues a GPU-side DMA
-                // from the decoder's BGRA texture into our owned upload
+                // from the decoder's BGRA texture into our owned slot
                 // texture — no PCIe traffic, no CPU stall.
                 using var sourceTexture = new ID3D11Texture2D(nativeTexture);
-                _context.CopyResource(_uploadTexture!, sourceTexture);
-
-                PaintUploadedTextureLocked(width, height);
+                _context.CopyResource(_textureRing![slot]!, sourceTexture);
             }
         }
         catch (Exception ex)
@@ -1026,7 +1078,22 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 VicoScreenShare.Client.Diagnostics.DebugLog.Write(
                     $"[renderer] OnTextureArrived threw (#{count}): {ex.GetType().Name}: {ex.Message}");
             }
+            return;
         }
+
+        // Push OUTSIDE the render lock: Push may synchronously fire
+        // OnDropped if the queue is at capacity, which calls back into
+        // ReleaseRingSlot which takes _renderLock. Keeping Push outside
+        // avoids the re-entrancy hazard.
+        var capturedSlot = slot;
+        var queuedFrame = new DecodedVideoFrame(
+            Bgra: Array.Empty<byte>(),
+            Width: width,
+            Height: height,
+            Timestamp: timestamp,
+            TextureSlot: capturedSlot,
+            OnDropped: () => ReleaseRingSlot(capturedSlot));
+        _playoutQueue.Push(in queuedFrame);
     }
 
     /// <summary>
@@ -1037,15 +1104,58 @@ public sealed class D3DImageVideoRenderer : HwndHost
     /// </summary>
     private void PaintFromQueue(in DecodedVideoFrame frame)
     {
-        if (frame.Bgra is null || frame.Width <= 0 || frame.Height <= 0)
+        if (frame.Width <= 0 || frame.Height <= 0)
         {
             return;
         }
 
-        // Wrap the decoded frame as a CaptureFrameData so we can reuse
-        // OnFrameArrivedCore's upload + scale + present sequence — that
-        // keeps the paint path identical between the self-preview
-        // inline route and the receiver queue route.
+        // GPU path: pixel data lives in _textureRing[slot]; scale +
+        // present directly. Release the slot after paint so the ring
+        // pool can reuse it.
+        if (frame.TextureSlot >= 0)
+        {
+            var slot = frame.TextureSlot;
+            try
+            {
+                lock (_renderLock)
+                {
+                    if (_disposed || _textureRing is null || _textureRing[slot] is null)
+                    {
+                        return;
+                    }
+                    InitD3DLocked();
+                    if (_swapChain is null || _device is null || _context is null)
+                    {
+                        return;
+                    }
+                    PaintSourceTextureLocked(_textureRing[slot]!, frame.Width, frame.Height);
+                }
+            }
+            catch (Exception ex)
+            {
+                var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
+                if (count <= 5 || count % 60 == 0)
+                {
+                    VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+                        $"[renderer] PaintFromQueue (gpu) threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+            finally
+            {
+                ReleaseRingSlot(slot);
+            }
+            return;
+        }
+
+        if (frame.Bgra is null || frame.Bgra.Length == 0)
+        {
+            return;
+        }
+
+        // CPU path: wrap the decoded frame as a CaptureFrameData so we
+        // can reuse OnFrameArrivedCore's upload + scale + present
+        // sequence — that keeps the paint path identical between the
+        // self-preview inline route and the receiver queue route.
         var strideBytes = frame.Width * 4;
         var data = new CaptureFrameData(
             frame.Bgra.AsSpan(0, frame.Height * strideBytes),
@@ -1066,6 +1176,37 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 VicoScreenShare.Client.Diagnostics.DebugLog.Write(
                     $"[renderer] PaintFromQueue threw (#{count}): {ex.GetType().Name}: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// Scale the given source texture into the swap chain back buffer
+    /// and Present. Same shape as <see cref="PaintUploadedTextureLocked"/>
+    /// but takes any source texture — callers are either the CPU upload
+    /// path (_uploadTexture) or the GPU ring path (_textureRing[slot]).
+    /// </summary>
+    private void PaintSourceTextureLocked(ID3D11Texture2D source, int width, int height)
+    {
+        using var backBuffer = _swapChain!.GetBuffer<ID3D11Texture2D>(0);
+        EnsureScalerLocked(width, height, _swapChainWidth, _swapChainHeight);
+        var destRect = ComputeLetterboxRect(width, height, _swapChainWidth, _swapChainHeight);
+        try
+        {
+            _scaler!.Process(source, backBuffer, destRect);
+        }
+        catch (Exception ex)
+        {
+            VicoScreenShare.Client.Diagnostics.DebugLog.Write($"[renderer] scaler.Process threw: {ex.Message}");
+            return;
+        }
+        try
+        {
+            _swapChain.Present(0, PresentFlags.None);
+            PaintedFrameCount++;
+        }
+        catch (Exception ex)
+        {
+            VicoScreenShare.Client.Diagnostics.DebugLog.Write($"[renderer] Present threw: {ex.Message}");
         }
     }
 
@@ -1199,6 +1340,123 @@ public sealed class D3DImageVideoRenderer : HwndHost
             var x = (dstW - w) / 2;
             return new RawRect(x, 0, x + w, dstH);
         }
+    }
+
+    /// <summary>
+    /// Acquire a free GPU-ring slot for a new incoming texture frame.
+    /// Lazy-initializes the ring arrays on first call. If every slot is
+    /// busy (queue saturated — paint thread behind), forces the playout
+    /// queue to drop its oldest entry, which fires OnDropped on that
+    /// entry and releases its slot via <see cref="ReleaseRingSlotLocked"/>.
+    /// Caller holds <see cref="_renderLock"/>. Returns -1 only in
+    /// pathological cases where the eviction didn't yield a free slot.
+    /// </summary>
+    private int AcquireRingSlotLocked()
+    {
+        if (_textureRing is null)
+        {
+            var size = _playoutQueue.MaxCapacity;
+            _textureRing = new ID3D11Texture2D?[size];
+            _ringSlotWidth = new int[size];
+            _ringSlotHeight = new int[size];
+            _ringSlotInUse = new bool[size];
+        }
+
+        for (var i = 0; i < _textureRing.Length; i++)
+        {
+            if (!_ringSlotInUse![i])
+            {
+                _ringSlotInUse[i] = true;
+                return i;
+            }
+        }
+
+        // Every slot is in flight. Force the queue to evict its oldest
+        // entry; its OnDropped hook will release a slot back to us. Drop
+        // the _renderLock first to avoid an ordering hazard — the queue's
+        // OnDropped callback re-enters this renderer via ReleaseRingSlot
+        // which takes _renderLock.
+        System.Threading.Monitor.Exit(_renderLock);
+        try
+        {
+            _playoutQueue.SkipToLatest(_playoutQueue.MaxCapacity - 1);
+        }
+        finally
+        {
+            System.Threading.Monitor.Enter(_renderLock);
+        }
+
+        for (var i = 0; i < _textureRing.Length; i++)
+        {
+            if (!_ringSlotInUse![i])
+            {
+                _ringSlotInUse[i] = true;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Mark a ring slot free so future <see cref="AcquireRingSlotLocked"/>
+    /// calls can reuse it. Safe to call from any thread — takes
+    /// <see cref="_renderLock"/> internally because the playout queue
+    /// invokes this outside the render lock via the frame's OnDropped
+    /// hook. The slot's underlying texture stays allocated for reuse.
+    /// </summary>
+    private void ReleaseRingSlot(int slot)
+    {
+        if (slot < 0)
+        {
+            return;
+        }
+        lock (_renderLock)
+        {
+            if (_ringSlotInUse is null || slot >= _ringSlotInUse.Length)
+            {
+                return;
+            }
+            _ringSlotInUse[slot] = false;
+        }
+    }
+
+    /// <summary>
+    /// Ensure the ring slot's texture is allocated at the requested
+    /// dimensions. Reuses the existing texture when size matches —
+    /// dimensions are stable across a stream so this is the common path
+    /// and stays allocation-free after the first frame per slot.
+    /// </summary>
+    private void EnsureRingSlotTextureLocked(int slot, int width, int height)
+    {
+        if (_textureRing is null || _ringSlotWidth is null || _ringSlotHeight is null)
+        {
+            return;
+        }
+
+        if (_textureRing[slot] is not null
+            && _ringSlotWidth[slot] == width
+            && _ringSlotHeight[slot] == height)
+        {
+            return;
+        }
+
+        _textureRing[slot]?.Dispose();
+        var desc = new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            ArraySize = 1,
+            MipLevels = 1,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.None,
+        };
+        _textureRing[slot] = _device!.CreateTexture2D(desc);
+        _ringSlotWidth[slot] = width;
+        _ringSlotHeight[slot] = height;
     }
 
     private void EnsureUploadTextureLocked(int width, int height)

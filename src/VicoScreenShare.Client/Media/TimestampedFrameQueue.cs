@@ -112,12 +112,17 @@ public sealed class TimestampedFrameQueue
     public void Push(in DecodedVideoFrame frame)
     {
         bool raise;
+        Action? dropped = null;
         lock (_lock)
         {
             // Overflow policy: if we're already at the max, drop the
-            // oldest frame so the newer one has somewhere to land.
+            // oldest frame so the newer one has somewhere to land. Stash
+            // its OnDropped so we can fire it after the lock releases —
+            // the callback typically reaches into the renderer's texture
+            // ring and we want to keep our lock hold time tight.
             if (_frames.Count >= _maxCapacity)
             {
+                dropped = _frames[0].OnDropped;
                 _frames.RemoveAt(0);
                 Interlocked.Increment(ref _droppedOverflowCount);
                 RateLimitedOverflowLog();
@@ -142,6 +147,10 @@ public sealed class TimestampedFrameQueue
             }
 
             raise = _startupReady;
+        }
+        if (dropped is not null)
+        {
+            try { dropped.Invoke(); } catch { /* renderer release hook shouldn't break the push */ }
         }
         if (raise)
         {
@@ -213,11 +222,24 @@ public sealed class TimestampedFrameQueue
     /// </summary>
     public void SkipToLatest(int keepCount)
     {
+        List<Action>? callbacks = null;
         lock (_lock)
         {
             while (_frames.Count > keepCount)
             {
+                var cb = _frames[0].OnDropped;
+                if (cb is not null)
+                {
+                    (callbacks ??= new List<Action>()).Add(cb);
+                }
                 _frames.RemoveAt(0);
+            }
+        }
+        if (callbacks is not null)
+        {
+            foreach (var cb in callbacks)
+            {
+                try { cb.Invoke(); } catch { }
             }
         }
     }
@@ -228,10 +250,25 @@ public sealed class TimestampedFrameQueue
     /// </summary>
     public void Clear()
     {
+        List<Action>? callbacks = null;
         lock (_lock)
         {
+            foreach (var f in _frames)
+            {
+                if (f.OnDropped is not null)
+                {
+                    (callbacks ??= new List<Action>()).Add(f.OnDropped);
+                }
+            }
             _frames.Clear();
             _startupReady = false;
+        }
+        if (callbacks is not null)
+        {
+            foreach (var cb in callbacks)
+            {
+                try { cb.Invoke(); } catch { }
+            }
         }
     }
 
