@@ -76,6 +76,43 @@ public sealed class VideoSettings
     /// high-jitter network or huge pre-roll for scrubby playback.
     /// </summary>
     public int ReceiveBufferFrames { get; set; } = 5;
+
+    /// <summary>
+    /// Master switch for RTP-layer feedback: NACK (receiver reports lost
+    /// sequence numbers) + RTX (sender retransmits from a small history
+    /// buffer). When on, the SDP profile advertises <c>SAVPF</c> and both
+    /// peers negotiate <c>rtcp-fb: nack</c>. Provides meaningful loss
+    /// recovery on networks where keyframe packets are tail-dropped.
+    /// Default on; flip off for A/B troubleshooting.
+    /// </summary>
+    public bool EnableNackRtx { get; set; } = true;
+
+    /// <summary>
+    /// Number of recent outbound RTP packets the SFU retains per subscriber
+    /// so it can service a NACK without round-tripping to the publisher.
+    /// ≈128 covers about 160 ms of typical 60 fps traffic, which is enough
+    /// for one NACK RTT on a home link. Larger = deeper recovery window at
+    /// the cost of memory.
+    /// </summary>
+    public int NackHistoryPackets { get; set; } = 128;
+
+    /// <summary>
+    /// Master switch for the send-side pacer. When on, the
+    /// <see cref="CaptureStreamer"/> releases encoded frames to the RTP
+    /// transport at a paced rate capped at
+    /// <see cref="TargetBitrate"/> × <see cref="SendPacerBurstFactor"/> so
+    /// a keyframe doesn't fire hundreds of UDP packets into a kernel buffer
+    /// faster than the link can drain. Default on.
+    /// </summary>
+    public bool EnableSendPacer { get; set; } = true;
+
+    /// <summary>
+    /// Multiplier applied to <see cref="TargetBitrate"/> to compute the
+    /// pacer's burst capacity. 1.5 = allow up to 1.5 seconds of bitrate
+    /// to burst before the pacer throttles. Larger = more tolerance for
+    /// keyframes, less effective smoothing. Range is <c>[0.25, 10.0]</c>.
+    /// </summary>
+    public double SendPacerBurstFactor { get; set; } = 1.5;
 }
 
 /// <summary>

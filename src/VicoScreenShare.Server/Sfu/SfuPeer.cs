@@ -35,6 +35,10 @@ public sealed class SfuPeer : IAsyncDisposable
             {
                 new() { urls = "stun:stun.l.google.com:19302" },
             },
+            // SAVPF so the SDP carries rtcp-fb attributes (nack, pli, twcc).
+            // Without this SIPSorcery negotiates SAVP and feedback primitives
+            // can't cross the wire even when our code tries to send them.
+            X_UseRtpFeedbackProfile = true,
         });
 
         // The main SfuPeer PC is now RecvOnly from the server's perspective.

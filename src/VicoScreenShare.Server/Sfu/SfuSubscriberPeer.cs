@@ -41,6 +41,7 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
             {
                 new() { urls = "stun:stun.l.google.com:19302" },
             },
+            X_UseRtpFeedbackProfile = true,
         });
 
         // SendOnly track matched by a RecvOnly track on the viewer side. The

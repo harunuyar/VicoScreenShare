@@ -40,6 +40,7 @@ public sealed class WebRtcSession : IAsyncDisposable
             {
                 new() { urls = "stun:stun.l.google.com:19302" },
             },
+            X_UseRtpFeedbackProfile = true,
         });
 
         // Advertise the preferred codec first, followed by the other as a

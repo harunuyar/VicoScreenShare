@@ -54,6 +54,7 @@ public sealed class SubscriberSession : IAsyncDisposable
             {
                 new() { urls = "stun:stun.l.google.com:19302" },
             },
+            X_UseRtpFeedbackProfile = true,
         });
 
         // RecvOnly: server is the sender on this PC. Capabilities mirror both

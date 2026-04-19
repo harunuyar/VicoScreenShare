@@ -30,4 +30,13 @@ public sealed class RoomServerOptions
     /// the password.
     /// </summary>
     public string? AccessPassword { get; set; } = null;
+
+    /// <summary>
+    /// Size of the per-subscriber retransmission ring buffer. When a viewer
+    /// NACKs a missing RTP sequence number the SFU looks it up here and
+    /// retransmits without round-tripping to the publisher. 128 packets
+    /// ≈ 160 ms of typical 60 fps video and is enough to cover one NACK
+    /// RTT on a home link. Set to 0 to disable server-side retransmission.
+    /// </summary>
+    public int MaxNackHistoryPacketsPerSubscriber { get; set; } = 128;
 }
