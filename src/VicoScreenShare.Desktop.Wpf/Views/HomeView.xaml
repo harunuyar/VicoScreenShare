@@ -3,12 +3,28 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:VicoScreenShare.Desktop.App.ViewModels"
              xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:b="clr-namespace:VicoScreenShare.Desktop.App.Behaviors"
              d:DataContext="{d:DesignInstance Type=vm:HomeViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d">
 
     <Grid>
+        <!-- Click-outside-to-dismiss backdrop for the connection picker.
+             Mirrors the Settings-overlay pattern in MainWindow: a transparent
+             but hit-testable layer fills the HomeView while the picker is
+             open, so clicking anywhere outside the popup content dismisses it.
+             Transparent alpha (#01000000) is invisible but still receives
+             mouse events; a fully transparent Background would let clicks
+             fall through to the page. StaysOpen="True" on the popup
+             disables WPF's built-in focus-loss dismiss so only this handler
+             closes the picker — matching how Settings behaves. -->
+        <Grid x:Name="ConnectionPickerBackdrop"
+              Background="#01000000"
+              Panel.ZIndex="100"
+              Visibility="{Binding IsPickerOpen, Converter={StaticResource BoolToVisibility}}"
+              MouseDown="OnConnectionPickerBackdropMouseDown" />
+
         <!-- Top-left: compact connection picker. Clicking the chevron opens
              a Popup with the full address book + add/edit/delete affordances.
              The active connection's status dot + label is the resting-state
@@ -44,11 +60,12 @@
              saved connection with its status, plus an Add button and an
              inline editor that takes over when IsEditingConnection=true. -->
         <Popup IsOpen="{Binding IsPickerOpen}"
-               StaysOpen="False"
+               StaysOpen="True"
                AllowsTransparency="True"
                Placement="Bottom"
                PlacementTarget="{Binding ElementName=ConnectionStrip}"
-               HorizontalOffset="0" VerticalOffset="6">
+               HorizontalOffset="0" VerticalOffset="6"
+               b:PopupFollowsWindow.IsEnabled="True">
             <Border Background="{DynamicResource ApplicationBackgroundBrush}"
                     BorderBrush="{DynamicResource ControlElevationBorderBrush}"
                     BorderThickness="1" CornerRadius="8" Padding="6"

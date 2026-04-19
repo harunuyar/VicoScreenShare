@@ -3,6 +3,7 @@
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:svc="clr-namespace:VicoScreenShare.Desktop.App.Services"
+                 xmlns:b="clr-namespace:VicoScreenShare.Desktop.App.Behaviors"
                  Title="Vico Screen Share"
                  Icon="pack://application:,,,/Assets/VicoScreenShare.ico"
                  Width="1280" Height="800"
@@ -52,7 +53,8 @@
                Placement="Center"
                PlacementTarget="{Binding ElementName=PageHost}"
                Width="{Binding ActualWidth, ElementName=PageHost}"
-               Height="{Binding ActualHeight, ElementName=PageHost}">
+               Height="{Binding ActualHeight, ElementName=PageHost}"
+               b:PopupFollowsWindow.IsEnabled="True">
             <!-- Background alpha 1/255: invisible but hit-testable. A fully
                  transparent Background lets clicks fall through the
                  AllowsTransparency popup to the page underneath, so neither
