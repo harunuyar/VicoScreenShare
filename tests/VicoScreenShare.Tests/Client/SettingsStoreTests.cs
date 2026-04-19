@@ -196,7 +196,7 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
-    public void Reliability_knobs_round_trip_through_save_and_load()
+    public void Nack_knobs_round_trip_through_save_and_load()
     {
         var store = new SettingsStore(_settingsPath);
         var original = new ClientSettings
@@ -205,8 +205,6 @@ public class SettingsStoreTests : IDisposable
             {
                 EnableNackRtx = false,
                 NackHistoryPackets = 64,
-                EnableSendPacer = false,
-                SendPacerBurstFactor = 2.5,
             },
         };
         store.Save(original);
@@ -215,12 +213,10 @@ public class SettingsStoreTests : IDisposable
 
         loaded.Video.EnableNackRtx.Should().BeFalse();
         loaded.Video.NackHistoryPackets.Should().Be(64);
-        loaded.Video.EnableSendPacer.Should().BeFalse();
-        loaded.Video.SendPacerBurstFactor.Should().BeApproximately(2.5, 1e-9);
     }
 
     [Fact]
-    public void Reliability_knob_out_of_range_values_snap_to_defaults_on_load()
+    public void Nack_history_out_of_range_snaps_to_default_on_load()
     {
         var store = new SettingsStore(_settingsPath);
         store.Save(new ClientSettings
@@ -228,14 +224,11 @@ public class SettingsStoreTests : IDisposable
             Video = new VideoSettings
             {
                 NackHistoryPackets = 999999,
-                SendPacerBurstFactor = 0.01,
             },
         });
 
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
 
-        loaded.Video.NackHistoryPackets.Should().Be(128, because: "out-of-range history snaps to default");
-        loaded.Video.SendPacerBurstFactor.Should().BeApproximately(1.5, 1e-9,
-            because: "out-of-range burst factor snaps to default");
+        loaded.Video.NackHistoryPackets.Should().Be(128);
     }
 }

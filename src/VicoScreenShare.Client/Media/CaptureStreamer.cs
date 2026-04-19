@@ -53,9 +53,6 @@ public sealed class CaptureStreamer : IDisposable
     private int _encoderWidth;
     private int _encoderHeight;
 
-    private readonly SendPacer? _pacer;
-    private readonly long _pacerStartTicks;
-
     private byte[] _sourceBgraBuffer = Array.Empty<byte>();
     private byte[] _scaledBgraBuffer = Array.Empty<byte>();
     private long _lastTimestampTicks;
@@ -99,61 +96,6 @@ public sealed class CaptureStreamer : IDisposable
         // jitter window still get through.
         _frameGapTicks = TimeSpan.FromSeconds(1.0 / fps).Ticks;
         _frameGapToleranceTicks = _frameGapTicks / 5;
-
-        // Send pacer: smooths the boundary between encoder output and the
-        // RTP transport so subsequent frames don't pile on top of a kernel
-        // UDP buffer that's still draining a keyframe. Disabled via setting
-        // so operators can A/B troubleshoot. Clock is monotonic ticks
-        // rebased to zero at construction so the first frame fits inside
-        // the fresh burst capacity.
-        if (settings.EnableSendPacer)
-        {
-            var bytesPerSecond = _targetBitrate / 8L;
-            var burstFactor = settings.SendPacerBurstFactor;
-            if (burstFactor < 0.25 || burstFactor > 10.0)
-            {
-                burstFactor = 1.5;
-            }
-            var burstBytes = (long)(bytesPerSecond * burstFactor);
-            _pacerStartTicks = Environment.TickCount64;
-            _pacer = new SendPacer(
-                bytesPerSecond,
-                burstBytes,
-                () => TimeSpan.FromMilliseconds(Environment.TickCount64 - _pacerStartTicks));
-        }
-    }
-
-    /// <summary>
-    /// Hand an encoded frame to the outbound callback, routed through the
-    /// send pacer when enabled. Blocking on the encoder thread here is OK
-    /// — it naturally applies back-pressure if the link is slower than
-    /// the configured target bitrate, instead of drowning the kernel UDP
-    /// buffer with bursts of packets.
-    /// </summary>
-    private void DispatchEncoded(uint duration, byte[] bytes, TimeSpan contentTs)
-    {
-        if (_pacer is not null)
-        {
-            while (!_pacer.TryConsume(bytes.Length))
-            {
-                var wait = _pacer.EstimateWaitFor(bytes.Length);
-                if (wait == TimeSpan.MaxValue)
-                {
-                    // Frame bigger than burst capacity — pass through rather
-                    // than block forever. Means the operator's SendPacerBurstFactor
-                    // is lower than their biggest keyframe; flag it in the log
-                    // but don't break the stream.
-                    break;
-                }
-                // Cap each sleep at 50ms so that on a drastically-mistuned
-                // pacer (e.g. bitrate set way below reality) we don't wedge
-                // the encoder thread — we'll re-check the bucket and likely
-                // pass through on the next iteration.
-                var sleep = wait > TimeSpan.FromMilliseconds(50) ? TimeSpan.FromMilliseconds(50) : wait;
-                Thread.Sleep(sleep);
-            }
-        }
-        _onEncoded(duration, bytes, contentTs);
     }
 
     /// <summary>Total frames that reached the encoder since <see cref="Start"/>.</summary>
@@ -395,7 +337,7 @@ public sealed class CaptureStreamer : IDisposable
         // what the receiver's PTS-based pacer actually needs.
         var contentTs = encoded.Value.Timestamp;
         var duration = ComputeDurationRtpUnits(contentTs);
-        DispatchEncoded(duration, encoded.Value.Bytes, contentTs);
+        _onEncoded(duration, encoded.Value.Bytes, contentTs);
 
         LogGpuTiming(timingStart);
     }
@@ -585,7 +527,7 @@ public sealed class CaptureStreamer : IDisposable
 
         var contentTs = encoded.Value.Timestamp;
         var duration = ComputeDurationRtpUnits(contentTs);
-        DispatchEncoded(duration, encoded.Value.Bytes, contentTs);
+        _onEncoded(duration, encoded.Value.Bytes, contentTs);
     }
 
     private uint ComputeDurationRtpUnits(TimeSpan frameTimestamp)
@@ -670,7 +612,7 @@ public sealed class CaptureStreamer : IDisposable
             EncodedByteCount += frame.Bytes.Length;
 
             var duration = ComputeDurationRtpUnits(frame.Timestamp);
-            DispatchEncoded(duration, frame.Bytes, frame.Timestamp);
+            _onEncoded(duration, frame.Bytes, frame.Timestamp);
         }
     }
 

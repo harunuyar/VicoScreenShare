@@ -96,23 +96,6 @@ public sealed class VideoSettings
     /// </summary>
     public int NackHistoryPackets { get; set; } = 128;
 
-    /// <summary>
-    /// Master switch for the send-side pacer. When on, the
-    /// <see cref="CaptureStreamer"/> releases encoded frames to the RTP
-    /// transport at a paced rate capped at
-    /// <see cref="TargetBitrate"/> × <see cref="SendPacerBurstFactor"/> so
-    /// a keyframe doesn't fire hundreds of UDP packets into a kernel buffer
-    /// faster than the link can drain. Default on.
-    /// </summary>
-    public bool EnableSendPacer { get; set; } = true;
-
-    /// <summary>
-    /// Multiplier applied to <see cref="TargetBitrate"/> to compute the
-    /// pacer's burst capacity. 1.5 = allow up to 1.5 seconds of bitrate
-    /// to burst before the pacer throttles. Larger = more tolerance for
-    /// keyframes, less effective smoothing. Range is <c>[0.25, 10.0]</c>.
-    /// </summary>
-    public double SendPacerBurstFactor { get; set; } = 1.5;
 }
 
 /// <summary>
