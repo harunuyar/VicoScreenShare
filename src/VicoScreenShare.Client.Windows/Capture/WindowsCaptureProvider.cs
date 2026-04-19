@@ -2,9 +2,9 @@ namespace VicoScreenShare.Client.Windows.Capture;
 
 using System;
 using System.Threading.Tasks;
+using global::Windows.Graphics.Capture;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Windows.Direct3D;
-using global::Windows.Graphics.Capture;
 
 /// <summary>
 /// <see cref="ICaptureProvider"/> backed by <c>Windows.Graphics.Capture</c>. Shows
@@ -47,7 +47,10 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
 
     public async Task<ICaptureSource?> PickSourceAsync(int targetFrameRate)
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(WindowsCaptureProvider));
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(WindowsCaptureProvider));
+        }
 
         if (!GraphicsCaptureSession.IsSupported())
         {
@@ -61,14 +64,21 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
         CapturePickerInterop.InitializeWithWindow(picker, _hwndProvider());
 
         var item = await picker.PickSingleItemAsync();
-        if (item is null) return null;
+        if (item is null)
+        {
+            return null;
+        }
 
         return new WindowsCaptureSource(item, _devices, targetFrameRate);
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         if (_ownsDevices)
         {

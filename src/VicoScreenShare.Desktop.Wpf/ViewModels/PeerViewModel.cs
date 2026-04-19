@@ -54,7 +54,11 @@ public sealed partial class PeerViewModel : ObservableObject
 
     private static string GetInitials(string name)
     {
-        if (string.IsNullOrWhiteSpace(name)) return "?";
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "?";
+        }
+
         var trimmed = name.Trim();
         // Grab the first letter, and the first letter of the next word
         // if there is one. "Harun" → "H", "Harun K" → "HK".

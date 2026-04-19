@@ -43,7 +43,10 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_factory is not null) await _factory.DisposeAsync();
+        if (_factory is not null)
+        {
+            await _factory.DisposeAsync();
+        }
     }
 
     [Fact]
@@ -232,7 +235,11 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                 while (socket.State == WebSocketState.Open)
                 {
                     var res = await socket.ReceiveAsync(buf, context.RequestAborted);
-                    if (res.MessageType == WebSocketMessageType.Close) break;
+                    if (res.MessageType == WebSocketMessageType.Close)
+                    {
+                        break;
+                    }
+
                     if (!helloReceived)
                     {
                         helloReceived = true;
@@ -277,7 +284,11 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                 while (socket.State == WebSocketState.Open)
                 {
                     var res = await socket.ReceiveAsync(buf, context.RequestAborted);
-                    if (res.MessageType == WebSocketMessageType.Close) break;
+                    if (res.MessageType == WebSocketMessageType.Close)
+                    {
+                        break;
+                    }
+
                     framesReceived++;
                     if (framesReceived == 2)
                     {
@@ -350,7 +361,11 @@ public sealed class SignalingClientLifecycleTests : IAsyncLifetime
                 while (socket.State == WebSocketState.Open)
                 {
                     var res = await socket.ReceiveAsync(buf, context.RequestAborted);
-                    if (res.MessageType == WebSocketMessageType.Close) break;
+                    if (res.MessageType == WebSocketMessageType.Close)
+                    {
+                        break;
+                    }
+
                     framesReceived++;
                     if (framesReceived == 2)
                     {

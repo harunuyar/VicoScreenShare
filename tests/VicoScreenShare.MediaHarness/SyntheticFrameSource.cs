@@ -57,7 +57,11 @@ internal sealed class SyntheticFrameSource : ICaptureSource
 
     public Task StartAsync()
     {
-        if (_thread is not null || _disposed) return Task.CompletedTask;
+        if (_thread is not null || _disposed)
+        {
+            return Task.CompletedTask;
+        }
+
         _thread = new Thread(RunPumpLoop)
         {
             IsBackground = true,
@@ -77,7 +81,11 @@ internal sealed class SyntheticFrameSource : ICaptureSource
 
     public ValueTask DisposeAsync()
     {
-        if (_disposed) return ValueTask.CompletedTask;
+        if (_disposed)
+        {
+            return ValueTask.CompletedTask;
+        }
+
         _disposed = true;
         StopAsync().GetAwaiter().GetResult();
         _cts.Dispose();

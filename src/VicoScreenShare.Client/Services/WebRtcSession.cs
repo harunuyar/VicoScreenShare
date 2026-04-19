@@ -4,10 +4,10 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
-using VicoScreenShare.Client.Media.Codecs;
-using VicoScreenShare.Protocol.Messages;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using VicoScreenShare.Client.Media.Codecs;
+using VicoScreenShare.Protocol.Messages;
 
 /// <summary>
 /// Client-side wrapper around a single <see cref="RTCPeerConnection"/> plus the
@@ -106,7 +106,10 @@ public sealed class WebRtcSession : IAsyncDisposable
         {
             // Only the main-PC answer completes this task; subscriber-PC answers
             // never flow back to the client (client is the answerer there).
-            if (string.IsNullOrEmpty(a.SubscriptionId)) answerTcs.TrySetResult(a.Sdp);
+            if (string.IsNullOrEmpty(a.SubscriptionId))
+            {
+                answerTcs.TrySetResult(a.Sdp);
+            }
         }
         _signaling.SdpAnswerReceived += OnAnswer;
         _pc.onconnectionstatechange += OnPcStateChanged;
@@ -150,7 +153,11 @@ public sealed class WebRtcSession : IAsyncDisposable
         lock (_candidateLock)
         {
             _remoteDescriptionApplied = true;
-            if (_pendingRemoteCandidates.Count == 0) return;
+            if (_pendingRemoteCandidates.Count == 0)
+            {
+                return;
+            }
+
             toFlush = new List<string>(_pendingRemoteCandidates);
             _pendingRemoteCandidates.Clear();
         }
@@ -163,7 +170,11 @@ public sealed class WebRtcSession : IAsyncDisposable
 
     private void OnLocalIceCandidate(RTCIceCandidate candidate)
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         try
         {
             var json = candidate.toJSON();
@@ -174,10 +185,16 @@ public sealed class WebRtcSession : IAsyncDisposable
 
     private void OnRemoteIceCandidate(IceCandidate ice)
     {
-        if (_disposed || ice is null || string.IsNullOrWhiteSpace(ice.Candidate)) return;
+        if (_disposed || ice is null || string.IsNullOrWhiteSpace(ice.Candidate))
+        {
+            return;
+        }
 
         // Main PC only consumes candidates tagged for the main PC (null id).
-        if (!string.IsNullOrEmpty(ice.SubscriptionId)) return;
+        if (!string.IsNullOrEmpty(ice.SubscriptionId))
+        {
+            return;
+        }
 
         lock (_candidateLock)
         {
@@ -209,7 +226,11 @@ public sealed class WebRtcSession : IAsyncDisposable
     /// <summary>Exposed for tests so they can assert the buffer drained as expected.</summary>
     internal int PendingRemoteCandidateCount
     {
-        get { lock (_candidateLock) return _pendingRemoteCandidates.Count; }
+        get { lock (_candidateLock)
+            {
+                return _pendingRemoteCandidates.Count;
+            }
+        }
     }
 
     private void OnPcStateChanged(RTCPeerConnectionState state)
@@ -231,7 +252,11 @@ public sealed class WebRtcSession : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
-        if (_disposed) return ValueTask.CompletedTask;
+        if (_disposed)
+        {
+            return ValueTask.CompletedTask;
+        }
+
         _disposed = true;
 
         _signaling.IceCandidateReceived -= OnRemoteIceCandidate;

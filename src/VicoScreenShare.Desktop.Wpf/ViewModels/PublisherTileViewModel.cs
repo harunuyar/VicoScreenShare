@@ -105,10 +105,19 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
         _lastFrameUtc = DateTime.UtcNow;
 
         // Fast path — already Active, nothing to flip.
-        if (HasFirstFrame && !IsPaused) return;
+        if (HasFirstFrame && !IsPaused)
+        {
+            return;
+        }
 
-        if (_dispatcher.CheckAccess()) EnterActive();
-        else _dispatcher.BeginInvoke(new Action(EnterActive));
+        if (_dispatcher.CheckAccess())
+        {
+            EnterActive();
+        }
+        else
+        {
+            _dispatcher.BeginInvoke(new Action(EnterActive));
+        }
     }
 
     private void EnterActive()
@@ -119,7 +128,10 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
 
     private void OnStaleTick()
     {
-        if (_lastFrameUtc == DateTime.MinValue) return;
+        if (_lastFrameUtc == DateTime.MinValue)
+        {
+            return;
+        }
 
         var gap = DateTime.UtcNow - _lastFrameUtc;
         if (HasFirstFrame && !IsPaused && gap >= PauseAfter)
@@ -170,7 +182,11 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
 
         _staleTimer.Stop();

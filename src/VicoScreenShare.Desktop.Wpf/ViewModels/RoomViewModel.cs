@@ -13,8 +13,8 @@ using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
-using VicoScreenShare.Client.Windows.Media.Codecs;
 using VicoScreenShare.Client.Services;
+using VicoScreenShare.Client.Windows.Media.Codecs;
 using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
@@ -160,7 +160,10 @@ public sealed partial class RoomViewModel : ViewModelBase
         foreach (var p in initial.Peers)
         {
             var vm = Peers.FirstOrDefault(x => x.PeerId == p.PeerId);
-            if (vm is not null) vm.IsStreaming = p.IsStreaming;
+            if (vm is not null)
+            {
+                vm.IsStreaming = p.IsStreaming;
+            }
         }
 
         _ = StartWebRtcAsync();
@@ -170,7 +173,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void SetPeerStreaming(Guid peerId, bool streaming)
     {
         var vm = Peers.FirstOrDefault(p => p.PeerId == peerId);
-        if (vm is not null) vm.IsStreaming = streaming;
+        if (vm is not null)
+        {
+            vm.IsStreaming = streaming;
+        }
     }
 
     /// <summary>
@@ -182,7 +188,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     private async Task StopWatchingAsync(Guid publisherPeerId)
     {
         var peer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
-        if (peer is not null) peer.IsWatching = false;
+        if (peer is not null)
+        {
+            peer.IsWatching = false;
+        }
 
         try
         {
@@ -208,7 +217,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     private async Task WatchAsync(Guid publisherPeerId)
     {
         var peer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
-        if (peer is not null) peer.IsWatching = true;
+        if (peer is not null)
+        {
+            peer.IsWatching = true;
+        }
 
         try
         {
@@ -324,7 +336,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             // Pick a default focus target — the first tile in the collection.
             var first = Tiles.FirstOrDefault();
-            if (first is null) return; // nothing to focus, stay in Grid
+            if (first is null)
+            {
+                return; // nothing to focus, stay in Grid
+            }
+
             FocusedPublisherPeerId = first.PublisherPeerId;
             CurrentLayout = RoomLayout.Focus;
         }
@@ -436,7 +452,11 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private async Task StartWebRtcAsync()
     {
-        if (_negotiationStarted) return;
+        if (_negotiationStarted)
+        {
+            return;
+        }
+
         _negotiationStarted = true;
 
         WebRtcSession? session = null;
@@ -474,8 +494,15 @@ public sealed partial class RoomViewModel : ViewModelBase
     /// </summary>
     private void OnSdpOfferReceived(SdpOffer offer)
     {
-        if (string.IsNullOrEmpty(offer.SubscriptionId)) return;
-        if (!Guid.TryParseExact(offer.SubscriptionId, "N", out var publisherPeerId)) return;
+        if (string.IsNullOrEmpty(offer.SubscriptionId))
+        {
+            return;
+        }
+
+        if (!Guid.TryParseExact(offer.SubscriptionId, "N", out var publisherPeerId))
+        {
+            return;
+        }
 
         // Fire-and-forget: setRemoteDescription / createAnswer / send happens on
         // a background task; UI state transitions are dispatched back.
@@ -549,7 +576,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     [RelayCommand]
     private async Task ShareScreenAsync()
     {
-        if (IsSharing || _captureProvider is null || _webRtc is null) return;
+        if (IsSharing || _captureProvider is null || _webRtc is null)
+        {
+            return;
+        }
 
         ICaptureSource? source = null;
         try
@@ -714,7 +744,11 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         _dispatcher.BeginInvoke(new Action(() =>
         {
-            if (Peers.Any(p => p.PeerId == peer.PeerId)) return;
+            if (Peers.Any(p => p.PeerId == peer.PeerId))
+            {
+                return;
+            }
+
             Peers.Add(new PeerViewModel(peer.PeerId, peer.DisplayName, peer.PeerId == YourPeerId));
         }));
     }
@@ -724,7 +758,10 @@ public sealed partial class RoomViewModel : ViewModelBase
         _dispatcher.BeginInvoke(new Action(async () =>
         {
             var existing = Peers.FirstOrDefault(p => p.PeerId == peerId);
-            if (existing is not null) Peers.Remove(existing);
+            if (existing is not null)
+            {
+                Peers.Remove(existing);
+            }
 
             // Dispose the tile (and its subscription) for this peer if any.
             await DisposeTileAsync(peerId).ConfigureAwait(true);
@@ -744,9 +781,16 @@ public sealed partial class RoomViewModel : ViewModelBase
             // across stream sessions, so even if the user previously Stop
             // Watching'd this peer, a new share brings them back.
             var peer = Peers.FirstOrDefault(p => p.PeerId == message.PeerId);
-            if (peer is not null) peer.IsWatching = true;
+            if (peer is not null)
+            {
+                peer.IsWatching = true;
+            }
 
-            if (message.PeerId == YourPeerId) return;
+            if (message.PeerId == YourPeerId)
+            {
+                return;
+            }
+
             var fps = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
             _announcedFrameRates[message.PeerId] = fps;
 
@@ -780,7 +824,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         PublisherTileViewModel? tile;
         tile = Tiles.FirstOrDefault(t => t.PublisherPeerId == publisherPeerId);
-        if (tile is null) return;
+        if (tile is null)
+        {
+            return;
+        }
 
         Tiles.Remove(tile);
         try { await tile.DisposeAsync().ConfigureAwait(true); } catch { }
@@ -798,7 +845,11 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private void StartStatsTimer()
     {
-        if (_statsTimer is not null) return;
+        if (_statsTimer is not null)
+        {
+            return;
+        }
+
         _statsPrevTickUtc = DateTime.UtcNow;
         _statsTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
         {
@@ -827,7 +878,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     private string BuildOutgoingStats(double elapsedSeconds)
     {
         var streamer = _captureStreamer;
-        if (streamer is null) return "not sharing";
+        if (streamer is null)
+        {
+            return "not sharing";
+        }
 
         var currentFrames = streamer.EncodedFrameCount;
         var currentBytes = streamer.EncodedByteCount;
@@ -855,13 +909,20 @@ public sealed partial class RoomViewModel : ViewModelBase
 
     private string BuildIncomingStats(double elapsedSeconds)
     {
-        if (Tiles.Count == 0) return "no incoming stream";
+        if (Tiles.Count == 0)
+        {
+            return "no incoming stream";
+        }
 
         var sb = new System.Text.StringBuilder();
         foreach (var tile in Tiles)
         {
             tile.UpdateStats(elapsedSeconds);
-            if (sb.Length > 0) sb.Append("\n\n");
+            if (sb.Length > 0)
+            {
+                sb.Append("\n\n");
+            }
+
             sb.Append(tile.DisplayName).Append(":\n").Append(tile.Stats);
         }
         return sb.ToString();
@@ -875,7 +936,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     private void OnConnectionLost(string? reason)
     {
         // Don't kick off a reconnect if the user is on their way out.
-        if (_leavingIntentionally) return;
+        if (_leavingIntentionally)
+        {
+            return;
+        }
 
         _dispatcher.BeginInvoke(new Action(async () =>
         {
@@ -950,7 +1014,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         _dispatcher.BeginInvoke(new Action(() =>
         {
             var peer = Peers.FirstOrDefault(p => p.PeerId == state.PeerId);
-            if (peer is null) return;
+            if (peer is null)
+            {
+                return;
+            }
+
             peer.IsConnected = state.IsConnected;
         }));
     }
@@ -1156,7 +1224,10 @@ public sealed partial class RoomViewModel : ViewModelBase
     /// </summary>
     private async Task RestoreSharingAfterResumeAsync()
     {
-        if (_webRtc is null || _localCaptureSource is null) return;
+        if (_webRtc is null || _localCaptureSource is null)
+        {
+            return;
+        }
 
         try
         {

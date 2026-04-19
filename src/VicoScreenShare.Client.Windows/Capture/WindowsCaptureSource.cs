@@ -3,14 +3,14 @@ namespace VicoScreenShare.Client.Windows.Capture;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using global::Windows.Graphics;
+using global::Windows.Graphics.Capture;
+using global::Windows.Graphics.DirectX;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Windows.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
-using global::Windows.Graphics;
-using global::Windows.Graphics.Capture;
-using global::Windows.Graphics.DirectX;
 
 /// <summary>
 /// Windows.Graphics.Capture-backed implementation of <see cref="ICaptureSource"/>.
@@ -215,11 +215,19 @@ public sealed class WindowsCaptureSource : ICaptureSource
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         await StopAsync().ConfigureAwait(false);
         lock (_frameLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
+
             _disposed = true;
             _stagingTexture?.Dispose();
             _stagingTexture = null;
@@ -243,10 +251,16 @@ public sealed class WindowsCaptureSource : ICaptureSource
         // the contention it adds to shutdown is negligible (sub-millisecond).
         lock (_frameLock)
         {
-            if (_disposed || _framePool is null) return;
+            if (_disposed || _framePool is null)
+            {
+                return;
+            }
 
             using var frame = sender.TryGetNextFrame();
-            if (frame is null) return;
+            if (frame is null)
+            {
+                return;
+            }
 
             ProcessFrameLocked(sender, frame);
         }
@@ -256,7 +270,10 @@ public sealed class WindowsCaptureSource : ICaptureSource
     {
         var width = frame.ContentSize.Width;
         var height = frame.ContentSize.Height;
-        if (width <= 0 || height <= 0) return;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
 
         Interlocked.Increment(ref _wgcFrameCount);
 
@@ -298,7 +315,11 @@ public sealed class WindowsCaptureSource : ICaptureSource
         }
 
         var texPtr = Direct3D11Interop.GetD3D11Texture2DFromSurface(frame.Surface);
-        if (texPtr == IntPtr.Zero) return;
+        if (texPtr == IntPtr.Zero)
+        {
+            return;
+        }
+
         using var sourceTexture = new ID3D11Texture2D(texPtr);
 
         // Snapshot the WGC surface into a persistent texture BEFORE
@@ -312,7 +333,11 @@ public sealed class WindowsCaptureSource : ICaptureSource
         // stream before any command the handler queues later, so the
         // snapshot is stable for the entire handler lifetime.
         EnsureSnapshotTexture(width, height);
-        if (_snapshotTexture is null) return;
+        if (_snapshotTexture is null)
+        {
+            return;
+        }
+
         _devices.Context.CopyResource(_snapshotTexture, sourceTexture);
 
         var textureHandler = TextureArrived;
@@ -356,7 +381,10 @@ public sealed class WindowsCaptureSource : ICaptureSource
                     _snapshotTexture.Release();
                 }
             }
-            if (dispatched) Interlocked.Increment(ref _dispatchedFrameCount);
+            if (dispatched)
+            {
+                Interlocked.Increment(ref _dispatchedFrameCount);
+            }
         }
 
         // CPU readback path for subscribers that want BGRA bytes. Still

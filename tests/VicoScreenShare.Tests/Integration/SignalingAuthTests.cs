@@ -131,7 +131,11 @@ public sealed class SignalingAuthTests
     private static async Task<MessageEnvelope> ExpectAsync(WebSocket socket, CancellationToken ct)
     {
         var env = await ReceiveAsync(socket, ct);
-        if (env is null) throw new InvalidOperationException("Socket closed unexpectedly");
+        if (env is null)
+        {
+            throw new InvalidOperationException("Socket closed unexpectedly");
+        }
+
         return env;
     }
 
@@ -150,7 +154,11 @@ public sealed class SignalingAuthTests
             {
                 return null;
             }
-            if (result.MessageType == WebSocketMessageType.Close) return null;
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                return null;
+            }
+
             ms.Write(buffer, 0, result.Count);
             if (result.EndOfMessage)
             {

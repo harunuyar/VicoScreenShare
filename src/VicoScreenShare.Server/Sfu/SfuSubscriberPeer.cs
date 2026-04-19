@@ -79,7 +79,11 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
     /// </summary>
     public void SendForwardedRtp(SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         try
         {
             _pc.SendRtpRaw(
@@ -125,7 +129,10 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
 
     public void AddRemoteIceCandidate(string candidateJson)
     {
-        if (string.IsNullOrWhiteSpace(candidateJson)) return;
+        if (string.IsNullOrWhiteSpace(candidateJson))
+        {
+            return;
+        }
 
         lock (_candidateLock)
         {
@@ -164,7 +171,11 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         lock (_candidateLock)
         {
             _remoteDescriptionApplied = true;
-            if (_pendingRemoteCandidates.Count == 0) return;
+            if (_pendingRemoteCandidates.Count == 0)
+            {
+                return;
+            }
+
             toFlush = new List<string>(_pendingRemoteCandidates);
             _pendingRemoteCandidates.Clear();
         }
@@ -180,7 +191,10 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         try
         {
             var init = JsonSerializer.Deserialize<RTCIceCandidateInit>(candidateJson);
-            if (init is not null) _pc.addIceCandidate(init);
+            if (init is not null)
+            {
+                _pc.addIceCandidate(init);
+            }
         }
         catch (Exception ex)
         {
@@ -191,7 +205,11 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
-        if (_disposed) return ValueTask.CompletedTask;
+        if (_disposed)
+        {
+            return ValueTask.CompletedTask;
+        }
+
         _disposed = true;
 
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }

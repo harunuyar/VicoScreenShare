@@ -140,7 +140,11 @@ public sealed class CaptureStreamer : IDisposable
 
     public void Start()
     {
-        if (_attached || _disposed) return;
+        if (_attached || _disposed)
+        {
+            return;
+        }
+
         _attached = true;
         _timingLogFrames = 0;
         _diagnosticFrames = 0;
@@ -167,7 +171,11 @@ public sealed class CaptureStreamer : IDisposable
 
     public void Stop()
     {
-        if (!_attached) return;
+        if (!_attached)
+        {
+            return;
+        }
+
         _attached = false;
         if (_usingTexturePath)
         {
@@ -258,7 +266,10 @@ public sealed class CaptureStreamer : IDisposable
         SourceHeight = height;
         var sourceWidth = width & ~1;
         var sourceHeight = height & ~1;
-        if (sourceWidth <= 0 || sourceHeight <= 0) return;
+        if (sourceWidth <= 0 || sourceHeight <= 0)
+        {
+            return;
+        }
 
         int encWidth, encHeight;
         if (_targetHeight == 0 || _targetHeight >= sourceHeight)
@@ -271,7 +282,10 @@ public sealed class CaptureStreamer : IDisposable
             encHeight = _targetHeight & ~1;
             var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
             encWidth = derivedWidth & ~1;
-            if (encWidth < 2) encWidth = 2;
+            if (encWidth < 2)
+            {
+                encWidth = 2;
+            }
         }
 
         if (_diagnosticFrames < 3)
@@ -284,7 +298,10 @@ public sealed class CaptureStreamer : IDisposable
         EncodedFrame? encoded;
         lock (_encodeLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
 
             FrameCount++;
 
@@ -298,7 +315,10 @@ public sealed class CaptureStreamer : IDisposable
             // If the encoder is async with an external output drain
             // (OutputAvailable event), encoded output is dispatched
             // from the pump thread, not here. Skip inline dispatch.
-            if (_asyncOutput is not null) encoded = null;
+            if (_asyncOutput is not null)
+            {
+                encoded = null;
+            }
 
             if (encoded is null || encoded.Value.Bytes.Length == 0)
             {
@@ -324,7 +344,11 @@ public sealed class CaptureStreamer : IDisposable
 
     private void LogGpuTiming(long timingStart)
     {
-        if (timingStart == 0) return;
+        if (timingStart == 0)
+        {
+            return;
+        }
+
         var encodeEnd = Stopwatch.GetTimestamp();
         _timingLogFrames++;
         var ticksPerMs = Stopwatch.Frequency / 1000.0;
@@ -334,7 +358,10 @@ public sealed class CaptureStreamer : IDisposable
 
     private void OnFrameArrived(in CaptureFrameData frame)
     {
-        if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
+        if (frame.Format != CaptureFramePixelFormat.Bgra8)
+        {
+            return;
+        }
 
         // Inter-arrival diagnostic: how often does the framepool actually hand
         // us a frame, before any throttling? If this is wider than the target
@@ -367,7 +394,10 @@ public sealed class CaptureStreamer : IDisposable
         SourceHeight = frame.Height;
         var sourceWidth = frame.Width & ~1;
         var sourceHeight = frame.Height & ~1;
-        if (sourceWidth <= 0 || sourceHeight <= 0) return;
+        if (sourceWidth <= 0 || sourceHeight <= 0)
+        {
+            return;
+        }
 
         // Decide the encoder target. The user picks a target height; width is
         // derived from the source aspect ratio at runtime so the output never
@@ -383,7 +413,10 @@ public sealed class CaptureStreamer : IDisposable
             encHeight = _targetHeight & ~1;
             var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
             encWidth = derivedWidth & ~1;
-            if (encWidth < 2) encWidth = 2;
+            if (encWidth < 2)
+            {
+                encWidth = 2;
+            }
         }
 
         // Compact the source into a packed BGRA buffer first.
@@ -459,7 +492,10 @@ public sealed class CaptureStreamer : IDisposable
         EncodedFrame? encoded;
         lock (_encodeLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
 
             FrameCount++;
 
@@ -475,7 +511,10 @@ public sealed class CaptureStreamer : IDisposable
 
             encoded = _encoder!.EncodeBgra(encoderInput, encoderStrideBytes, timestamp);
 
-            if (_asyncOutput is not null) encoded = null;
+            if (_asyncOutput is not null)
+            {
+                encoded = null;
+            }
 
             if (encoded is null || encoded.Value.Bytes.Length == 0)
             {
@@ -506,8 +545,16 @@ public sealed class CaptureStreamer : IDisposable
             return rtpClockRateHz / 60;
         }
         var rtpUnits = (long)(elapsed.TotalSeconds * rtpClockRateHz);
-        if (rtpUnits <= 0) rtpUnits = rtpClockRateHz / 60;
-        if (rtpUnits > rtpClockRateHz) rtpUnits = rtpClockRateHz;
+        if (rtpUnits <= 0)
+        {
+            rtpUnits = rtpClockRateHz / 60;
+        }
+
+        if (rtpUnits > rtpClockRateHz)
+        {
+            rtpUnits = rtpClockRateHz;
+        }
+
         return (uint)rtpUnits;
     }
 
@@ -549,11 +596,17 @@ public sealed class CaptureStreamer : IDisposable
     /// </summary>
     private void OnAsyncEncoderOutput()
     {
-        if (_disposed || _asyncOutput is null) return;
+        if (_disposed || _asyncOutput is null)
+        {
+            return;
+        }
 
         while (_asyncOutput.TryDequeueEncoded(out var frame))
         {
-            if (frame.Bytes is null || frame.Bytes.Length == 0) continue;
+            if (frame.Bytes is null || frame.Bytes.Length == 0)
+            {
+                continue;
+            }
 
             EncodedFrameCount++;
             EncodedByteCount += frame.Bytes.Length;
@@ -572,7 +625,11 @@ public sealed class CaptureStreamer : IDisposable
     /// </summary>
     public void RequestKeyframe()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         try { _encoder?.RequestKeyframe(); } catch { }
     }
 
@@ -581,7 +638,11 @@ public sealed class CaptureStreamer : IDisposable
         Stop();
         lock (_encodeLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
+
             _disposed = true;
             if (_asyncOutput is not null)
             {

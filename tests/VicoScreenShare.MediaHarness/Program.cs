@@ -155,8 +155,15 @@ internal static class Program
 
             var encodeMs = (encEnd - encStart) * 1000.0 / Stopwatch.Frequency;
             encodeMsTotal += encodeMs;
-            if (encodeMs > encodeMsMax) encodeMsMax = encodeMs;
-            if (encodeMs < encodeMsMin) encodeMsMin = encodeMs;
+            if (encodeMs > encodeMsMax)
+            {
+                encodeMsMax = encodeMs;
+            }
+
+            if (encodeMs < encodeMsMin)
+            {
+                encodeMsMin = encodeMs;
+            }
 
             if (encoded is { Bytes.Length: > 0 })
             {
@@ -301,8 +308,15 @@ internal static class Program
 
             var encodeMs = (encEnd - encStart) * 1000.0 / Stopwatch.Frequency;
             encodeMsTotal += encodeMs;
-            if (encodeMs > encodeMsMax) encodeMsMax = encodeMs;
-            if (encodeMs < encodeMsMin) encodeMsMin = encodeMs;
+            if (encodeMs > encodeMsMax)
+            {
+                encodeMsMax = encodeMs;
+            }
+
+            if (encodeMs < encodeMsMin)
+            {
+                encodeMsMin = encodeMs;
+            }
 
             if (encoded is { Bytes.Length: > 0 })
             {
@@ -463,7 +477,11 @@ internal static class Program
         var actualBitrateMbps = (encodedByteCount * 8.0 / elapsedSec) / 1_000_000.0;
 
         double[] sortedGaps;
-        lock (arrivalLock) sortedGaps = arrivalGaps.OrderBy(g => g).ToArray();
+        lock (arrivalLock)
+        {
+            sortedGaps = arrivalGaps.OrderBy(g => g).ToArray();
+        }
+
         var p50 = Percentile(sortedGaps, 50);
         var p95 = Percentile(sortedGaps, 95);
         var p99 = Percentile(sortedGaps, 99);
@@ -862,11 +880,19 @@ internal static class Program
 
     private static double Percentile(double[] sortedValues, double percentile)
     {
-        if (sortedValues.Length == 0) return 0.0;
+        if (sortedValues.Length == 0)
+        {
+            return 0.0;
+        }
+
         var rank = (percentile / 100.0) * (sortedValues.Length - 1);
         var lo = (int)Math.Floor(rank);
         var hi = (int)Math.Ceiling(rank);
-        if (lo == hi) return sortedValues[lo];
+        if (lo == hi)
+        {
+            return sortedValues[lo];
+        }
+
         var frac = rank - lo;
         return sortedValues[lo] * (1 - frac) + sortedValues[hi] * frac;
     }
@@ -889,7 +915,10 @@ internal static class Program
 
         var src = new byte[srcWidth * srcHeight * 4];
         var dst = new byte[dstWidth * dstHeight * 4];
-        for (var i = 0; i < src.Length; i++) src[i] = (byte)(i & 0xFF);
+        for (var i = 0; i < src.Length; i++)
+        {
+            src[i] = (byte)(i & 0xFF);
+        }
 
         for (var w = 0; w < 5; w++)
         {
@@ -906,8 +935,15 @@ internal static class Program
             var end = Stopwatch.GetTimestamp();
             var ms = (end - start) * 1000.0 / Stopwatch.Frequency;
             totalMs += ms;
-            if (ms > maxMs) maxMs = ms;
-            if (ms < minMs) minMs = ms;
+            if (ms > maxMs)
+            {
+                maxMs = ms;
+            }
+
+            if (ms < minMs)
+            {
+                minMs = ms;
+            }
         }
 
         var avgMs = totalMs / iterations;
@@ -953,7 +989,10 @@ internal static class Program
         // Source texture filled with a noise pattern so the Video Processor
         // has something non-trivial to filter.
         var srcBytes = new byte[srcWidth * srcHeight * 4];
-        for (var i = 0; i < srcBytes.Length; i++) srcBytes[i] = (byte)(i & 0xFF);
+        for (var i = 0; i < srcBytes.Length; i++)
+        {
+            srcBytes[i] = (byte)(i & 0xFF);
+        }
 
         var srcDesc = new Texture2DDescription
         {
@@ -1030,8 +1069,15 @@ internal static class Program
             var end = Stopwatch.GetTimestamp();
             var ms = (end - start) * 1000.0 / Stopwatch.Frequency;
             totalMs += ms;
-            if (ms < minMs) minMs = ms;
-            if (ms > maxMs) maxMs = ms;
+            if (ms < minMs)
+            {
+                minMs = ms;
+            }
+
+            if (ms > maxMs)
+            {
+                maxMs = ms;
+            }
         }
 
         var avgMs = totalMs / iterations;

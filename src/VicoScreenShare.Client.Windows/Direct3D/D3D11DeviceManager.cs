@@ -1,10 +1,10 @@
 namespace VicoScreenShare.Client.Windows.Direct3D;
 
 using System;
+using global::Windows.Graphics.DirectX.Direct3D11;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
-using global::Windows.Graphics.DirectX.Direct3D11;
 
 /// <summary>
 /// Owns the single D3D11 device that backs the capture pipeline. Exposes both the
@@ -24,7 +24,10 @@ public sealed class D3D11DeviceManager : IDisposable
 
     public void Initialize()
     {
-        if (_device is not null) return;
+        if (_device is not null)
+        {
+            return;
+        }
 
         // BgraSupport: WGC framepool + staging textures are BGRA.
         // VideoSupport: lets the device run a D3D11 Video Processor for
@@ -64,7 +67,11 @@ public sealed class D3D11DeviceManager : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
 
         // _winrtDevice is a managed WinRT wrapper; GC will release the COM ref.

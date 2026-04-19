@@ -6,11 +6,11 @@ using System.Text.Json;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
-using SIPSorcery.Net;
-using SIPSorceryMedia.Abstractions;
 
 /// <summary>
 /// Phase 3.1 coverage: prove the SFU handshake round-trip works. A client sends a
@@ -41,7 +41,10 @@ public sealed class SfuHandshakeTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_factory is not null) await _factory.DisposeAsync();
+        if (_factory is not null)
+        {
+            await _factory.DisposeAsync();
+        }
     }
 
     [Fact]
@@ -172,7 +175,11 @@ public sealed class SfuHandshakeTests : IAsyncLifetime
             {
                 throw new InvalidOperationException($"Socket closed while waiting for {type}");
             }
-            if (envelope.Type == type) return envelope;
+            if (envelope.Type == type)
+            {
+                return envelope;
+            }
+
             if (envelope.Type == MessageType.Error)
             {
                 var err = envelope.Payload.Deserialize<VicoScreenShare.Protocol.Messages.Error>(ProtocolJson.Options)!;
@@ -202,9 +209,16 @@ public sealed class SfuHandshakeTests : IAsyncLifetime
             {
                 return null;
             }
-            if (result.MessageType == WebSocketMessageType.Close) return null;
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                return null;
+            }
+
             ms.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage) break;
+            if (result.EndOfMessage)
+            {
+                break;
+            }
         }
         var json = Encoding.UTF8.GetString(ms.ToArray());
         return JsonSerializer.Deserialize<MessageEnvelope>(json, ProtocolJson.Options);

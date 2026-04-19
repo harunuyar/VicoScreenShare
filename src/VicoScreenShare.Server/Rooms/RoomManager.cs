@@ -91,8 +91,15 @@ public sealed class RoomManager
     /// </summary>
     public Room? BeginPeerGrace(string roomId, Guid peerId, Func<Task> onExpire)
     {
-        if (!_rooms.TryGetValue(roomId, out var room)) return null;
-        if (!room.TrySetPeerConnected(peerId, false)) return null;
+        if (!_rooms.TryGetValue(roomId, out var room))
+        {
+            return null;
+        }
+
+        if (!room.TrySetPeerConnected(peerId, false))
+        {
+            return null;
+        }
 
         var cts = new CancellationTokenSource();
         if (!_graceTimers.TryAdd(peerId, cts))

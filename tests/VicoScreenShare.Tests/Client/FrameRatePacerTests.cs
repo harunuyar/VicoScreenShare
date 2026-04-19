@@ -98,7 +98,10 @@ public class FrameRatePacerTests
         // Burst of 10 arrivals, 1 ms apart.
         for (var i = 0; i < 10; i++)
         {
-            if (pacer.ShouldAccept(TimeSpan.FromMilliseconds(i))) accepted++;
+            if (pacer.ShouldAccept(TimeSpan.FromMilliseconds(i)))
+            {
+                accepted++;
+            }
         }
 
         // The first frame always admits; subsequent 1-ms-apart frames

@@ -22,16 +22,31 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     // the popup's content.
     private void OnOverlayKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key != Key.Escape) return;
-        if (DataContext is INavigationHost nav) nav.CloseOverlay();
+        if (e.Key != Key.Escape)
+        {
+            return;
+        }
+
+        if (DataContext is INavigationHost nav)
+        {
+            nav.CloseOverlay();
+        }
+
         e.Handled = true;
     }
 
     // Click on the backdrop (outside the settings card) dismisses the overlay.
     private void OnOverlayBackdropMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ChangedButton != MouseButton.Left) return;
-        if (DataContext is INavigationHost nav) nav.CloseOverlay();
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        if (DataContext is INavigationHost nav)
+        {
+            nav.CloseOverlay();
+        }
     }
 
     // Card swallows the click so it doesn't bubble to the backdrop and
@@ -43,7 +58,10 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (DataContext is not NavigationService nav) return;
+        if (DataContext is not NavigationService nav)
+        {
+            return;
+        }
 
         var identity = new IdentityStore();
         var settingsStore = new SettingsStore();

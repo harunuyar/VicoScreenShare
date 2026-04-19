@@ -21,7 +21,11 @@ public static class I420ToBgra
         Span<byte> bgraDestination,
         int bgraStrideBytes)
     {
-        if (width <= 0 || height <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width));
+        }
+
         ArgumentOutOfRangeException.ThrowIfLessThan(bgraStrideBytes, width * 4);
         var chromaWidth = (width + 1) / 2;
         var chromaHeight = (height + 1) / 2;
@@ -56,9 +60,32 @@ public static class I420ToBgra
                 var g = yVal - ((22554 * uVal + 46802 * vVal) >> 16);
                 var b = yVal + ((116130 * uVal) >> 16);
 
-                if (r < 0) r = 0; else if (r > 255) r = 255;
-                if (g < 0) g = 0; else if (g > 255) g = 255;
-                if (b < 0) b = 0; else if (b > 255) b = 255;
+                if (r < 0)
+                {
+                    r = 0;
+                }
+                else if (r > 255)
+                {
+                    r = 255;
+                }
+
+                if (g < 0)
+                {
+                    g = 0;
+                }
+                else if (g > 255)
+                {
+                    g = 255;
+                }
+
+                if (b < 0)
+                {
+                    b = 0;
+                }
+                else if (b > 255)
+                {
+                    b = 255;
+                }
 
                 dstRow[x * 4 + 0] = (byte)b;
                 dstRow[x * 4 + 1] = (byte)g;

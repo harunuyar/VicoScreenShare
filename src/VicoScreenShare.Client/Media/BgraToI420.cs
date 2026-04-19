@@ -42,7 +42,11 @@ public static class BgraToI420
         int bgraStrideBytes,
         Span<byte> i420Destination)
     {
-        if (width <= 0 || height <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        if (width <= 0 || height <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(width));
+        }
+
         ArgumentOutOfRangeException.ThrowIfLessThan(bgraStrideBytes, width * 4);
         var required = RequiredOutputSize(width, height);
         if (i420Destination.Length < required)
@@ -69,8 +73,15 @@ public static class BgraToI420
                 var r = srcRow[x * 4 + 2];
                 // 16.16 fixed point: 0.299=19595, 0.587=38470, 0.114=7471 (total 65536)
                 var yVal = (19595 * r + 38470 * g + 7471 * b + 32768) >> 16;
-                if (yVal < 0) yVal = 0;
-                else if (yVal > 255) yVal = 255;
+                if (yVal < 0)
+                {
+                    yVal = 0;
+                }
+                else if (yVal > 255)
+                {
+                    yVal = 255;
+                }
+
                 dstRow[x] = (byte)yVal;
             }
         }
@@ -102,8 +113,23 @@ public static class BgraToI420
                 var uVal = ((-11059 * avgR - 21709 * avgG + 32768 * avgB + 8388608) >> 16);
                 var vVal = ((32768 * avgR - 27439 * avgG - 5329 * avgB + 8388608) >> 16);
 
-                if (uVal < 0) uVal = 0; else if (uVal > 255) uVal = 255;
-                if (vVal < 0) vVal = 0; else if (vVal > 255) vVal = 255;
+                if (uVal < 0)
+                {
+                    uVal = 0;
+                }
+                else if (uVal > 255)
+                {
+                    uVal = 255;
+                }
+
+                if (vVal < 0)
+                {
+                    vVal = 0;
+                }
+                else if (vVal > 255)
+                {
+                    vVal = 255;
+                }
 
                 uRow[cx] = (byte)uVal;
                 vRow[cx] = (byte)vVal;

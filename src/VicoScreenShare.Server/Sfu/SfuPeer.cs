@@ -105,7 +105,11 @@ public sealed class SfuPeer : IAsyncDisposable
     /// </summary>
     public void SendForwardedRtp(SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         try
         {
             _pc.SendRtpRaw(
@@ -192,7 +196,10 @@ public sealed class SfuPeer : IAsyncDisposable
     /// </summary>
     public void AddRemoteIceCandidate(string candidateJson)
     {
-        if (string.IsNullOrWhiteSpace(candidateJson)) return;
+        if (string.IsNullOrWhiteSpace(candidateJson))
+        {
+            return;
+        }
 
         lock (_candidateLock)
         {
@@ -245,12 +252,20 @@ public sealed class SfuPeer : IAsyncDisposable
     /// <summary>Exposed for tests so they can assert the buffer drained as expected.</summary>
     internal int PendingRemoteCandidateCount
     {
-        get { lock (_candidateLock) return _pendingRemoteCandidates.Count; }
+        get { lock (_candidateLock)
+            {
+                return _pendingRemoteCandidates.Count;
+            }
+        }
     }
 
     public ValueTask DisposeAsync()
     {
-        if (_disposed) return ValueTask.CompletedTask;
+        if (_disposed)
+        {
+            return ValueTask.CompletedTask;
+        }
+
         _disposed = true;
 
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }

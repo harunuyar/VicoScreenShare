@@ -4,11 +4,11 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Protocol.Messages;
-using SIPSorcery.Net;
-using SIPSorceryMedia.Abstractions;
 
 /// <summary>
 /// Client-side RecvOnly peer connection paired with one server
@@ -110,7 +110,11 @@ public sealed class SubscriberSession : IAsyncDisposable
 
     private void OnLocalIceCandidate(RTCIceCandidate candidate)
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         try
         {
             _ = _signaling.SendIceCandidateAsync(candidate.toJSON(), SubscriptionId);
@@ -120,8 +124,15 @@ public sealed class SubscriberSession : IAsyncDisposable
 
     private void OnRemoteIceCandidate(IceCandidate ice)
     {
-        if (_disposed || ice is null || string.IsNullOrWhiteSpace(ice.Candidate)) return;
-        if (!string.Equals(ice.SubscriptionId, SubscriptionId, StringComparison.Ordinal)) return;
+        if (_disposed || ice is null || string.IsNullOrWhiteSpace(ice.Candidate))
+        {
+            return;
+        }
+
+        if (!string.Equals(ice.SubscriptionId, SubscriptionId, StringComparison.Ordinal))
+        {
+            return;
+        }
 
         lock (_candidateLock)
         {
@@ -140,11 +151,18 @@ public sealed class SubscriberSession : IAsyncDisposable
         lock (_candidateLock)
         {
             _remoteDescriptionApplied = true;
-            if (_pendingRemoteCandidates.Count == 0) return;
+            if (_pendingRemoteCandidates.Count == 0)
+            {
+                return;
+            }
+
             toFlush = new List<string>(_pendingRemoteCandidates);
             _pendingRemoteCandidates.Clear();
         }
-        foreach (var c in toFlush) ApplyRemoteCandidateInternal(c);
+        foreach (var c in toFlush)
+        {
+            ApplyRemoteCandidateInternal(c);
+        }
     }
 
     private void ApplyRemoteCandidateInternal(string candidateJson)
@@ -152,14 +170,21 @@ public sealed class SubscriberSession : IAsyncDisposable
         try
         {
             var init = JsonSerializer.Deserialize<RTCIceCandidateInit>(candidateJson);
-            if (init is not null) _pc.addIceCandidate(init);
+            if (init is not null)
+            {
+                _pc.addIceCandidate(init);
+            }
         }
         catch { /* ignore malformed */ }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
 
         _signaling.IceCandidateReceived -= OnRemoteIceCandidate;

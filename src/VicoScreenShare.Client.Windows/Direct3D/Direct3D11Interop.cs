@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Runtime.InteropServices;
-using WinRT;
 using Windows.Graphics.DirectX.Direct3D11;
+using WinRT;
 
 namespace VicoScreenShare.Client.Windows.Direct3D;
 

@@ -52,7 +52,11 @@ public sealed class LayoutToVisibilityConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is null || parameter is null) return Visibility.Collapsed;
+        if (value is null || parameter is null)
+        {
+            return Visibility.Collapsed;
+        }
+
         return string.Equals(value.ToString(), parameter.ToString(), StringComparison.Ordinal)
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -163,7 +167,11 @@ public sealed class ServerStatusToBrushConverter : IValueConverter
 
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is not VicoScreenShare.Client.Services.ServerStatus status) return Pending;
+        if (value is not VicoScreenShare.Client.Services.ServerStatus status)
+        {
+            return Pending;
+        }
+
         return status switch
         {
             VicoScreenShare.Client.Services.ServerStatus.Online => Online,
@@ -185,7 +193,11 @@ public sealed class ServerStatusToTextConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is not VicoScreenShare.Client.Services.ServerStatus status) return "—";
+        if (value is not VicoScreenShare.Client.Services.ServerStatus status)
+        {
+            return "—";
+        }
+
         return status switch
         {
             VicoScreenShare.Client.Services.ServerStatus.Online => "Online",
@@ -212,7 +224,11 @@ public sealed class ViewModelToPageConverter : IValueConverter
 
     public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is null) return null;
+        if (value is null)
+        {
+            return null;
+        }
+
         return Map.TryGetValue(value.GetType(), out var factory) ? factory(value) : null;
     }
 

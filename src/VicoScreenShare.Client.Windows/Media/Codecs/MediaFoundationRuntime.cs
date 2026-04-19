@@ -44,7 +44,11 @@ public static class MediaFoundationRuntime
     {
         lock (_lock)
         {
-            if (_attempted) return;
+            if (_attempted)
+            {
+                return;
+            }
+
             _attempted = true;
 
             try

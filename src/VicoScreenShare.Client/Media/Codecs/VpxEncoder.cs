@@ -38,7 +38,10 @@ internal sealed class VpxEncoder : IVideoEncoder
 
     public EncodedFrame? EncodeBgra(byte[] bgra, int stride, TimeSpan inputTimestamp)
     {
-        if (_disposed) return null;
+        if (_disposed)
+        {
+            return null;
+        }
 
         // libvpx wants planar I420 input, so the BGRA-to-I420 conversion
         // happens here rather than on the capture thread. Buffer is reused
@@ -68,13 +71,21 @@ internal sealed class VpxEncoder : IVideoEncoder
         // VP8 is sync — whatever bytes come back correspond exactly to the
         // input we just submitted, so the content timestamp is the caller's
         // value verbatim.
-        if (bytes is null || bytes.Length == 0) return null;
+        if (bytes is null || bytes.Length == 0)
+        {
+            return null;
+        }
+
         return new EncodedFrame(bytes, inputTimestamp);
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         try { _encoder.Dispose(); } catch { }
     }

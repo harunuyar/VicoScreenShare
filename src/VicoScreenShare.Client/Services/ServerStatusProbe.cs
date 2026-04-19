@@ -58,10 +58,16 @@ public sealed class ServerStatusProbe
     /// </summary>
     public async Task<ProbeResult> ProbeAsync(Uri wsServerUri, bool hasSavedPassword, CancellationToken ct = default)
     {
-        if (wsServerUri is null) return new ProbeResult(ServerStatus.Offline);
+        if (wsServerUri is null)
+        {
+            return new ProbeResult(ServerStatus.Offline);
+        }
 
         var healthUri = TranslateToHealthUri(wsServerUri);
-        if (healthUri is null) return new ProbeResult(ServerStatus.Offline);
+        if (healthUri is null)
+        {
+            return new ProbeResult(ServerStatus.Offline);
+        }
 
         try
         {
@@ -75,7 +81,10 @@ public sealed class ServerStatusProbe
             }
 
             var body = await response.Content.ReadFromJsonAsync<HealthResponse>(linked.Token).ConfigureAwait(false);
-            if (body is null) return new ProbeResult(ServerStatus.Offline);
+            if (body is null)
+            {
+                return new ProbeResult(ServerStatus.Offline);
+            }
 
             var status = body.RequiresAuth && !hasSavedPassword
                 ? ServerStatus.AuthRequired
@@ -85,7 +94,11 @@ public sealed class ServerStatusProbe
         catch (OperationCanceledException)
         {
             // External cancellation propagates; timeout returns Offline.
-            if (ct.IsCancellationRequested) throw;
+            if (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+
             return new ProbeResult(ServerStatus.Offline);
         }
         catch (HttpRequestException)
@@ -112,7 +125,10 @@ public sealed class ServerStatusProbe
             "wss" => "https",
             _ => null,
         };
-        if (scheme is null) return null;
+        if (scheme is null)
+        {
+            return null;
+        }
 
         var builder = new UriBuilder(wsServerUri)
         {

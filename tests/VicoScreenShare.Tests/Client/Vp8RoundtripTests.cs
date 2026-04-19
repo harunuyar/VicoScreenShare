@@ -1,9 +1,9 @@
 namespace VicoScreenShare.Tests.Client;
 
 using FluentAssertions;
-using VicoScreenShare.Client.Media;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
+using VicoScreenShare.Client.Media;
 
 /// <summary>
 /// Drives SIPSorcery's own VP8 encoder + decoder with solid-color BGRA frames

@@ -193,7 +193,11 @@ public sealed class SignalingClient : IAsyncDisposable
         {
             await foreach (var json in _outbound.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                if (socket.State != WebSocketState.Open) break;
+                if (socket.State != WebSocketState.Open)
+                {
+                    break;
+                }
+
                 var bytes = Encoding.UTF8.GetBytes(json);
                 await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
             }
@@ -273,62 +277,110 @@ public sealed class SignalingClient : IAsyncDisposable
 
             case MessageType.RoomCreated:
                 var created = envelope.Payload.Deserialize<RoomCreated>(ProtocolJson.Options);
-                if (created is not null) RoomCreated?.Invoke(created.RoomId);
+                if (created is not null)
+                {
+                    RoomCreated?.Invoke(created.RoomId);
+                }
+
                 break;
 
             case MessageType.RoomJoined:
                 var joined = envelope.Payload.Deserialize<RoomJoined>(ProtocolJson.Options);
-                if (joined is not null) RoomJoined?.Invoke(joined);
+                if (joined is not null)
+                {
+                    RoomJoined?.Invoke(joined);
+                }
+
                 break;
 
             case MessageType.PeerJoined:
                 var pj = envelope.Payload.Deserialize<PeerJoined>(ProtocolJson.Options);
-                if (pj is not null) PeerJoined?.Invoke(pj.Peer);
+                if (pj is not null)
+                {
+                    PeerJoined?.Invoke(pj.Peer);
+                }
+
                 break;
 
             case MessageType.PeerLeft:
                 var pl = envelope.Payload.Deserialize<PeerLeft>(ProtocolJson.Options);
-                if (pl is not null) PeerLeft?.Invoke(pl.PeerId);
+                if (pl is not null)
+                {
+                    PeerLeft?.Invoke(pl.PeerId);
+                }
+
                 break;
 
             case MessageType.Error:
                 var err = envelope.Payload.Deserialize<Error>(ProtocolJson.Options);
-                if (err is not null) ServerError?.Invoke(err.Code, err.Message);
+                if (err is not null)
+                {
+                    ServerError?.Invoke(err.Code, err.Message);
+                }
+
                 break;
 
             case MessageType.SdpOffer:
                 var offer = envelope.Payload.Deserialize<SdpOffer>(ProtocolJson.Options);
-                if (offer is not null) SdpOfferReceived?.Invoke(offer);
+                if (offer is not null)
+                {
+                    SdpOfferReceived?.Invoke(offer);
+                }
+
                 break;
 
             case MessageType.SdpAnswer:
                 var answer = envelope.Payload.Deserialize<SdpAnswer>(ProtocolJson.Options);
-                if (answer is not null) SdpAnswerReceived?.Invoke(answer);
+                if (answer is not null)
+                {
+                    SdpAnswerReceived?.Invoke(answer);
+                }
+
                 break;
 
             case MessageType.IceCandidate:
                 var ice = envelope.Payload.Deserialize<IceCandidate>(ProtocolJson.Options);
-                if (ice is not null) IceCandidateReceived?.Invoke(ice);
+                if (ice is not null)
+                {
+                    IceCandidateReceived?.Invoke(ice);
+                }
+
                 break;
 
             case MessageType.StreamStarted:
                 var started = envelope.Payload.Deserialize<StreamStarted>(ProtocolJson.Options);
-                if (started is not null) StreamStartedReceived?.Invoke(started);
+                if (started is not null)
+                {
+                    StreamStartedReceived?.Invoke(started);
+                }
+
                 break;
 
             case MessageType.StreamEnded:
                 var ended = envelope.Payload.Deserialize<StreamEnded>(ProtocolJson.Options);
-                if (ended is not null) StreamEndedReceived?.Invoke(ended);
+                if (ended is not null)
+                {
+                    StreamEndedReceived?.Invoke(ended);
+                }
+
                 break;
 
             case MessageType.PeerConnectionState:
                 var pcs = envelope.Payload.Deserialize<PeerConnectionState>(ProtocolJson.Options);
-                if (pcs is not null) PeerConnectionStateChanged?.Invoke(pcs);
+                if (pcs is not null)
+                {
+                    PeerConnectionStateChanged?.Invoke(pcs);
+                }
+
                 break;
 
             case MessageType.ResumeFailed:
                 var rf = envelope.Payload.Deserialize<ResumeFailed>(ProtocolJson.Options);
-                if (rf is not null) ResumeFailedReceived?.Invoke(rf);
+                if (rf is not null)
+                {
+                    ResumeFailedReceived?.Invoke(rf);
+                }
+
                 break;
         }
     }
@@ -377,7 +429,10 @@ public sealed class SignalingClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         var prior = Interlocked.Exchange(ref _state, StateDisposed);
-        if (prior == StateDisposed) return;
+        if (prior == StateDisposed)
+        {
+            return;
+        }
 
         try { _cts?.Cancel(); } catch (ObjectDisposedException) { }
         _outbound.Writer.TryComplete();
@@ -392,8 +447,8 @@ public sealed class SignalingClient : IAsyncDisposable
         }
         catch { }
 
-        try { if (_readerTask is not null) await _readerTask.ConfigureAwait(false); } catch { }
-        try { if (_writerTask is not null) await _writerTask.ConfigureAwait(false); } catch { }
+        try { if (_readerTask is not null) { await _readerTask.ConfigureAwait(false); } } catch { }
+        try { if (_writerTask is not null) { await _writerTask.ConfigureAwait(false); } } catch { }
 
         _socket?.Dispose();
         _cts?.Dispose();

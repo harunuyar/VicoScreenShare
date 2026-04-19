@@ -183,7 +183,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     {
         lock (_processLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
+
             try
             {
                 _transform.ProcessMessage(TMessageType.MessageCommandFlush, 0);
@@ -213,8 +217,15 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     /// </summary>
     public EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp)
     {
-        if (_disposed || _d3dDevice is null || !_inputIsBgra) return null;
-        if (nativeTexture == IntPtr.Zero) return null;
+        if (_disposed || _d3dDevice is null || !_inputIsBgra)
+        {
+            return null;
+        }
+
+        if (nativeTexture == IntPtr.Zero)
+        {
+            return null;
+        }
 
         using var sourceTexture = new ID3D11Texture2D(nativeTexture);
 
@@ -304,7 +315,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     /// </summary>
     public EncodedFrame? EncodeTexture(ID3D11Texture2D texture, TimeSpan inputTimestamp)
     {
-        if (_disposed) return null;
+        if (_disposed)
+        {
+            return null;
+        }
+
         if (_d3dDevice is null)
         {
             DebugLog.Write("[mf] EncodeTexture called but encoder has no D3D device");
@@ -371,7 +386,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
 
         lock (_processLock)
         {
-            if (_disposed) return null;
+            if (_disposed)
+            {
+                return null;
+            }
+
             try
             {
                 _transform.ProcessInput(0, sample, 0);
@@ -393,7 +412,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     {
         lock (_processLock)
         {
-            if (_disposed) return null;
+            if (_disposed)
+            {
+                return null;
+            }
+
             try
             {
                 _transform.ProcessInput(0, sample, 0);
@@ -413,7 +436,10 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
 
     public EncodedFrame? EncodeBgra(byte[] bgra, int stride, TimeSpan inputTimestamp)
     {
-        if (_disposed) return null;
+        if (_disposed)
+        {
+            return null;
+        }
 
         var timingStart = _loggedTimingFrames < 3 ? Stopwatch.GetTimestamp() : 0L;
 
@@ -473,7 +499,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         {
             lock (_processLock)
             {
-                if (_disposed) return null;
+                if (_disposed)
+                {
+                    return null;
+                }
+
                 try
                 {
                     _transform.ProcessInput(0, sample, 0);
@@ -504,7 +534,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         {
             lock (_processLock)
             {
-                if (_disposed) return null;
+                if (_disposed)
+                {
+                    return null;
+                }
+
                 try
                 {
                     _transform.ProcessInput(0, sample, 0);
@@ -586,7 +620,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
 
     private EncodedFrame? TryDequeueOutput()
     {
-        if (_outputQueue.TryDequeue(out var frame)) return frame;
+        if (_outputQueue.TryDequeue(out var frame))
+        {
+            return frame;
+        }
+
         return null;
     }
 
@@ -608,7 +646,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
             {
                 return accumulator?.ToArray();
             }
-            if (output is null) continue;
+            if (output is null)
+            {
+                continue;
+            }
+
             (accumulator ??= new List<byte>()).AddRange(output);
         }
     }
@@ -784,7 +826,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
                         long sampleTimeTicks;
                         lock (_processLock)
                         {
-                            if (_disposed) return;
+                            if (_disposed)
+                            {
+                                return;
+                            }
+
                             output = PullSingleOutput(out var result, out sampleTimeTicks);
                             if (result == DrainResult.Failure)
                             {
@@ -832,7 +878,11 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         try { _pumpCts.Cancel(); } catch { }
         try { _transform.ProcessMessage(TMessageType.MessageNotifyEndStreaming, 0); } catch { }
@@ -865,21 +915,30 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         var async = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagSortandfilter),
             width, height, fps, bitrate, gopFrames, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager);
-        if (async.transform is not null) return (async.transform, true, "hardware async", async.inputIsBgra);
+        if (async.transform is not null)
+        {
+            return (async.transform, true, "hardware async", async.inputIsBgra);
+        }
 
         // Fall back to sync hardware MFTs — rare on modern drivers but they
         // exist (e.g. older Intel QSV builds).
         var sync = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
             width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager);
-        if (sync.transform is not null) return (sync.transform, false, "hardware sync", sync.inputIsBgra);
+        if (sync.transform is not null)
+        {
+            return (sync.transform, false, "hardware sync", sync.inputIsBgra);
+        }
 
         // Last resort: Microsoft's software H.264 encoder. Always available.
         // Software encoder doesn't need the D3D manager, pass null.
         var software = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
             width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null);
-        if (software.transform is not null) return (software.transform, false, "software", software.inputIsBgra);
+        if (software.transform is not null)
+        {
+            return (software.transform, false, "software", software.inputIsBgra);
+        }
 
         throw new InvalidOperationException("Media Foundation has no usable H.264 encoder on this machine");
     }

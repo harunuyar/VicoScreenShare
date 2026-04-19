@@ -89,7 +89,11 @@ public sealed class SfuSession : IAsyncDisposable
 
         foreach (var publisher in _publishers.Keys)
         {
-            if (publisher == viewerPeerId) continue;
+            if (publisher == viewerPeerId)
+            {
+                continue;
+            }
+
             await EnsureSubscriberAsync(viewerPeerId, publisher).ConfigureAwait(false);
         }
     }
@@ -107,7 +111,11 @@ public sealed class SfuSession : IAsyncDisposable
         // but still expects to receive publisher frames.
         foreach (var viewer in _viewers.Keys)
         {
-            if (viewer == publisherPeerId) continue;
+            if (viewer == publisherPeerId)
+            {
+                continue;
+            }
+
             await EnsureSubscriberAsync(viewer, publisherPeerId).ConfigureAwait(false);
         }
     }
@@ -144,8 +152,16 @@ public sealed class SfuSession : IAsyncDisposable
     /// </summary>
     public async Task SubscribeAsync(Guid viewerPeerId, Guid publisherPeerId)
     {
-        if (viewerPeerId == publisherPeerId) return;
-        if (!_publishers.ContainsKey(publisherPeerId)) return;
+        if (viewerPeerId == publisherPeerId)
+        {
+            return;
+        }
+
+        if (!_publishers.ContainsKey(publisherPeerId))
+        {
+            return;
+        }
+
         await EnsureSubscriberAsync(viewerPeerId, publisherPeerId).ConfigureAwait(false);
     }
 
@@ -167,7 +183,10 @@ public sealed class SfuSession : IAsyncDisposable
     private async Task EnsureSubscriberAsync(Guid viewerPeerId, Guid publisherPeerId)
     {
         var key = (viewerPeerId, publisherPeerId);
-        if (_subscribers.ContainsKey(key)) return;
+        if (_subscribers.ContainsKey(key))
+        {
+            return;
+        }
 
         var logger = _loggerFactory?.CreateLogger<SfuSubscriberPeer>();
         var sub = new SfuSubscriberPeer(viewerPeerId, publisherPeerId, logger);
@@ -250,7 +269,11 @@ public sealed class SfuSession : IAsyncDisposable
     {
         foreach (var kv in _subscribers)
         {
-            if (kv.Key.publisher != sourcePeerId) continue;
+            if (kv.Key.publisher != sourcePeerId)
+            {
+                continue;
+            }
+
             kv.Value.SendForwardedRtp(mediaType, packet);
         }
     }

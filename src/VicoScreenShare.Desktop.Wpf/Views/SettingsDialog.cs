@@ -17,7 +17,10 @@ public static class SettingsDialog
 {
     public static void Show(ClientSettings settings, SettingsStore store, Action? onSaved = null)
     {
-        if (Application.Current?.MainWindow?.DataContext is not INavigationHost nav) return;
+        if (Application.Current?.MainWindow?.DataContext is not INavigationHost nav)
+        {
+            return;
+        }
 
         var vm = new SettingsViewModel(settings, store, onSaved);
         vm.CloseRequested += nav.CloseOverlay;

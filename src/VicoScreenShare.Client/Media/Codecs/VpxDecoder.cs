@@ -47,19 +47,31 @@ internal sealed class VpxDecoder : IVideoDecoder
         {
             return Array.Empty<DecodedVideoFrame>();
         }
-        if (samples is null) return Array.Empty<DecodedVideoFrame>();
+        if (samples is null)
+        {
+            return Array.Empty<DecodedVideoFrame>();
+        }
 
         var results = new List<DecodedVideoFrame>();
         foreach (var sample in samples)
         {
-            if (sample.Sample is null || sample.Sample.Length == 0) continue;
+            if (sample.Sample is null || sample.Sample.Length == 0)
+            {
+                continue;
+            }
 
             var width = (int)sample.Width;
             var height = (int)sample.Height;
-            if (width <= 0 || height <= 0) continue;
+            if (width <= 0 || height <= 0)
+            {
+                continue;
+            }
 
             var expectedBgr = width * height * 3;
-            if (sample.Sample.Length < expectedBgr) continue;
+            if (sample.Sample.Length < expectedBgr)
+            {
+                continue;
+            }
 
             var bgraSize = width * height * 4;
             var bgra = new byte[bgraSize];
@@ -90,7 +102,11 @@ internal sealed class VpxDecoder : IVideoDecoder
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         try { _decoder.Dispose(); } catch { }
     }

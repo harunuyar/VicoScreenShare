@@ -180,7 +180,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
     public void Flush()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
         // MF_MESSAGE_COMMAND_FLUSH clears the MFT's internal input queue,
         // any pending output, and any accumulated error state. After flush
         // the decoder expects the next input to be a keyframe — callers
@@ -259,7 +262,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
             if (!mftAllocatesSamples)
             {
                 var bufferSize = streamInfo.Size == 0 ? (_width * _height * 3 / 2) : streamInfo.Size;
-                if (bufferSize <= 0) bufferSize = 1;
+                if (bufferSize <= 0)
+                {
+                    bufferSize = 1;
+                }
+
                 outSample = MediaFactory.MFCreateSample();
                 outBuffer = MediaFactory.MFCreateMemoryBuffer(bufferSize);
                 outSample.AddBuffer(outBuffer);
@@ -296,7 +303,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                     if (!_outputTypeNegotiated)
                     {
                         NegotiateOutputType();
-                        if (_outputTypeNegotiated) continue;
+                        if (_outputTypeNegotiated)
+                        {
+                            continue;
+                        }
                     }
                     if (!_warnedTypeNotSet)
                     {
@@ -312,7 +322,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                     return (IReadOnlyList<DecodedVideoFrame>?)results ?? Array.Empty<DecodedVideoFrame>();
                 }
 
-                if (!_outputTypeNegotiated || _width <= 0 || _height <= 0 || outSample is null) continue;
+                if (!_outputTypeNegotiated || _width <= 0 || _height <= 0 || outSample is null)
+                {
+                    continue;
+                }
 
                 // Read the propagated SampleTime BEFORE we flatten / free
                 // the sample. The MFT copies this from the input sample
@@ -359,7 +372,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                                 try { _bgraDest.Release(); } catch { }
                             }
                         }
-                        if (_loggedDecodedFrames < 3) _loggedDecodedFrames++;
+                        if (_loggedDecodedFrames < 3)
+                        {
+                            _loggedDecodedFrames++;
+                        }
                     }
                     continue;
                 }
@@ -386,7 +402,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                     bgra = ConvertNv12ToBgra(nv12, _width, _height);
                 }
 
-                if (bgra is null) continue;
+                if (bgra is null)
+                {
+                    continue;
+                }
 
                 (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height, outTs));
 
@@ -422,7 +441,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         try
         {
             var ptr = dxgiBuffer.GetResource(typeof(ID3D11Texture2D).GUID);
-            if (ptr == IntPtr.Zero) return false;
+            if (ptr == IntPtr.Zero)
+            {
+                return false;
+            }
+
             sourceTexture = new ID3D11Texture2D(ptr);
 
             uint arraySlice = 0;
@@ -459,7 +482,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         try
         {
             var ptr = dxgiBuffer.GetResource(typeof(ID3D11Texture2D).GUID);
-            if (ptr == IntPtr.Zero) return null;
+            if (ptr == IntPtr.Zero)
+            {
+                return null;
+            }
+
             sourceTexture = new ID3D11Texture2D(ptr);
 
             // DXVA decoders output into a texture ARRAY — each DPB
@@ -605,7 +632,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                 return; // MF_E_NO_MORE_TYPES or similar — nothing to negotiate.
             }
 
-            if (outputType is null) return;
+            if (outputType is null)
+            {
+                return;
+            }
 
             if (outputType.GetGUID(MediaTypeAttributeKeys.Subtype, out var subtype).Success && subtype == VideoFormatGuids.NV12)
             {
@@ -693,9 +723,21 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         var b = b256 >> 8;
         var g = g256 >> 8;
         var r = r256 >> 8;
-        if ((uint)b > 255) b = b < 0 ? 0 : 255;
-        if ((uint)g > 255) g = g < 0 ? 0 : 255;
-        if ((uint)r > 255) r = r < 0 ? 0 : 255;
+        if ((uint)b > 255)
+        {
+            b = b < 0 ? 0 : 255;
+        }
+
+        if ((uint)g > 255)
+        {
+            g = g < 0 ? 0 : 255;
+        }
+
+        if ((uint)r > 255)
+        {
+            r = r < 0 ? 0 : 255;
+        }
+
         return 0xFF000000u | ((uint)r << 16) | ((uint)g << 8) | (uint)b;
     }
 
@@ -718,7 +760,10 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                              | EnumFlag.EnumFlagAsyncmft
                              | EnumFlag.EnumFlagSortandfilter);
         var transform = TryCreateDecoder(hwFlags, inputFilter, "hardware");
-        if (transform is not null) return transform;
+        if (transform is not null)
+        {
+            return transform;
+        }
 
         var swFlags = (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter);
         return TryCreateDecoder(swFlags, inputFilter, "software");
@@ -750,7 +795,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         try { _transform.ProcessMessage(TMessageType.MessageNotifyEndStreaming, 0); } catch { }
         try { _transform.Dispose(); } catch { }

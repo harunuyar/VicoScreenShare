@@ -44,7 +44,10 @@ public sealed class SignalingE2ETests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_factory is not null) await _factory.DisposeAsync();
+        if (_factory is not null)
+        {
+            await _factory.DisposeAsync();
+        }
     }
 
     [Fact]
@@ -157,7 +160,11 @@ public sealed class SignalingE2ETests : IAsyncLifetime
         payload.Code.Should().Be(ErrorCode.RoomFull);
 
         await CleanCloseAsync(overflow);
-        foreach (var c in extras) await CleanCloseAsync(c);
+        foreach (var c in extras)
+        {
+            await CleanCloseAsync(c);
+        }
+
         await CleanCloseAsync(host);
     }
 
@@ -354,9 +361,16 @@ public sealed class SignalingE2ETests : IAsyncLifetime
             {
                 return null;
             }
-            if (result.MessageType == WebSocketMessageType.Close) return null;
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                return null;
+            }
+
             ms.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage) break;
+            if (result.EndOfMessage)
+            {
+                break;
+            }
         }
         var json = Encoding.UTF8.GetString(ms.ToArray());
         return JsonSerializer.Deserialize<MessageEnvelope>(json, ProtocolJson.Options);

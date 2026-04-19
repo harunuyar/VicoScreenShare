@@ -28,8 +28,16 @@ public static class BgraDownscale
 
         var w = (int)Math.Floor(srcWidth * scale) & ~1;
         var h = (int)Math.Floor(srcHeight * scale) & ~1;
-        if (w < 2) w = 2;
-        if (h < 2) h = 2;
+        if (w < 2)
+        {
+            w = 2;
+        }
+
+        if (h < 2)
+        {
+            h = 2;
+        }
+
         return (w, h);
     }
 
@@ -63,7 +71,11 @@ public static class BgraDownscale
         for (var dx = 0; dx < dstWidth; dx++)
         {
             var sx = (int)((long)dx * srcWidth / dstWidth);
-            if (sx >= srcWidth) sx = srcWidth - 1;
+            if (sx >= srcWidth)
+            {
+                sx = srcWidth - 1;
+            }
+
             sxMap[dx] = sx;
         }
 
@@ -77,7 +89,10 @@ public static class BgraDownscale
             for (var dy = 0; dy < dstHeight; dy++)
             {
                 var sy = (int)((long)dy * srcHeight / dstHeight);
-                if (sy >= srcHeight) sy = srcHeight - 1;
+                if (sy >= srcHeight)
+                {
+                    sy = srcHeight - 1;
+                }
 
                 var srcRow = srcPixels + (long)sy * srcWidth;
                 var dstRow = dstPixels + (long)dy * dstWidth;

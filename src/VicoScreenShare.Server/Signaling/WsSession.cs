@@ -124,7 +124,10 @@ public sealed class WsSession
     private async Task BeginPeerGraceOrLeaveAsync()
     {
         var roomId = _currentRoomId;
-        if (roomId is null) return;
+        if (roomId is null)
+        {
+            return;
+        }
 
         // Detach SFU hooks — this WsSession is about to die, it shouldn't drive
         // more subscriber offers. A resumed session re-attaches fresh.
@@ -345,7 +348,11 @@ public sealed class WsSession
 
     private async Task HandleCreateRoomAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is not null)
         {
             await SendErrorAsync(ErrorCode.AlreadyInRoom, "Already in a room", envelope.CorrelationId).ConfigureAwait(false);
@@ -397,7 +404,11 @@ public sealed class WsSession
 
     private async Task HandleResumeSessionAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is not null)
         {
             await SendErrorAsync(ErrorCode.AlreadyInRoom, "Already in a room", envelope.CorrelationId).ConfigureAwait(false);
@@ -474,7 +485,11 @@ public sealed class WsSession
 
     private async Task HandleJoinRoomAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is not null)
         {
             await SendErrorAsync(ErrorCode.AlreadyInRoom, "Already in a room", envelope.CorrelationId).ConfigureAwait(false);
@@ -539,9 +554,17 @@ public sealed class WsSession
     {
         foreach (var peer in room.SnapshotPeers())
         {
-            if (excludePeer.HasValue && peer.PeerId == excludePeer.Value) continue;
+            if (excludePeer.HasValue && peer.PeerId == excludePeer.Value)
+            {
+                continue;
+            }
+
             var session = _sessions.Get(peer.PeerId);
-            if (session is null) continue;
+            if (session is null)
+            {
+                continue;
+            }
+
             try
             {
                 await session.SendAsync(type, payload).ConfigureAwait(false);
@@ -555,7 +578,11 @@ public sealed class WsSession
 
     private async Task HandleSdpOfferAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is null)
         {
             await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before sending SDP", envelope.CorrelationId).ConfigureAwait(false);
@@ -596,7 +623,11 @@ public sealed class WsSession
 
     private async Task HandleSdpAnswerAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is null)
         {
             await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before sending SDP", envelope.CorrelationId).ConfigureAwait(false);
@@ -647,7 +678,11 @@ public sealed class WsSession
 
     private async Task HandleIceCandidateAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is null)
         {
             await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before sending ICE", envelope.CorrelationId).ConfigureAwait(false);
@@ -698,7 +733,11 @@ public sealed class WsSession
 
     private async Task HandleStreamStartedAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is null)
         {
             await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room before announcing a stream", envelope.CorrelationId).ConfigureAwait(false);
@@ -706,7 +745,10 @@ public sealed class WsSession
         }
 
         var room = _rooms.FindRoom(_currentRoomId);
-        if (room is null) return;
+        if (room is null)
+        {
+            return;
+        }
 
         var request = WsMessageCodec.DecodePayload<StreamStarted>(envelope.Payload);
 
@@ -736,11 +778,21 @@ public sealed class WsSession
 
     private async Task HandleStreamEndedAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
-        if (_currentRoomId is null) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        if (_currentRoomId is null)
+        {
+            return;
+        }
 
         var room = _rooms.FindRoom(_currentRoomId);
-        if (room is null) return;
+        if (room is null)
+        {
+            return;
+        }
 
         if (!room.TrySetPeerStreaming(PeerId, false))
         {
@@ -762,7 +814,11 @@ public sealed class WsSession
 
     private async Task HandleSubscribeAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is null)
         {
             await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room first", envelope.CorrelationId).ConfigureAwait(false);
@@ -770,14 +826,20 @@ public sealed class WsSession
         }
 
         var sfu = _rooms.GetSfuSession(_currentRoomId);
-        if (sfu is null) return;
+        if (sfu is null)
+        {
+            return;
+        }
 
         var request = WsMessageCodec.DecodePayload<Subscribe>(envelope.Payload);
 
         // Ignore silently if the publisher isn't actively streaming — the
         // client may have raced a StreamEnded and it's easier to noop than
         // to bounce an error.
-        if (!sfu.IsPublishing(request.PublisherPeerId)) return;
+        if (!sfu.IsPublishing(request.PublisherPeerId))
+        {
+            return;
+        }
 
         AttachSfuSessionHooks(sfu);
         await sfu.SubscribeAsync(PeerId, request.PublisherPeerId).ConfigureAwait(false);
@@ -785,7 +847,11 @@ public sealed class WsSession
 
     private async Task HandleUnsubscribeAsync(MessageEnvelope envelope)
     {
-        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false)) return;
+        if (!await EnsureHelloAsync(envelope).ConfigureAwait(false))
+        {
+            return;
+        }
+
         if (_currentRoomId is null)
         {
             await SendErrorAsync(ErrorCode.NotInRoom, "Must join a room first", envelope.CorrelationId).ConfigureAwait(false);
@@ -793,7 +859,10 @@ public sealed class WsSession
         }
 
         var sfu = _rooms.GetSfuSession(_currentRoomId);
-        if (sfu is null) return;
+        if (sfu is null)
+        {
+            return;
+        }
 
         var request = WsMessageCodec.DecodePayload<Unsubscribe>(envelope.Payload);
         await sfu.UnsubscribeAsync(PeerId, request.PublisherPeerId).ConfigureAwait(false);
@@ -807,7 +876,10 @@ public sealed class WsSession
     /// </summary>
     private void AttachSfuSessionHooks(SfuSession sfu)
     {
-        if (_currentSfuSession is not null) return;
+        if (_currentSfuSession is not null)
+        {
+            return;
+        }
 
         _currentSfuSession = sfu;
         _subscriberReadyHandler = OnSubscriberReadyAsync;
@@ -817,7 +889,10 @@ public sealed class WsSession
     private async Task OnSubscriberReadyAsync(SfuSubscriberPeer sub)
     {
         // Only drive offers to the viewer this subscriber is paired with.
-        if (sub.ViewerPeerId != PeerId) return;
+        if (sub.ViewerPeerId != PeerId)
+        {
+            return;
+        }
 
         // Wire ICE forwarding for this subscriber instance. SfuSession fires
         // SubscriberReady exactly once per SfuSubscriberPeer (EnsureSubscriberAsync
@@ -876,7 +951,11 @@ public sealed class WsSession
     private async Task LeaveCurrentRoomAsync()
     {
         var roomId = _currentRoomId;
-        if (roomId is null) return;
+        if (roomId is null)
+        {
+            return;
+        }
+
         _currentRoomId = null;
 
         // Detach the subscriber-offer pump so the shared SfuSession.SubscriberReady
@@ -903,10 +982,16 @@ public sealed class WsSession
         _currentStreamId = null;
 
         var outcome = _rooms.RemovePeer(roomId, PeerId);
-        if (!outcome.Found) return;
+        if (!outcome.Found)
+        {
+            return;
+        }
 
         var room = _rooms.FindRoom(roomId);
-        if (room is null || outcome.PeerCountAfter == 0) return;
+        if (room is null || outcome.PeerCountAfter == 0)
+        {
+            return;
+        }
 
         if (wasStreaming)
         {
@@ -922,7 +1007,11 @@ public sealed class WsSession
 
     private async Task<bool> EnsureHelloAsync(MessageEnvelope envelope)
     {
-        if (_helloReceived) return true;
+        if (_helloReceived)
+        {
+            return true;
+        }
+
         await SendErrorAsync(ErrorCode.BadRequest, "ClientHello must be sent first", envelope.CorrelationId).ConfigureAwait(false);
         return false;
     }
@@ -954,7 +1043,11 @@ public sealed class WsSession
     {
         try
         {
-            if (_socket.State != WebSocketState.Open) return;
+            if (_socket.State != WebSocketState.Open)
+            {
+                return;
+            }
+
             var json = WsMessageCodec.EncodeEnvelope(MessageType.Error, new Error(code, message), correlationId);
             var bytes = Encoding.UTF8.GetBytes(json);
             await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None).ConfigureAwait(false);
@@ -969,7 +1062,11 @@ public sealed class WsSession
         {
             await foreach (var json in _outbound.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                if (_socket.State != WebSocketState.Open) break;
+                if (_socket.State != WebSocketState.Open)
+                {
+                    break;
+                }
+
                 var bytes = Encoding.UTF8.GetBytes(json);
                 await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
             }

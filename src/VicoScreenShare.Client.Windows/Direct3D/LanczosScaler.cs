@@ -75,7 +75,10 @@ public sealed class LanczosScaler : ITextureScaler
 
     public void Process(ID3D11Texture2D source, ID3D11Texture2D dest)
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
 
         // No-op when dimensions match.
         if (SourceWidth == DestWidth && SourceHeight == DestHeight)
@@ -127,7 +130,11 @@ public sealed class LanczosScaler : ITextureScaler
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         _intermediateUav.Dispose();
         _intermediateSrv.Dispose();
@@ -191,7 +198,10 @@ public sealed class LanczosScaler : ITextureScaler
 
         // Release the blobs.
         Marshal.Release(codeBlob);
-        if (errorBlob != IntPtr.Zero) Marshal.Release(errorBlob);
+        if (errorBlob != IntPtr.Zero)
+        {
+            Marshal.Release(errorBlob);
+        }
 
         return device.CreateComputeShader(bytecode);
     }

@@ -2,7 +2,7 @@ namespace VicoScreenShare.MediaHarness;
 
 using System;
 using System.Runtime.InteropServices;
-using global::Windows.Graphics.Capture;
+using Windows.Graphics.Capture;
 using WinRT;
 
 /// <summary>
@@ -55,7 +55,10 @@ internal static class MonitorCaptureItem
 
     public static GraphicsCaptureItem CreateForWindow(IntPtr hwnd)
     {
-        if (hwnd == IntPtr.Zero) throw new ArgumentException("hwnd is zero", nameof(hwnd));
+        if (hwnd == IntPtr.Zero)
+        {
+            throw new ArgumentException("hwnd is zero", nameof(hwnd));
+        }
 
         var factory = GraphicsCaptureItem.As<IGraphicsCaptureItemInterop>();
         var iidItem = new Guid("79C3F95B-31F7-4EC2-A464-632EF5D30760");

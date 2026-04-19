@@ -7,13 +7,13 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using SIPSorcery.Net;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server;
-using SIPSorcery.Net;
 
 /// <summary>
 /// End-to-end proof: spin up a real server host, connect two clients, have one
@@ -66,8 +66,16 @@ public sealed class LoopbackMediaE2ETests
         var subscriberReady = new TaskCompletionSource<SubscriberSession>(TaskCreationOptions.RunContinuationsAsynchronously);
         receiverSignaling.SdpOfferReceived += offer =>
         {
-            if (string.IsNullOrEmpty(offer.SubscriptionId)) return;
-            if (!Guid.TryParseExact(offer.SubscriptionId, "N", out var publisherPeerId)) return;
+            if (string.IsNullOrEmpty(offer.SubscriptionId))
+            {
+                return;
+            }
+
+            if (!Guid.TryParseExact(offer.SubscriptionId, "N", out var publisherPeerId))
+            {
+                return;
+            }
+
             subscriber = new SubscriberSession(
                 receiverSignaling,
                 publisherPeerId,
@@ -117,7 +125,11 @@ public sealed class LoopbackMediaE2ETests
         readySub.Receiver.FramesDecoded.Should().BeGreaterThan(0);
         senderRtc.ConnectionState.Should().Be(RTCPeerConnectionState.connected);
 
-        if (subscriber is not null) await subscriber.DisposeAsync();
+        if (subscriber is not null)
+        {
+            await subscriber.DisposeAsync();
+        }
+
         await receiverSignaling.DisposeAsync();
         await senderSignaling.DisposeAsync();
     }

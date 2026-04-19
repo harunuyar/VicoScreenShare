@@ -158,7 +158,10 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [RelayCommand]
     private void ApplyPreset(QualityPreset? preset)
     {
-        if (preset is null) return;
+        if (preset is null)
+        {
+            return;
+        }
 
         SelectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == preset.TargetHeight)
             ?? SelectedTargetHeight;
@@ -234,7 +237,11 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     private static string FormatBitrate(int bps)
     {
-        if (bps >= 1_000_000) return $"{bps / 1_000_000.0:0.0} Mbps";
+        if (bps >= 1_000_000)
+        {
+            return $"{bps / 1_000_000.0:0.0} Mbps";
+        }
+
         return $"{bps / 1_000.0:0} Kbps";
     }
 }

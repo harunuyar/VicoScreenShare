@@ -2,11 +2,11 @@ namespace VicoScreenShare.Client.Media;
 
 using System;
 using System.Net;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
-using SIPSorcery.Net;
-using SIPSorceryMedia.Abstractions;
 
 /// <summary>
 /// Receiver-side counterpart to <see cref="CaptureStreamer"/>. Subscribes to an
@@ -93,7 +93,11 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     public System.Threading.Tasks.Task StartAsync()
     {
-        if (_attached || _disposed) return System.Threading.Tasks.Task.CompletedTask;
+        if (_attached || _disposed)
+        {
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
+
         _attached = true;
         _pc.OnVideoFrameReceived += OnVideoFrameReceived;
         _pc.onconnectionstatechange += OnConnectionStateChange;
@@ -102,7 +106,11 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     public System.Threading.Tasks.Task StopAsync()
     {
-        if (!_attached) return System.Threading.Tasks.Task.CompletedTask;
+        if (!_attached)
+        {
+            return System.Threading.Tasks.Task.CompletedTask;
+        }
+
         _attached = false;
         _pc.OnVideoFrameReceived -= OnVideoFrameReceived;
         _pc.onconnectionstatechange -= OnConnectionStateChange;
@@ -124,7 +132,11 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         try { StopAsync().GetAwaiter().GetResult(); } catch { }
         lock (_decodeLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
+
             _disposed = true;
             try { _decoder.Dispose(); } catch { }
         }
@@ -142,7 +154,10 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     private void OnVideoFrameReceived(IPEndPoint remote, uint timestamp, byte[] encodedSample, VideoFormat format)
     {
-        if (encodedSample is null || encodedSample.Length == 0) return;
+        if (encodedSample is null || encodedSample.Length == 0)
+        {
+            return;
+        }
 
         System.Collections.Generic.IReadOnlyList<DecodedVideoFrame> frames;
         var now = DateTime.UtcNow;
@@ -164,7 +179,11 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         int gpuEmittedThisCall;
         lock (_decodeLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
+
             FramesReceived++;
             EncodedByteCount += encodedSample.Length;
             _gpuEmittedThisCall = 0;
@@ -186,16 +205,28 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         // inside Decode, so TextureArrived has already fired and
         // FramesDecoded / LastWidth / LastHeight were updated there.
         // `frames` is empty by construction in that case.
-        if (gpuEmittedThisCall > 0) return;
+        if (gpuEmittedThisCall > 0)
+        {
+            return;
+        }
 
-        if (frames.Count == 0) return;
+        if (frames.Count == 0)
+        {
+            return;
+        }
 
         foreach (var decoded in frames)
         {
-            if (decoded.Bgra is null || decoded.Bgra.Length == 0) continue;
+            if (decoded.Bgra is null || decoded.Bgra.Length == 0)
+            {
+                continue;
+            }
 
             var bgraSize = decoded.Width * decoded.Height * 4;
-            if (decoded.Bgra.Length < bgraSize) continue;
+            if (decoded.Bgra.Length < bgraSize)
+            {
+                continue;
+            }
 
             FramesDecoded++;
             LastWidth = decoded.Width;

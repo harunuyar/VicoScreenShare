@@ -224,7 +224,11 @@ public sealed class SettingsStore
         public bool TryMaterialize(out ServerConnection entry)
         {
             entry = default!;
-            if (!System.Uri.TryCreate(Uri, UriKind.Absolute, out var parsed)) return false;
+            if (!System.Uri.TryCreate(Uri, UriKind.Absolute, out var parsed))
+            {
+                return false;
+            }
+
             entry = new ServerConnection
             {
                 Id = Id == Guid.Empty ? Guid.NewGuid() : Id,

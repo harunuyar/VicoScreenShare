@@ -118,7 +118,10 @@ public sealed class D3D11VideoScaler : ITextureScaler
     /// </summary>
     public void Process(ID3D11Texture2D sourceTexture, ID3D11Texture2D destTexture, RawRect? destRect, uint sourceArraySlice)
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(D3D11VideoScaler));
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(D3D11VideoScaler));
+        }
 
         // Input view — per-call because the source texture (and its
         // array slice) changes every frame.
@@ -168,7 +171,11 @@ public sealed class D3D11VideoScaler : ITextureScaler
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         _cachedOutputView?.Dispose();
         _processor.Dispose();

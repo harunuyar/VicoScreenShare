@@ -64,7 +64,11 @@ public sealed class PresentLoop : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+        {
+            return;
+        }
+
         _disposed = true;
         _cts.Cancel();
         _wake.Set();
@@ -100,10 +104,17 @@ public sealed class PresentLoop : IDisposable
                 DecodedVideoFrame current = default;
                 while (!ct.IsCancellationRequested)
                 {
-                    if (_queue.TryDequeue(out current)) break;
+                    if (_queue.TryDequeue(out current))
+                    {
+                        break;
+                    }
+
                     _wake.WaitOne(16);
                 }
-                if (ct.IsCancellationRequested) break;
+                if (ct.IsCancellationRequested)
+                {
+                    break;
+                }
 
                 // 2. Compute scheduled paint time from the content
                 //    timestamp, anchored to the first paint's wall time.
@@ -118,7 +129,11 @@ public sealed class PresentLoop : IDisposable
                 else
                 {
                     var ptsOffset = (current.Timestamp - anchorPts).Ticks;
-                    if (ptsOffset < 0) ptsOffset = 0;
+                    if (ptsOffset < 0)
+                    {
+                        ptsOffset = 0;
+                    }
+
                     scheduledWallTicks = anchorWallTicks +
                         StopwatchTicksFromTimespanTicks(ptsOffset);
                 }
@@ -158,7 +173,10 @@ public sealed class PresentLoop : IDisposable
                 // 4. Sleep until the scheduled wall time. No-op if
                 //    we're already past it.
                 SleepUntilStopwatchTicks(scheduledWallTicks, ct);
-                if (ct.IsCancellationRequested) break;
+                if (ct.IsCancellationRequested)
+                {
+                    break;
+                }
 
                 // 5. Paint.
                 try
@@ -195,7 +213,11 @@ public sealed class PresentLoop : IDisposable
         while (!ct.IsCancellationRequested)
         {
             var remaining = targetWall - Stopwatch.GetTimestamp();
-            if (remaining <= 0) return;
+            if (remaining <= 0)
+            {
+                return;
+            }
+
             var remainingMs = remaining * 1000.0 / Stopwatch.Frequency;
             if (remainingMs > 2.0)
             {

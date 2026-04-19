@@ -75,7 +75,11 @@ public sealed class TimestampedFrameQueue
     /// value is a snapshot so treat it as advisory.</summary>
     public int Count
     {
-        get { lock (_lock) return _frames.Count; }
+        get { lock (_lock)
+            {
+                return _frames.Count;
+            }
+        }
     }
 
     /// <summary>Total frames dropped because the queue overflowed
@@ -91,7 +95,11 @@ public sealed class TimestampedFrameQueue
     /// </summary>
     public bool IsReady
     {
-        get { lock (_lock) return _startupReady && _frames.Count > 0; }
+        get { lock (_lock)
+            {
+                return _startupReady && _frames.Count > 0;
+            }
+        }
     }
 
     /// <summary>
@@ -119,7 +127,11 @@ public sealed class TimestampedFrameQueue
             // is just Timestamp ascending; we build a sentinel frame
             // with matching Timestamp to call BinarySearch.
             var index = BinarySearchByTimestamp(frame.Timestamp);
-            if (index < 0) index = ~index;
+            if (index < 0)
+            {
+                index = ~index;
+            }
+
             _frames.Insert(index, frame);
 
             // Startup ready-gate: once we first reach the target depth
@@ -152,13 +164,21 @@ public sealed class TimestampedFrameQueue
                 // Reset the ready gate on empty so the present loop
                 // waits for a fresh prebuffer refill instead of trying
                 // to paint each arriving frame immediately.
-                if (_frames.Count == 0) _startupReady = false;
+                if (_frames.Count == 0)
+                {
+                    _startupReady = false;
+                }
+
                 frame = default;
                 return false;
             }
             frame = _frames[0];
             _frames.RemoveAt(0);
-            if (_frames.Count == 0) _startupReady = false;
+            if (_frames.Count == 0)
+            {
+                _startupReady = false;
+            }
+
             return true;
         }
     }
@@ -173,7 +193,11 @@ public sealed class TimestampedFrameQueue
     {
         lock (_lock)
         {
-            if (_frames.Count == 0) return null;
+            if (_frames.Count == 0)
+            {
+                return null;
+            }
+
             return _frames[0].Timestamp;
         }
     }
@@ -222,9 +246,19 @@ public sealed class TimestampedFrameQueue
         {
             int mid = lo + ((hi - lo) >> 1);
             int cmp = _frames[mid].Timestamp.CompareTo(ts);
-            if (cmp == 0) return mid;
-            if (cmp < 0) lo = mid + 1;
-            else hi = mid - 1;
+            if (cmp == 0)
+            {
+                return mid;
+            }
+
+            if (cmp < 0)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
         }
         return ~lo;
     }

@@ -137,7 +137,10 @@ internal sealed class StimulusWindow : IDisposable
             _swapChain?.Dispose();
             _context?.Dispose();
             _device?.Dispose();
-            if (_hwnd != IntPtr.Zero) DestroyWindow(_hwnd);
+            if (_hwnd != IntPtr.Zero)
+            {
+                DestroyWindow(_hwnd);
+            }
         }
     }
 

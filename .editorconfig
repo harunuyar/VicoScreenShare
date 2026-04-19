@@ -33,3 +33,7 @@ dotnet_diagnostic.CS8625.severity = warning
 
 # Unused using directives — flag at warning so dotnet format --severity warn removes them.
 dotnet_diagnostic.IDE0005.severity = warning
+
+# Always require braces, even on single-line control flow bodies.
+csharp_prefer_braces = true:warning
+dotnet_diagnostic.IDE0011.severity = warning

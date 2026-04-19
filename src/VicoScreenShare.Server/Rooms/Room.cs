@@ -23,13 +23,19 @@ public sealed class Room
     {
         get
         {
-            lock (_lock) return _peers.Count;
+            lock (_lock)
+            {
+                return _peers.Count;
+            }
         }
     }
 
     public RoomPeer[] SnapshotPeers()
     {
-        lock (_lock) return _peers.ToArray();
+        lock (_lock)
+        {
+            return _peers.ToArray();
+        }
     }
 
     public AddPeerResult TryAddPeer(RoomPeer peer, int maxCapacity)
@@ -61,8 +67,16 @@ public sealed class Room
         lock (_lock)
         {
             var peer = _peers.FirstOrDefault(p => p.PeerId == peerId);
-            if (peer is null) return false;
-            if (peer.IsStreaming == isStreaming) return false;
+            if (peer is null)
+            {
+                return false;
+            }
+
+            if (peer.IsStreaming == isStreaming)
+            {
+                return false;
+            }
+
             peer.IsStreaming = isStreaming;
             return true;
         }
@@ -80,8 +94,16 @@ public sealed class Room
         lock (_lock)
         {
             var peer = _peers.FirstOrDefault(p => p.PeerId == peerId);
-            if (peer is null) return false;
-            if (peer.IsConnected == isConnected) return false;
+            if (peer is null)
+            {
+                return false;
+            }
+
+            if (peer.IsConnected == isConnected)
+            {
+                return false;
+            }
+
             peer.IsConnected = isConnected;
             peer.DisconnectedAtUtc = isConnected ? null : DateTime.UtcNow;
             return true;
@@ -95,7 +117,11 @@ public sealed class Room
     /// </summary>
     public RoomPeer? FindByResumeToken(string token)
     {
-        if (string.IsNullOrEmpty(token)) return null;
+        if (string.IsNullOrEmpty(token))
+        {
+            return null;
+        }
+
         lock (_lock)
         {
             return _peers.FirstOrDefault(p => p.ResumeToken == token);

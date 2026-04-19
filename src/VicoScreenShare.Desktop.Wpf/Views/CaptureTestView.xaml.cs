@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using global::Windows.Graphics.Capture;
 using VicoScreenShare.Client;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media;
@@ -18,7 +19,6 @@ using VicoScreenShare.Client.Windows.Capture;
 using VicoScreenShare.Client.Windows.Media.Codecs;
 using VicoScreenShare.Desktop.App.ViewModels;
 using Vortice.Direct3D11;
-using global::Windows.Graphics.Capture;
 
 /// <summary>
 /// Standalone diagnostic page: capture → render, with no SFU, no
@@ -250,7 +250,10 @@ public partial class CaptureTestView : UserControl
         }
 
         var elapsedSec = (nowTicks - _statsLastSampleTicks) / (double)Stopwatch.Frequency;
-        if (elapsedSec <= 0) return;
+        if (elapsedSec <= 0)
+        {
+            return;
+        }
 
         var wgcCount = _source.WgcFrameCount;
         var dispatchedCount = _source.DispatchedFrameCount;
@@ -353,7 +356,11 @@ public partial class CaptureTestView : UserControl
 
         public ValueTask DisposeAsync()
         {
-            if (_disposed) return ValueTask.CompletedTask;
+            if (_disposed)
+            {
+                return ValueTask.CompletedTask;
+            }
+
             _disposed = true;
             try { _streamer.Dispose(); } catch { }
             try { _decoder.Dispose(); } catch { }
@@ -362,7 +369,10 @@ public partial class CaptureTestView : UserControl
 
         private void OnEncoded(uint durationRtp, byte[] encoded, TimeSpan contentTimestamp)
         {
-            if (_disposed || encoded is null || encoded.Length == 0) return;
+            if (_disposed || encoded is null || encoded.Length == 0)
+            {
+                return;
+            }
 
             IReadOnlyList<DecodedVideoFrame> frames;
             try
@@ -378,9 +388,16 @@ public partial class CaptureTestView : UserControl
             for (var i = 0; i < frames.Count; i++)
             {
                 var decoded = frames[i];
-                if (decoded.Bgra is null || decoded.Bgra.Length == 0) continue;
+                if (decoded.Bgra is null || decoded.Bgra.Length == 0)
+                {
+                    continue;
+                }
+
                 var bgraSize = decoded.Width * decoded.Height * 4;
-                if (decoded.Bgra.Length < bgraSize) continue;
+                if (decoded.Bgra.Length < bgraSize)
+                {
+                    continue;
+                }
 
                 var data = new CaptureFrameData(
                     decoded.Bgra.AsSpan(0, bgraSize),
@@ -443,7 +460,11 @@ public partial class CaptureTestView : UserControl
         {
             lock (_lock)
             {
-                if (_disposed) return;
+                if (_disposed)
+                {
+                    return;
+                }
+
                 _disposed = true;
                 try { _capture.TextureArrived -= OnTextureArrived; } catch { }
                 _staging?.Dispose();
@@ -453,14 +474,23 @@ public partial class CaptureTestView : UserControl
 
         private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
         {
-            if (nativeTexture == IntPtr.Zero || width <= 0 || height <= 0) return;
+            if (nativeTexture == IntPtr.Zero || width <= 0 || height <= 0)
+            {
+                return;
+            }
 
             lock (_lock)
             {
-                if (_disposed) return;
+                if (_disposed)
+                {
+                    return;
+                }
 
                 EnsureStagingLocked(width, height);
-                if (_staging is null) return;
+                if (_staging is null)
+                {
+                    return;
+                }
 
                 using var sourceTexture = new ID3D11Texture2D(nativeTexture);
                 _context.CopyResource(_staging, sourceTexture);
@@ -509,7 +539,11 @@ public partial class CaptureTestView : UserControl
 
         private void EnsureStagingLocked(int width, int height)
         {
-            if (_staging is not null && _stagingWidth == width && _stagingHeight == height) return;
+            if (_staging is not null && _stagingWidth == width && _stagingHeight == height)
+            {
+                return;
+            }
+
             _staging?.Dispose();
             var desc = new Texture2DDescription
             {

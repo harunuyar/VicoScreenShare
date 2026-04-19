@@ -34,7 +34,10 @@ public partial class RoomView : UserControl
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (DataContext is not RoomViewModel vm) return;
+        if (DataContext is not RoomViewModel vm)
+        {
+            return;
+        }
 
         switch (e.Key)
         {
@@ -81,7 +84,10 @@ public partial class RoomView : UserControl
     /// </summary>
     private void OnPaintStatsTick(object? sender, EventArgs e)
     {
-        if (DataContext is not RoomViewModel vm) return;
+        if (DataContext is not RoomViewModel vm)
+        {
+            return;
+        }
 
         var now = DateTime.UtcNow;
         if (_prevTickUtc == DateTime.MinValue)
@@ -102,7 +108,10 @@ public partial class RoomView : UserControl
         ref long prevInput, ref long prevPainted,
         double elapsedSeconds)
     {
-        if (renderer is null) return null;
+        if (renderer is null)
+        {
+            return null;
+        }
 
         // Single atomic read of input+painted under the renderer's
         // lock. Reading the two counters separately outside the lock
@@ -128,7 +137,11 @@ public partial class RoomView : UserControl
 
     private void OnCopyRoomIdClick(object sender, RoutedEventArgs e)
     {
-        if (DataContext is not RoomViewModel vm) return;
+        if (DataContext is not RoomViewModel vm)
+        {
+            return;
+        }
+
         try
         {
             Clipboard.SetText(vm.RoomId);

@@ -80,7 +80,10 @@ public sealed partial class HomeViewModel : ViewModelBase
         foreach (var row in Connections)
         {
             row.IsActive = row.Id == _settings.ActiveConnectionId;
-            if (row.IsActive) ActiveConnection = row;
+            if (row.IsActive)
+            {
+                ActiveConnection = row;
+            }
         }
     }
 
@@ -132,7 +135,11 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private void EditConnection(ConnectionEntryViewModel row)
     {
-        if (row is null) return;
+        if (row is null)
+        {
+            return;
+        }
+
         _editingConnectionId = row.Id;
         EditName = row.Name;
         EditUri = row.Uri.ToString();
@@ -182,7 +189,10 @@ public sealed partial class HomeViewModel : ViewModelBase
             });
             Connections.Add(fresh);
             // If there was no active connection before, the new one wins.
-            if (_settings.ActiveConnectionId is null) _settings.ActiveConnectionId = fresh.Id;
+            if (_settings.ActiveConnectionId is null)
+            {
+                _settings.ActiveConnectionId = fresh.Id;
+            }
         }
 
         PersistConnections();
@@ -195,7 +205,11 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private async Task SetActiveAsync(ConnectionEntryViewModel row)
     {
-        if (row is null || row.IsActive) return;
+        if (row is null || row.IsActive)
+        {
+            return;
+        }
+
         _settings.ActiveConnectionId = row.Id;
         PersistConnections();
         SyncActiveFlag();
@@ -206,7 +220,11 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private async Task DeleteConnectionAsync(ConnectionEntryViewModel row)
     {
-        if (row is null) return;
+        if (row is null)
+        {
+            return;
+        }
+
         Connections.Remove(row);
         // If the deleted row was active, fall back to the next remaining entry.
         if (_settings.ActiveConnectionId == row.Id)
@@ -230,7 +248,11 @@ public sealed partial class HomeViewModel : ViewModelBase
     private async Task RefreshActiveStatusAsync()
     {
         var active = ActiveConnection;
-        if (active is null) return;
+        if (active is null)
+        {
+            return;
+        }
+
         active.Status = ServerStatus.Checking;
         var result = await _statusProbe.ProbeAsync(active.Uri,
             hasSavedPassword: !string.IsNullOrEmpty(active.Password)).ConfigureAwait(true);
@@ -284,15 +306,32 @@ public sealed partial class HomeViewModel : ViewModelBase
 
     private static string SanitizeRoomId(string raw)
     {
-        if (string.IsNullOrEmpty(raw)) return string.Empty;
+        if (string.IsNullOrEmpty(raw))
+        {
+            return string.Empty;
+        }
+
         Span<char> buf = stackalloc char[6];
         var n = 0;
         foreach (var c in raw)
         {
-            if (n == 6) break;
-            if (c >= '0' && c <= '9') buf[n++] = c;
-            else if (c >= 'A' && c <= 'Z') buf[n++] = c;
-            else if (c >= 'a' && c <= 'z') buf[n++] = (char)(c - 32);
+            if (n == 6)
+            {
+                break;
+            }
+
+            if (c >= '0' && c <= '9')
+            {
+                buf[n++] = c;
+            }
+            else if (c >= 'A' && c <= 'Z')
+            {
+                buf[n++] = c;
+            }
+            else if (c >= 'a' && c <= 'z')
+            {
+                buf[n++] = (char)(c - 32);
+            }
         }
         return new string(buf[..n]);
     }
@@ -344,7 +383,11 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private Task CreateRoomAsync()
     {
-        if (!ValidateDisplayName()) return Task.CompletedTask;
+        if (!ValidateDisplayName())
+        {
+            return Task.CompletedTask;
+        }
+
         SaveDisplayName();
         return RunRoomOperationAsync(signaling => signaling.CreateRoomAsync());
     }
@@ -352,7 +395,11 @@ public sealed partial class HomeViewModel : ViewModelBase
     [RelayCommand]
     private Task JoinRoomAsync()
     {
-        if (!ValidateDisplayName()) return Task.CompletedTask;
+        if (!ValidateDisplayName())
+        {
+            return Task.CompletedTask;
+        }
+
         if (JoinRoomId.Length < 6)
         {
             StatusMessage = "Enter a 6-character room ID.";

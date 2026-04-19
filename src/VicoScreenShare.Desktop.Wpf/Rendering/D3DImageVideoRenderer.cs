@@ -156,9 +156,20 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static void OnCutoutForChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is not FrameworkElement fe) return;
-        if (e.OldValue is D3DImageVideoRenderer old) old.UnregisterCutoutElement(fe);
-        if (e.NewValue is D3DImageVideoRenderer @new) @new.RegisterCutoutElement(fe);
+        if (d is not FrameworkElement fe)
+        {
+            return;
+        }
+
+        if (e.OldValue is D3DImageVideoRenderer old)
+        {
+            old.UnregisterCutoutElement(fe);
+        }
+
+        if (e.NewValue is D3DImageVideoRenderer @new)
+        {
+            @new.RegisterCutoutElement(fe);
+        }
     }
 
     /// <summary>
@@ -186,7 +197,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static void OnCutoutForAllChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is not FrameworkElement fe) return;
+        if (d is not FrameworkElement fe)
+        {
+            return;
+        }
+
         if (e.NewValue is true)
         {
             if (!_globalCutoutElements.Contains(fe))
@@ -226,7 +241,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static void OnRegionInputChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is D3DImageVideoRenderer self) self.QueueRegionUpdate();
+        if (d is D3DImageVideoRenderer self)
+        {
+            self.QueueRegionUpdate();
+        }
     }
 
     // Elements registered via CutoutFor. Each element's LayoutUpdated
@@ -237,7 +255,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void RegisterCutoutElement(FrameworkElement element)
     {
-        if (_cutoutElements.Contains(element)) return;
+        if (_cutoutElements.Contains(element))
+        {
+            return;
+        }
+
         _cutoutElements.Add(element);
         element.LayoutUpdated += OnCutoutLayoutUpdated;
         element.IsVisibleChanged += OnCutoutVisibilityChanged;
@@ -246,7 +268,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void UnregisterCutoutElement(FrameworkElement element)
     {
-        if (!_cutoutElements.Remove(element)) return;
+        if (!_cutoutElements.Remove(element))
+        {
+            return;
+        }
+
         element.LayoutUpdated -= OnCutoutLayoutUpdated;
         element.IsVisibleChanged -= OnCutoutVisibilityChanged;
         QueueRegionUpdate();
@@ -262,7 +288,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
     /// </summary>
     private void QueueRegionUpdate()
     {
-        if (_regionUpdateQueued) return;
+        if (_regionUpdateQueued)
+        {
+            return;
+        }
+
         _regionUpdateQueued = true;
         Dispatcher.BeginInvoke(new Action(() =>
         {
@@ -281,7 +311,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
     /// </summary>
     private void UpdateWindowRegion()
     {
-        if (_hwnd == IntPtr.Zero) return;
+        if (_hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
         var w = (int)Math.Max(1, ActualWidth);
         var h = (int)Math.Max(1, ActualHeight);
 
@@ -312,7 +346,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 (int)Math.Round(h * scale));
         }
 
-        if (baseRgn == IntPtr.Zero) return;
+        if (baseRgn == IntPtr.Zero)
+        {
+            return;
+        }
 
         // Union of per-renderer + global cutouts. Global cutouts let a WPF
         // overlay (e.g. self-preview's chrome strip) punch holes in every
@@ -324,7 +361,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
         foreach (var element in allCutouts)
         {
-            if (!element.IsVisible || element.ActualWidth <= 0 || element.ActualHeight <= 0) continue;
+            if (!element.IsVisible || element.ActualWidth <= 0 || element.ActualHeight <= 0)
+            {
+                continue;
+            }
+
             try
             {
                 var transform = element.TransformToVisual(this);
@@ -659,7 +700,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void InitD3DLocked()
     {
-        if (_swapChain is not null) return;
+        if (_swapChain is not null)
+        {
+            return;
+        }
 
         var sharedDevices = App.SharedDevices;
         if (sharedDevices is null)
@@ -718,10 +762,17 @@ public sealed class D3DImageVideoRenderer : HwndHost
         QueueRegionUpdate();
         lock (_renderLock)
         {
-            if (_disposed || _swapChain is null) return;
+            if (_disposed || _swapChain is null)
+            {
+                return;
+            }
+
             var newW = Math.Max(1, (int)ActualWidth);
             var newH = Math.Max(1, (int)ActualHeight);
-            if (newW == _swapChainWidth && newH == _swapChainHeight) return;
+            if (newW == _swapChainWidth && newH == _swapChainHeight)
+            {
+                return;
+            }
 
             // Order matters: every D3D reference to the swap chain's
             // back buffers has to be released BEFORE ResizeBuffers. The
@@ -759,12 +810,18 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static void OnReceiverChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is D3DImageVideoRenderer self) self.RefreshActiveFrameSource();
+        if (d is D3DImageVideoRenderer self)
+        {
+            self.RefreshActiveFrameSource();
+        }
     }
 
     private static void OnLocalPreviewSourceChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is D3DImageVideoRenderer self) self.RefreshActiveFrameSource();
+        if (d is D3DImageVideoRenderer self)
+        {
+            self.RefreshActiveFrameSource();
+        }
     }
 
     /// <summary>
@@ -804,7 +861,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void DetachReceiver()
     {
-        if (_attachedReceiver is null) return;
+        if (_attachedReceiver is null)
+        {
+            return;
+        }
+
         try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch { }
         try { _attachedReceiver.TextureArrived -= OnTextureArrived; } catch { }
         _attachedReceiver = null;
@@ -824,7 +885,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void DetachLocalSource()
     {
-        if (_attachedLocalSource is null) return;
+        if (_attachedLocalSource is null)
+        {
+            return;
+        }
+
         try { _attachedLocalSource.FrameArrived -= OnFrameArrived; } catch { }
         try { _attachedLocalSource.TextureArrived -= OnTextureArrived; } catch { }
         _attachedLocalSource = null;
@@ -836,7 +901,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void OnFrameArrived(in CaptureFrameData frame)
     {
-        if (frame.Format != CaptureFramePixelFormat.Bgra8) return;
+        if (frame.Format != CaptureFramePixelFormat.Bgra8)
+        {
+            return;
+        }
 
         // Two routes from here:
         //
@@ -856,7 +924,11 @@ public sealed class D3DImageVideoRenderer : HwndHost
         {
             lock (_renderLock)
             {
-                if (_disposed) return;
+                if (_disposed)
+                {
+                    return;
+                }
+
                 InputFrameCount++;
             }
             if (_attachedReceiver is not null)
@@ -904,17 +976,27 @@ public sealed class D3DImageVideoRenderer : HwndHost
     /// </summary>
     private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
     {
-        if (nativeTexture == IntPtr.Zero || width <= 0 || height <= 0) return;
+        if (nativeTexture == IntPtr.Zero || width <= 0 || height <= 0)
+        {
+            return;
+        }
 
         try
         {
             lock (_renderLock)
             {
-                if (_disposed) return;
+                if (_disposed)
+                {
+                    return;
+                }
+
                 InputFrameCount++;
 
                 InitD3DLocked();
-                if (_swapChain is null || _device is null || _context is null) return;
+                if (_swapChain is null || _device is null || _context is null)
+                {
+                    return;
+                }
 
                 var count = System.Threading.Interlocked.Increment(ref _frameArrivedCount);
                 if (count <= 3 || count % 300 == 0)
@@ -955,7 +1037,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
     /// </summary>
     private void PaintFromQueue(in DecodedVideoFrame frame)
     {
-        if (frame.Bgra is null || frame.Width <= 0 || frame.Height <= 0) return;
+        if (frame.Bgra is null || frame.Width <= 0 || frame.Height <= 0)
+        {
+            return;
+        }
 
         // Wrap the decoded frame as a CaptureFrameData so we can reuse
         // OnFrameArrivedCore's upload + scale + present sequence — that
@@ -989,7 +1074,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
         var paintStart = System.Diagnostics.Stopwatch.GetTimestamp();
         lock (_renderLock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
 
             // Lazy D3D init on first frame — we now know we have both
             // a valid hwnd AND WPF has had a chance to lay us out so
@@ -1002,7 +1090,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
             var width = frame.Width;
             var height = frame.Height;
-            if (width <= 0 || height <= 0) return;
+            if (width <= 0 || height <= 0)
+            {
+                return;
+            }
 
             var count = System.Threading.Interlocked.Increment(ref _frameArrivedCount);
             if (count <= 3 || count % 300 == 0)
@@ -1112,7 +1203,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private void EnsureUploadTextureLocked(int width, int height)
     {
-        if (_uploadTexture is not null && _uploadWidth == width && _uploadHeight == height) return;
+        if (_uploadTexture is not null && _uploadWidth == width && _uploadHeight == height)
+        {
+            return;
+        }
 
         _uploadTexture?.Dispose();
         // DEFAULT usage + ShaderResource + RenderTarget. D3D11 Video
@@ -1160,7 +1254,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         lock (ClassRegLock)
         {
-            if (_classRegistered) return;
+            if (_classRegistered)
+            {
+                return;
+            }
             // Shared WndProc that dispatches mouse messages back to the
             // HwndHost instance owning each HWND, so WPF sees clicks on
             // the video. Keep rooted so GC can't collect the delegate.
@@ -1201,7 +1298,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
         if (_instancesByHwnd.TryGetValue(hwnd, out var self))
         {
             var handled = self.DispatchMouseMessage(msg, lParam);
-            if (handled) return IntPtr.Zero;
+            if (handled)
+            {
+                return IntPtr.Zero;
+            }
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }

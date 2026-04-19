@@ -17,7 +17,11 @@ public class BgraToI420Tests
     {
         // A 2x2 solid-white BGRA source: each pixel is FF FF FF FF (B G R A).
         var src = new byte[2 * 2 * 4];
-        for (var i = 0; i < src.Length; i++) src[i] = 0xFF;
+        for (var i = 0; i < src.Length; i++)
+        {
+            src[i] = 0xFF;
+        }
+
         var dst = new byte[BgraToI420.RequiredOutputSize(2, 2)];
 
         BgraToI420.Convert(src, 2, 2, bgraStrideBytes: 8, dst);
@@ -38,7 +42,11 @@ public class BgraToI420Tests
     {
         var src = new byte[2 * 2 * 4];
         // BGRA = 00 00 00 FF — black with full alpha
-        for (var i = 3; i < src.Length; i += 4) src[i] = 0xFF;
+        for (var i = 3; i < src.Length; i += 4)
+        {
+            src[i] = 0xFF;
+        }
+
         var dst = new byte[BgraToI420.RequiredOutputSize(2, 2)];
 
         BgraToI420.Convert(src, 2, 2, 8, dst);
