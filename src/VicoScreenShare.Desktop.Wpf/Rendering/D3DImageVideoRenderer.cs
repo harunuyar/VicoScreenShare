@@ -610,16 +610,88 @@ public sealed class D3DImageVideoRenderer : HwndHost
     private readonly TimestampedFrameQueue _playoutQueue;
     private readonly PresentLoop _presentLoop;
 
-    // Diagnostics for the stats overlay. Tracks both sides of the coin:
-    //   InputFrameCount    — every frame that reached OnFrameArrived from
-    //                        the decoder (before any render work).
-    //   PaintedFrameCount  — every frame that actually made it through
-    //                        the upload + scaler + Present cycle.
-    //   LastPaintMs        — wall-clock time of the last paint.
+    // Diagnostics for the stats overlay:
+    //   InputFrameCount          — every frame that reached OnFrameArrived
+    //                              from the decoder (before any render work).
+    //   PresentSubmissionCount   — every Present(0) call we made. With
+    //                              flip-model + SyncInterval=0, DWM coalesces
+    //                              successive submissions inside one refresh
+    //                              cycle, so this can be MUCH higher than the
+    //                              frames the user actually sees.
+    //   PaintedFrameCount        — frames actually composited by DWM, via
+    //                              IDXGISwapChain.GetFrameStatistics(). This
+    //                              is the honest "what did my eyes see" stat.
+    //   LastPaintMs              — wall-clock time of the last paint.
     public long InputFrameCount { get; private set; }
-    public long PaintedFrameCount { get; private set; }
-    public long DroppedFrameCount => InputFrameCount - PaintedFrameCount;
+
+    /// <summary>
+    /// Submission counter: how many times we called <see cref="IDXGISwapChain.Present"/>
+    /// successfully. Diagnostic — see <see cref="PaintedFrameCount"/> for the
+    /// actually-composited-by-DWM count.
+    /// </summary>
+    public long PresentSubmissionCount { get; private set; }
+
+    /// <summary>
+    /// Actual frames composited by DWM on this swap chain, derived from
+    /// <see cref="IDXGISwapChain.GetFrameStatistics"/> and baselined at swap
+    /// chain creation. Under GPU pressure this is the number the user
+    /// actually sees — <see cref="PresentSubmissionCount"/> can be orders of
+    /// magnitude higher because our flip-model Presents coalesce inside each
+    /// DWM refresh tick.
+    /// </summary>
+    public long PaintedFrameCount
+    {
+        get
+        {
+            lock (_renderLock)
+            {
+                return QueryDwmPresentedCountLocked();
+            }
+        }
+    }
+
+    /// <summary>Submissions minus actual DWM presents — how many Presents we
+    /// wasted because we were ahead of the compositor.</summary>
+    public long DroppedFrameCount => PresentSubmissionCount - PaintedFrameCount;
     public double LastPaintMs { get; private set; }
+
+    private uint _presentCountBaseline;
+    private bool _presentBaselineCaptured;
+    private long _lastReportedPresented;
+
+    /// <summary>
+    /// Read DXGI's frame statistics for this swap chain and translate
+    /// <c>PresentCount</c> into a monotonic count starting at zero for the
+    /// current swap chain. Called under <see cref="_renderLock"/>.
+    /// </summary>
+    private long QueryDwmPresentedCountLocked()
+    {
+        if (_swapChain is null)
+        {
+            return _lastReportedPresented;
+        }
+        try
+        {
+            var hr = _swapChain.GetFrameStatistics(out var stats);
+            if (hr.Failure)
+            {
+                return _lastReportedPresented;
+            }
+            if (!_presentBaselineCaptured)
+            {
+                _presentCountBaseline = stats.PresentCount;
+                _presentBaselineCaptured = true;
+            }
+            // UINT32 wrap arithmetic: stats.PresentCount - baseline works
+            // correctly for ~136 years at 1 fps; not worth guarding further.
+            _lastReportedPresented = (long)(uint)(stats.PresentCount - _presentCountBaseline);
+            return _lastReportedPresented;
+        }
+        catch
+        {
+            return _lastReportedPresented;
+        }
+    }
 
     /// <summary>
     /// Atomic snapshot of the three counters. Taken under the render
@@ -631,7 +703,7 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         lock (_renderLock)
         {
-            return (InputFrameCount, PaintedFrameCount, LastPaintMs);
+            return (InputFrameCount, QueryDwmPresentedCountLocked(), LastPaintMs);
         }
     }
 
@@ -833,6 +905,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
                 _uploadTexture = null;
                 _uploadWidth = 0;
                 _uploadHeight = 0;
+                // New swap chain = new DXGI PresentCount baseline next time
+                // we can successfully query stats on the rebuilt chain.
+                _presentBaselineCaptured = false;
+                _presentCountBaseline = 0;
             }
         }
     }
@@ -1202,7 +1278,9 @@ public sealed class D3DImageVideoRenderer : HwndHost
         try
         {
             _swapChain.Present(0, PresentFlags.None);
-            PaintedFrameCount++;
+            // Submission counter only. Actual "user sees it" count comes
+            // from IDXGISwapChain.GetFrameStatistics → PaintedFrameCount.
+            PresentSubmissionCount++;
         }
         catch (Exception ex)
         {
@@ -1306,7 +1384,9 @@ public sealed class D3DImageVideoRenderer : HwndHost
         try
         {
             _swapChain.Present(0, PresentFlags.None);
-            PaintedFrameCount++;
+            // Submission counter only. Actual "user sees it" count comes
+            // from IDXGISwapChain.GetFrameStatistics → PaintedFrameCount.
+            PresentSubmissionCount++;
         }
         catch (Exception ex)
         {
