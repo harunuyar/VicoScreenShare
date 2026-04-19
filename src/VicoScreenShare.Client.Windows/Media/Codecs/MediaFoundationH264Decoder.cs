@@ -50,6 +50,15 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     private readonly ID3D11Device? _d3dDevice;
     private readonly IMFDXGIDeviceManager? _dxgiManager;
     private readonly bool _useD3dPath;
+    // True when this decoder instance created + owns its D3D11 device
+    // (as opposed to borrowing one from the caller). Owned devices are
+    // used for per-stream parallel decode — each StreamReceiver's
+    // decoder gets its own device so ID3D11Multithread doesn't
+    // serialize submissions across three simultaneous decoders. The
+    // GPU-texture handoff path is disabled for owned devices because
+    // cross-device ID3D11Texture2D is not valid; callers fall back to
+    // the CPU-bytes path automatically.
+    private readonly bool _ownsDevice;
     private D3D11VideoScaler? _scaler;
     private ID3D11Texture2D? _bgraStaging;
     private int _bgraStagingWidth;
@@ -79,15 +88,30 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
 
     public MediaFoundationH264Decoder(ID3D11Device? externalDevice)
     {
-        // Bind to the caller's shared device when provided. The wrapper
-        // manager lets the MFT see this exact device on SET_D3D_MANAGER
-        // so the decoded NV12 textures land on the same device our
-        // D3D11VideoScaler runs on — no shared handles, no cross-device
-        // copies. Mirrors the encoder path.
+        // Device binding strategy:
+        //
+        //   externalDevice != null
+        //     Borrow the caller's device. Decoder can emit D3D11 textures
+        //     directly to the GpuOutputHandler — the consumer (renderer)
+        //     runs on the same device so ID3D11Texture2D pointers can
+        //     cross the callback boundary.
+        //
+        //   externalDevice == null
+        //     Create our own private D3D11 device. Lets three or more
+        //     StreamReceivers run their decoders in parallel without
+        //     ID3D11Multithread lock contention on a shared device.
+        //     GpuOutputHandler is NOT invoked — its texture would be on
+        //     the private device and unusable by the caller — so we
+        //     produce BGRA bytes via the existing CPU path.
         if (externalDevice is not null)
         {
             _d3dDevice = externalDevice;
             _dxgiManager = TryWrapExternalDevice(externalDevice);
+        }
+        else
+        {
+            (_d3dDevice, _dxgiManager) = TryCreatePrivateD3DManager();
+            _ownsDevice = _d3dDevice is not null;
         }
 
         _transform = CreateDecoder()
@@ -173,6 +197,52 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         {
             DebugLog.Write($"[mf] decoder TryWrapExternalDevice threw: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Create a fresh D3D11 device + DXGI manager owned by this decoder
+    /// instance. Mirrors the encoder's <c>TryCreateD3DManager</c>. The
+    /// device is flagged multithread-protected because MF async MFTs
+    /// invoke our event pump on an internal worker thread — without the
+    /// flag, concurrent access to the device and its context crashes.
+    /// Returns (null, null) on failure; the decoder then falls through
+    /// to a software / sysmem path.
+    /// </summary>
+    private static (ID3D11Device? device, IMFDXGIDeviceManager? manager) TryCreatePrivateD3DManager()
+    {
+        try
+        {
+            var hr = D3D11.D3D11CreateDevice(
+                adapter: null,
+                Vortice.Direct3D.DriverType.Hardware,
+                DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
+                new[]
+                {
+                    Vortice.Direct3D.FeatureLevel.Level_11_1,
+                    Vortice.Direct3D.FeatureLevel.Level_11_0,
+                },
+                out var device,
+                out _,
+                out _);
+            if (hr.Failure || device is null)
+            {
+                DebugLog.Write($"[mf] decoder D3D11CreateDevice failed (HR=0x{(uint)hr.Code:X8}); falling back to sysmem decode");
+                return (null, null);
+            }
+
+            using var mt = device.QueryInterface<ID3D11Multithread>();
+            mt.SetMultithreadProtected(true);
+
+            var manager = MediaFactory.MFCreateDXGIDeviceManager();
+            manager.ResetDevice(device);
+            DebugLog.Write("[mf] decoder created private D3D11 device + DXGI manager");
+            return (device, manager);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[mf] decoder TryCreatePrivateD3DManager threw: {ex.Message}; falling back to sysmem decode");
+            return (null, null);
         }
     }
 
@@ -345,7 +415,13 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                 // The sink is expected to GPU-copy the texture into its
                 // own pool inside the callback; _bgraDest is reused on
                 // the next frame.
-                if (_useD3dPath && GpuOutputHandler is { } gpuSink)
+                //
+                // Skip the GPU handoff when we own our device: the
+                // renderer that registered the handler is on its own
+                // device (the shared one in App.SharedDevices) and
+                // cannot use our ID3D11Texture2D. CPU readback path
+                // below handles it.
+                if (_useD3dPath && !_ownsDevice && GpuOutputHandler is { } gpuSink)
                 {
                     if (BlitSampleToBgraGpu(outSample))
                     {
@@ -807,6 +883,11 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
         try { _bgraDest?.Dispose(); } catch { }
         try { _bgraStaging?.Dispose(); } catch { }
         try { _dxgiManager?.Dispose(); } catch { }
-        // _d3dDevice is caller-owned — do not dispose.
+        // Dispose _d3dDevice only when this decoder created it. If the
+        // caller passed in a shared device, they own its lifetime.
+        if (_ownsDevice)
+        {
+            try { _d3dDevice?.Dispose(); } catch { }
+        }
     }
 }

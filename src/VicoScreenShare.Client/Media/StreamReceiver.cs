@@ -41,6 +41,32 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     private System.Threading.Channels.Channel<PendingEncodedFrame>? _decodeQueue;
     private System.Threading.Thread? _decodeWorker;
     private System.Threading.CancellationTokenSource? _decodeCts;
+    private const int DecodeQueueCapacity = 30;
+    // Diagnostic counters — the periodic pulse log reads and resets these.
+    private long _decodeQueueDroppedTotal;
+    private long _decoderExceptionsTotal;
+    private long _decodeWorkerRanTotal;
+    private long _skipToIdrEventsTotal;
+    private long _lastPulseReceived;
+    private long _lastPulseBytes;
+    private long _lastPulseDropped;
+    private long _lastPulseExceptions;
+    private long _lastPulseWorkerRan;
+    private long _lastPulseSkipToIdr;
+    private System.Threading.Timer? _pulseTimer;
+
+    // Drop-to-IDR recovery state. When the decode queue fills, we drain
+    // it and reject incoming non-keyframe input until we see an IDR, so
+    // the decoder never consumes a P-frame whose reference chain we
+    // broke. Without this the decoder produces color-smear corruption
+    // that persists until the next natural IDR anyway — skipping to
+    // the IDR directly is cleaner UX (brief freeze, then clean video).
+    // A framecount guard prevents hanging on intra-refresh streams that
+    // never emit a classical IDR.
+    private bool _awaitingKeyframe;
+    private int _awaitingKeyframeFramesSeen;
+    private const int AwaitingKeyframeMaxFrames = 240; // ~2 s at 120 fps
+    private uint _remoteSsrc;
 
     private readonly record struct PendingEncodedFrame(byte[] Bytes, uint RtpTimestamp, DateTime ArrivalUtc);
 
@@ -89,6 +115,25 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     /// when the decode queue is shedding frames to keep up.
     /// </summary>
     public long EncodedByteCount => System.Threading.Interlocked.Read(ref _encodedByteCountAtomic);
+
+    /// <summary>
+    /// Cumulative count of encoded frames dropped before they reached the
+    /// decoder — either evicted from the bounded decode queue under
+    /// backpressure, or discarded by the drop-to-IDR gate while waiting
+    /// for a keyframe. Non-zero values signal the receiver is losing
+    /// source frames (visible as reduced paint fps / frozen tile).
+    /// </summary>
+    public long DecodeQueueDroppedCount => System.Threading.Interlocked.Read(ref _decodeQueueDroppedTotal);
+
+    /// <summary>
+    /// Cumulative count of drop-to-IDR events: times we drained the
+    /// decode queue and armed the await-keyframe gate because the decoder
+    /// couldn't keep up. Each event costs up to one keyframe interval of
+    /// visible freeze. A counter stuck at zero means the decoder is
+    /// comfortably keeping up; a rising counter means you're at or past
+    /// the decode capacity limit for this machine.
+    /// </summary>
+    public long SkipToIdrCount => System.Threading.Interlocked.Read(ref _skipToIdrEventsTotal);
 
     /// <summary>Width of the most recently decoded frame, or 0 if nothing
     /// has decoded yet.</summary>
@@ -173,7 +218,50 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         _pc.OnVideoFrameReceived += OnVideoFrameReceived;
         _pc.OnRtpPacketReceived += OnRtpPacketReceived;
         _pc.onconnectionstatechange += OnConnectionStateChange;
+
+        // Pulse log every 2 s. Rate-limited and cheap — a handful of
+        // Interlocked reads + one DebugLog line per subscriber. Gives
+        // us a window into exactly where frames are being dropped:
+        // decode queue saturation vs decoder exceptions vs clean flow.
+        _pulseTimer = new System.Threading.Timer(
+            _ => EmitPulse(), null,
+            System.TimeSpan.FromSeconds(2),
+            System.TimeSpan.FromSeconds(2));
         return System.Threading.Tasks.Task.CompletedTask;
+    }
+
+    private void EmitPulse()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        var received = System.Threading.Interlocked.Read(ref _framesReceivedCount);
+        var bytes = System.Threading.Interlocked.Read(ref _encodedByteCountAtomic);
+        var dropped = System.Threading.Interlocked.Read(ref _decodeQueueDroppedTotal);
+        var exceptions = System.Threading.Interlocked.Read(ref _decoderExceptionsTotal);
+        var workerRan = System.Threading.Interlocked.Read(ref _decodeWorkerRanTotal);
+        var skipEvents = System.Threading.Interlocked.Read(ref _skipToIdrEventsTotal);
+        var qCount = _decodeQueue?.Reader.Count ?? 0;
+
+        var dR = received - _lastPulseReceived; _lastPulseReceived = received;
+        var dB = bytes - _lastPulseBytes; _lastPulseBytes = bytes;
+        var dDrop = dropped - _lastPulseDropped; _lastPulseDropped = dropped;
+        var dExc = exceptions - _lastPulseExceptions; _lastPulseExceptions = exceptions;
+        var dWr = workerRan - _lastPulseWorkerRan; _lastPulseWorkerRan = workerRan;
+        var dSkip = skipEvents - _lastPulseSkipToIdr; _lastPulseSkipToIdr = skipEvents;
+
+        // Quiet when idle (no frames in the window) so stopped rooms
+        // don't spam the log.
+        if (dR == 0 && dWr == 0)
+        {
+            return;
+        }
+
+        var mbps = dB * 8.0 / 2.0 / 1_000_000.0;
+        DebugLog.Write(
+            $"[recv-pulse {DisplayName}] 2s: rcvd=+{dR} dec=+{dWr} dropped=+{dDrop} excep=+{dExc} " +
+            $"skip2idr=+{dSkip} decQ={qCount}/{DecodeQueueCapacity} bw={mbps:F1} Mbps");
     }
 
     private void DecodeWorkerLoop()
@@ -214,6 +302,8 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         _pc.OnVideoFrameReceived -= OnVideoFrameReceived;
         _pc.OnRtpPacketReceived -= OnRtpPacketReceived;
         _pc.onconnectionstatechange -= OnConnectionStateChange;
+        try { _pulseTimer?.Dispose(); } catch { }
+        _pulseTimer = null;
 
         // Stop the decode worker. Cancel first to unblock any pending
         // ReadAsync, complete the channel so the loop exits cleanly, then
@@ -252,6 +342,7 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             DebugLog.Write($"[recv {DisplayName}] SSRC changed 0x{_lastLoggedSsrc:X8} -> 0x{ssrc:X8} at seq {seq}");
         }
         _lastLoggedSsrc = ssrc;
+        _remoteSsrc = ssrc;
 
         _rtpStats.Observe(ssrc, seq);
     }
@@ -321,12 +412,156 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             return;
         }
 
-        // Writer is single-writer (this thread). TryWrite is non-blocking
-        // even on a full channel — FullMode=DropOldest means an old queued
-        // frame gets evicted, freeing room for the new one. This keeps the
-        // receive thread bounded to a few microseconds per callback
-        // regardless of renderer backpressure.
+        var isKey = IsKeyframe(encodedSample);
+
+        // Drop-to-IDR gate. If we previously drained the decode queue
+        // and are waiting for a keyframe, discard non-keyframe input so
+        // the decoder never has to decode a P-frame whose reference
+        // chain we just broke.
+        if (_awaitingKeyframe)
+        {
+            if (isKey)
+            {
+                _awaitingKeyframe = false;
+                _awaitingKeyframeFramesSeen = 0;
+            }
+            else
+            {
+                _awaitingKeyframeFramesSeen++;
+                // Intra-refresh streams never emit a classical IDR but
+                // self-heal through cyclic intra-coded macroblocks.
+                // If we've been waiting past the deadline, give up and
+                // resume — the decoder will produce garbage for a
+                // refresh period then converge on its own.
+                if (_awaitingKeyframeFramesSeen < AwaitingKeyframeMaxFrames)
+                {
+                    System.Threading.Interlocked.Increment(ref _decodeQueueDroppedTotal);
+                    return;
+                }
+                DebugLog.Write($"[recv {DisplayName}] awaiting-keyframe timed out after {_awaitingKeyframeFramesSeen} non-key frames; resuming without keyframe");
+                _awaitingKeyframe = false;
+                _awaitingKeyframeFramesSeen = 0;
+            }
+        }
+
+        // Queue is about to saturate. Instead of letting BoundedChannel's
+        // DropOldest policy silently evict a random P-frame (which breaks
+        // the reference chain and produces the visible color-smear), drain
+        // the queue, arm the await-keyframe gate, and ask the publisher
+        // for an IDR via PLI so we don't have to wait for the natural
+        // keyframe interval. Clean recovery: brief freeze, then decode
+        // resumes against a fresh reference frame.
+        if (queue.Reader.Count >= DecodeQueueCapacity - 1)
+        {
+            DrainDecodeQueueLocked(queue);
+            System.Threading.Interlocked.Increment(ref _skipToIdrEventsTotal);
+            System.Threading.Interlocked.Increment(ref _decodeQueueDroppedTotal);
+            TryRequestKeyframe();
+            if (!isKey)
+            {
+                _awaitingKeyframe = true;
+                _awaitingKeyframeFramesSeen = 0;
+                return;
+            }
+            // Lucky: the frame we're holding IS a keyframe, feed it
+            // through directly and stay un-armed.
+        }
+
         queue.Writer.TryWrite(new PendingEncodedFrame(encodedSample, timestamp, DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// Classify an encoded frame as a keyframe. H.264: scan the Annex B
+    /// bitstream SIPSorcery hands us for a NAL unit of type 5 (IDR).
+    /// VP8: bit 0 of the first payload byte is <c>frame_type</c>,
+    /// <c>0 = keyframe</c>. Unknown codec → conservatively return false
+    /// so the skip-to-IDR logic won't resume on something it can't
+    /// classify.
+    /// </summary>
+    private bool IsKeyframe(byte[] encoded)
+    {
+        if (encoded is null || encoded.Length == 0)
+        {
+            return false;
+        }
+        switch (_decoder.Codec)
+        {
+            case VideoCodec.H264:
+                return ContainsH264Idr(encoded);
+            case VideoCodec.Vp8:
+                // VP8: bit 0 = frame_type (0=keyframe). Upper bits are
+                // the version and show_frame flags — irrelevant here.
+                return (encoded[0] & 0x01) == 0;
+            default:
+                return false;
+        }
+    }
+
+    private static bool ContainsH264Idr(byte[] buf)
+    {
+        // Scan for Annex B start codes (00 00 01 or 00 00 00 01) and
+        // read the NAL unit header byte immediately after. Low 5 bits
+        // are nal_unit_type; type 5 = IDR slice. Typical IDRs ship as
+        // SPS (7) + PPS (8) + IDR (5), but the presence of any type-5
+        // NAL is sufficient to confirm the frame is decodable without
+        // prior reference frames.
+        for (var i = 0; i + 3 < buf.Length; i++)
+        {
+            bool sc3 = buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1;
+            bool sc4 = !sc3 && i + 4 < buf.Length
+                && buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 0 && buf[i + 3] == 1;
+            if (!sc3 && !sc4)
+            {
+                continue;
+            }
+            var nalOffset = sc3 ? i + 3 : i + 4;
+            if (nalOffset >= buf.Length)
+            {
+                break;
+            }
+            var nalType = buf[nalOffset] & 0x1F;
+            if (nalType == 5)
+            {
+                return true;
+            }
+            i = nalOffset;
+        }
+        return false;
+    }
+
+    private void DrainDecodeQueueLocked(System.Threading.Channels.Channel<PendingEncodedFrame> queue)
+    {
+        while (queue.Reader.TryRead(out _))
+        {
+            // Discard. Each drained frame was going to be decoded into a
+            // P-frame against a reference the decoder was already late on.
+        }
+    }
+
+    /// <summary>
+    /// Send an RTCP PLI (Picture Loss Indication) to the remote so it
+    /// emits a fresh IDR immediately instead of waiting for the next
+    /// scheduled keyframe. No-op if we haven't yet observed an RTP
+    /// packet to learn the remote's SSRC. Failures are swallowed — the
+    /// worst case is we wait for the natural GOP boundary anyway.
+    /// </summary>
+    private void TryRequestKeyframe()
+    {
+        var remoteSsrc = _remoteSsrc;
+        if (remoteSsrc == 0 || _disposed)
+        {
+            return;
+        }
+        try
+        {
+            var localSsrc = _pc.VideoLocalTrack?.Ssrc ?? 0u;
+            var feedback = new RTCPFeedback(localSsrc, remoteSsrc, PSFBFeedbackTypesEnum.PLI);
+            _pc.SendRtcpFeedback(SDPMediaTypesEnum.video, feedback);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[recv {DisplayName}] SendRtcpFeedback(PLI) threw: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -368,12 +603,14 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             // overlay reads real intake rate regardless of what the
             // decode queue discards under backpressure.
             _gpuEmittedThisCall = 0;
+            System.Threading.Interlocked.Increment(ref _decodeWorkerRanTotal);
             try
             {
                 frames = _decoder.Decode(encodedSample, rtpInputTs);
             }
             catch (Exception ex)
             {
+                System.Threading.Interlocked.Increment(ref _decoderExceptionsTotal);
                 // Decoder error mid-stream (packet loss, malformed SPS, etc.)
                 // should not tear down the receive path. Log and skip.
                 DebugLog.Write($"[recv] decoder threw: {ex.Message}");

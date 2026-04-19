@@ -39,6 +39,49 @@ public sealed class D3DImageVideoRenderer : HwndHost
     {
         _playoutQueue = new TimestampedFrameQueue(App.ReceiveBufferFrames);
         _presentLoop = new PresentLoop(_playoutQueue, PaintFromQueue);
+        _pulseTimer = new System.Threading.Timer(
+            _ => EmitPulse(), null,
+            System.TimeSpan.FromSeconds(2),
+            System.TimeSpan.FromSeconds(2));
+    }
+
+    private void EmitPulse()
+    {
+        long input, submissions, presented;
+        int playoutDepth, ringBusy, ringSize;
+        lock (_renderLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            input = InputFrameCount;
+            submissions = PresentSubmissionCount;
+            presented = QueryDwmPresentedCountLocked();
+            playoutDepth = _playoutQueue.Count;
+            ringSize = _textureRing?.Length ?? 0;
+            ringBusy = 0;
+            if (_ringSlotInUse is not null)
+            {
+                for (var i = 0; i < _ringSlotInUse.Length; i++)
+                {
+                    if (_ringSlotInUse[i])
+                    {
+                        ringBusy++;
+                    }
+                }
+            }
+        }
+        var dIn = input - _pulseLastInput; _pulseLastInput = input;
+        var dSub = submissions - _pulseLastSubmissions; _pulseLastSubmissions = submissions;
+        var dPres = presented - _pulseLastPresented; _pulseLastPresented = presented;
+        if (dIn == 0 && dSub == 0 && dPres == 0)
+        {
+            return;
+        }
+        VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+            $"[paint-pulse hwnd=0x{_hwnd.ToInt64():X}] 2s: input=+{dIn} submit=+{dSub} displayed=+{dPres} " +
+            $"paintQ={playoutDepth}/{_playoutQueue.MaxCapacity} ring={ringBusy}/{ringSize}");
     }
 
     // The receiver DP is typed as ICaptureSource so anything that
@@ -609,6 +652,10 @@ public sealed class D3DImageVideoRenderer : HwndHost
     // the user actually watches).
     private readonly TimestampedFrameQueue _playoutQueue;
     private readonly PresentLoop _presentLoop;
+    private System.Threading.Timer? _pulseTimer;
+    private long _pulseLastInput;
+    private long _pulseLastSubmissions;
+    private long _pulseLastPresented;
 
     // Diagnostics for the stats overlay:
     //   InputFrameCount          — every frame that reached OnFrameArrived
@@ -762,6 +809,8 @@ public sealed class D3DImageVideoRenderer : HwndHost
         // the thread is mid-paint would race. PresentLoop.Dispose joins
         // the thread so the D3D teardown below is unopposed.
         _presentLoop.Dispose();
+        try { _pulseTimer?.Dispose(); } catch { }
+        _pulseTimer = null;
         _playoutQueue.Clear();
         lock (_renderLock)
         {

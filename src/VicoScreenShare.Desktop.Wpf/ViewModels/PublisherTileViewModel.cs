@@ -183,7 +183,24 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
             $"frames: {r.FramesDecoded}\n" +
             $"loss:   {r.RtpLossPercent:F1}% ({r.RtpPacketsInferredLost} / {r.RtpPacketsReceived + r.RtpPacketsInferredLost})";
 
-        Stats = string.IsNullOrEmpty(RenderStatsLine) ? core : core + "\n" + RenderStatsLine;
+        // Decoder-pipeline health. Only shown when non-zero so healthy
+        // tiles stay uncluttered — a user who sees "drops: 450" knows
+        // their machine is dropping source frames before decode (the
+        // classic visible "weird jumps" symptom), and "skip: 3" flags
+        // that the drop-to-IDR recovery fired that many times in this
+        // session. Both stay hidden at zero.
+        var dropped = r.DecodeQueueDroppedCount;
+        var skipped = r.SkipToIdrCount;
+        var health = (dropped, skipped) switch
+        {
+            (0, 0) => string.Empty,
+            (_, 0) => $"\ndrops:  {dropped}",
+            (0, _) => $"\nskip:   {skipped}",
+            _ => $"\ndrops:  {dropped}  skip: {skipped}",
+        };
+
+        var body = core + health;
+        Stats = string.IsNullOrEmpty(RenderStatsLine) ? body : body + "\n" + RenderStatsLine;
     }
 
     public async ValueTask DisposeAsync()
