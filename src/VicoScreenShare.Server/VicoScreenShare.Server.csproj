@@ -4,6 +4,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Fallback version for dev builds and VS runs. Deploys override this
+         via -p:Version=<git-commit-count-derived> so /healthz always
+         reports a monotonically newer value than the previous deploy. -->
+    <Version>0.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

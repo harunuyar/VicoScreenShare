@@ -17,6 +17,16 @@ using VicoScreenShare.Server.Signaling;
 /// </summary>
 public static class ServerHost
 {
+    /// <summary>
+    /// Build-stamped server version reported by <c>/healthz</c> so deploys
+    /// can be verified at a glance. The csproj ships a fallback value for
+    /// dev builds; the deploy script overrides it with a
+    /// git-commit-count-derived string so every production deploy is
+    /// monotonically newer than the previous one.
+    /// </summary>
+    public static readonly string ServerVersion =
+        typeof(ServerHost).Assembly.GetName().Version?.ToString() ?? "unknown";
+
     public static void ConfigureServices(IServiceCollection services, IConfiguration? configuration = null)
     {
         if (configuration is not null)
@@ -48,6 +58,7 @@ public static class ServerHost
                 status = "ok",
                 requiresAuth = !string.IsNullOrEmpty(pw),
                 protocolVersion = ProtocolVersion.Current,
+                version = ServerVersion,
             });
         });
 
