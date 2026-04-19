@@ -539,13 +539,14 @@ public sealed class WsSession
         var peerInfos = peers
             .Select(p => new PeerInfo(p.PeerId, p.DisplayName, p.IsStreaming, p.IsConnected))
             .ToArray();
+        var current = _options.CurrentValue;
         var joined = new RoomJoined(
             RoomId: room.Id,
             YourPeerId: PeerId,
             Peers: peerInfos,
-            IceServers: Array.Empty<IceServerConfig>(),
+            IceServers: VicoScreenShare.Server.Sfu.IceServers.ToWireConfig(current.IceServers),
             ResumeToken: resumeToken,
-            ResumeTtl: _options.CurrentValue.PeerGracePeriod);
+            ResumeTtl: current.PeerGracePeriod);
         return SendAsync(MessageType.RoomJoined, joined);
     }
 

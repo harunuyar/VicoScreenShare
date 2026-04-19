@@ -53,7 +53,7 @@ public sealed class RoomManager
             var room = new Room(id);
             if (_rooms.TryAdd(id, room))
             {
-                _sfuSessions[id] = new SfuSession(_loggerFactory);
+                _sfuSessions[id] = new SfuSession(_loggerFactory, _options);
                 return CreateRoomResult.Success(room);
             }
         }

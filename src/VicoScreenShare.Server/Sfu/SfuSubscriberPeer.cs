@@ -40,7 +40,7 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
     private long _prevLoggedBytes;
     private System.Threading.Timer? _rateLogTimer;
 
-    public SfuSubscriberPeer(Guid viewerPeerId, Guid publisherPeerId, ILogger<SfuSubscriberPeer>? logger = null)
+    public SfuSubscriberPeer(Guid viewerPeerId, Guid publisherPeerId, IReadOnlyList<RTCIceServer> iceServers, ILogger<SfuSubscriberPeer>? logger = null)
     {
         ViewerPeerId = viewerPeerId;
         PublisherPeerId = publisherPeerId;
@@ -48,10 +48,7 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
 
         _pc = new RTCPeerConnection(new RTCConfiguration
         {
-            iceServers = new List<RTCIceServer>
-            {
-                new() { urls = "stun:stun.l.google.com:19302" },
-            },
+            iceServers = new List<RTCIceServer>(iceServers),
             X_UseRtpFeedbackProfile = true,
         });
 

@@ -25,21 +25,35 @@ public sealed class WebRtcSession : IAsyncDisposable
     private bool _disposed;
 
     public WebRtcSession(SignalingClient signaling, WebRtcRole role)
-        : this(signaling, role, VideoCodec.Vp8)
+        : this(signaling, role, VideoCodec.Vp8, iceServers: null)
     {
     }
 
     public WebRtcSession(SignalingClient signaling, WebRtcRole role, VideoCodec codec)
+        : this(signaling, role, codec, iceServers: null)
+    {
+    }
+
+    public WebRtcSession(
+        SignalingClient signaling,
+        WebRtcRole role,
+        VideoCodec codec,
+        IReadOnlyList<RTCIceServer>? iceServers)
     {
         _signaling = signaling;
         _role = role;
 
+        // The room advertises its ICE servers via RoomJoined.IceServers;
+        // callers that join a room pass the list here. Null or empty =
+        // fall back to Google's public STUN so tests and stand-alone
+        // harnesses that bypass the server still get NAT traversal.
+        var servers = iceServers is { Count: > 0 }
+            ? new List<RTCIceServer>(iceServers)
+            : new List<RTCIceServer> { new() { urls = "stun:stun.l.google.com:19302" } };
+
         _pc = new RTCPeerConnection(new RTCConfiguration
         {
-            iceServers = new List<RTCIceServer>
-            {
-                new() { urls = "stun:stun.l.google.com:19302" },
-            },
+            iceServers = servers,
             X_UseRtpFeedbackProfile = true,
         });
 

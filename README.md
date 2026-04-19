@@ -1,47 +1,75 @@
-﻿# VicoScreenShare
+# VicoScreenShare
 
-Self-hosted Discord-alternative screen sharing. Streamer uploads one encoded video stream to a server, the server fans it out to room members without re-encoding (SFU pattern). Goal: user-controlled bitrate and resolution without a paid tier.
-
-## Status
-
-Phase 0 -- solution skeleton. Nothing streams yet. Phased delivery plan is tracked outside the repo.
+Self-hosted screen sharing. One publisher uploads an encoded video stream to the server; the server fans it out unchanged (SFU pattern) to every viewer in the room. Goal: user-controlled bitrate / resolution / codec without a paid tier, multiple concurrent streams per room.
 
 ## Stack
 
-- **UI shell** (`VicoScreenShare.Client`): Avalonia on .NET 10, platform-neutral class library.
-- **Windows host** (`VicoScreenShare.Desktop.Windows`): `WinExe` entry point, Avalonia.Win32 backend, Windows-only capture backend wired in.
-- **Windows capture** (`VicoScreenShare.Client.Windows`): Windows.Graphics.Capture + Media Foundation H.264 + WASAPI/process-loopback audio.
-- **Server** (`VicoScreenShare.Server`): ASP.NET Core + SIPSorcery acting as a WebRTC SFU.
-- **Protocol** (`VicoScreenShare.Protocol`): shared WebSocket signaling DTOs (netstandard2.1).
-- **Signaling**: custom WebSocket + JSON.
-- **Video**: H.264 via Media Foundation (auto-picks NVENC / AMF / QSV).
-- **Audio**: WASAPI loopback for screen share, per-process loopback for application share.
-- **NAT**: coturn on the same VPS.
+- **Shared protocol** (`VicoScreenShare.Protocol`): WebSocket signaling DTOs, `netstandard2.1`.
+- **Client core** (`VicoScreenShare.Client`): `net10.0`, platform-neutral. Signaling, WebRTC session management, codec abstractions, adaptive bitrate control, RTP stats.
+- **Windows capture + codecs** (`VicoScreenShare.Client.Windows`): `net10.0-windows`. WGC (`Windows.Graphics.Capture`) capture source, D3D11 scaler + Lanczos3 compute shader, Media Foundation H.264 encoder/decoder (NVENC / QSV / AMF auto-picked).
+- **Windows desktop shell** (`VicoScreenShare.Desktop.Wpf`): WPF MVVM frontend. Room/home/settings views, stats overlay, D3DImage renderer.
+- **Server** (`VicoScreenShare.Server`): ASP.NET Core + SIPSorcery. WebSocket signaling, SFU, adaptive-bitrate feedback aggregation, ICE config distribution. Deployed to Linux (`linux-x64`).
+- **Tests** (`tests/VicoScreenShare.Tests`, `tests/VicoScreenShare.MediaHarness`): xUnit + FluentAssertions.
 
-## Project layout
+## Build and run
 
 ```
-src/
-├── VicoScreenShare.Protocol/          # Shared signaling DTOs (netstandard2.1)
-├── VicoScreenShare.Client/            # Avalonia UI class library (net10.0, platform-neutral)
-├── VicoScreenShare.Client.Windows/    # Windows capture + encode + audio (net10.0-windows)
-├── VicoScreenShare.Desktop.Windows/   # Windows desktop host, WinExe entry point
-└── VicoScreenShare.Server/            # ASP.NET Core SFU
-
-docker/server/                       # Dockerfile, compose, coturn config (future)
+dotnet build VicoScreenShare.slnx
+dotnet test tests/VicoScreenShare.Tests/VicoScreenShare.Tests.csproj
 ```
 
-## Build
+Run the server locally:
 
 ```
-dotnet build
+dotnet run --project src/VicoScreenShare.Server
 ```
 
-## Run
+Run the Windows client from Visual Studio (set `VicoScreenShare.Desktop.Wpf` as the startup project) or:
 
 ```
-dotnet run --project src/VicoScreenShare.Server          # SFU + signaling
-dotnet run --project src/VicoScreenShare.Desktop.Windows # Windows desktop client
+dotnet run --project src/VicoScreenShare.Desktop.Wpf
 ```
 
-Requires .NET 10 SDK and Windows 10 19041+ for the Windows desktop host and capture library. The server itself is OS-neutral.
+Requires .NET 10 SDK. Windows 11 22H2+ for the desktop client (WGC border-required API). Server runs on any .NET 10 target.
+
+## Server configuration
+
+All tunables live under `Rooms` in `appsettings.json`. Unset fields use the defaults in `RoomServerOptions`.
+
+```jsonc
+{
+  "Rooms": {
+    "MaxRoomCapacity": 16,
+    "MaxTotalRooms": 500,
+    "HeartbeatInterval": "00:00:15",
+    "HeartbeatTimeout": "00:00:30",
+    "PeerGracePeriod": "00:00:20",
+    "AccessPassword": null,
+    "IceServers": [
+      { "Urls": [ "stun:stun.cloudflare.com:3478" ] },
+      {
+        "Urls": [ "turn:turn.example.com:3478?transport=udp" ],
+        "Username": "vicoshare",
+        "Credential": "replace-with-shared-secret"
+      }
+    ]
+  }
+}
+```
+
+- **`AccessPassword`**: optional shared secret clients present in `ClientHello.AccessToken`. `null`/empty = open server.
+- **`IceServers`**: STUN/TURN servers shipped to every client in `RoomJoined.IceServers` and used by the server's own SFU peer connections. Empty list falls back to Google's public STUN (`stun:stun.l.google.com:19302`) — fine for testing with friends, but production should configure its own STUN + a TURN for viewers behind strict NATs.
+- **`PeerGracePeriod`**: how long a disconnected peer's room slot is kept alive for reconnection via `ResumeSession`. After this window the slot is evicted.
+
+## Deployment
+
+Azure VM + systemd, over SSH. The `deploy-screenshare.ps1` script (not in this repo — keep beside your SSH key) publishes the server for `linux-x64`, scps to `/tmp/screenshare/`, and swaps into `/opt/screenshare/app/` under a systemd unit named `screenshare`. Version is stamped from `git rev-list --count HEAD` and returned on `GET /healthz` so you can confirm which build is live.
+
+## Testing
+
+- Unit tests cover protocol round-trips, adaptive bitrate controller, RFC-3550 RTP sequence accounting, settings persistence, signaling lifecycle, and SFU routing. `dotnet test` from the solution root runs the full suite headless.
+- `VicoScreenShare.MediaHarness` is a manual testbed for capture + encode + decode flows without the full WPF UI.
+
+## License
+
+[GNU AGPLv3](LICENSE) or later. Copyleft with the "network service" clause — anyone running a modified version as a network service must publish their source under the same license. Third-party dependencies retain their own licenses (SIPSorcery BSD-3, CommunityToolkit.Mvvm / Vortice / WPF-UI MIT, vendored Vp8.Net BSD); none are GPL-incompatible.

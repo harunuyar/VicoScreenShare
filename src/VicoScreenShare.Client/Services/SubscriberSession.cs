@@ -43,17 +43,31 @@ public sealed class SubscriberSession : IAsyncDisposable
         Guid publisherPeerId,
         IVideoDecoderFactory decoderFactory,
         string displayName)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers: null)
+    {
+    }
+
+    public SubscriberSession(
+        SignalingClient signaling,
+        Guid publisherPeerId,
+        IVideoDecoderFactory decoderFactory,
+        string displayName,
+        IReadOnlyList<RTCIceServer>? iceServers)
     {
         _signaling = signaling;
         PublisherPeerId = publisherPeerId;
         SubscriptionId = publisherPeerId.ToString("N");
 
+        // Use server-provided ICE servers when the room supplied them; fall
+        // back to Google's public STUN so test harnesses that don't join a
+        // real room still get NAT traversal.
+        var servers = iceServers is { Count: > 0 }
+            ? new List<RTCIceServer>(iceServers)
+            : new List<RTCIceServer> { new() { urls = "stun:stun.l.google.com:19302" } };
+
         _pc = new RTCPeerConnection(new RTCConfiguration
         {
-            iceServers = new List<RTCIceServer>
-            {
-                new() { urls = "stun:stun.l.google.com:19302" },
-            },
+            iceServers = servers,
             X_UseRtpFeedbackProfile = true,
         });
 

@@ -53,6 +53,12 @@ public sealed partial class RoomViewModel : ViewModelBase
     private TimeSpan _resumeTtl = TimeSpan.Zero;
     private CancellationTokenSource? _reconnectCts;
     private bool _leavingIntentionally;
+    // ICE servers advertised by the server in RoomJoined.IceServers,
+    // translated once to the SIPSorcery shape and reused for every
+    // WebRtcSession / SubscriberSession we build for this room. Refreshed
+    // on resume (server may rotate credentials). Empty = fall back to
+    // Google STUN inside the session constructors.
+    private IReadOnlyList<RTCIceServer> _iceServers = Array.Empty<RTCIceServer>();
 
     // True iff this client was publishing at the instant of the WS drop. The
     // reconnect loop uses this to decide whether to restart the capture
@@ -128,6 +134,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _yourPeerId = initial.YourPeerId;
         _resumeToken = initial.ResumeToken ?? string.Empty;
         _resumeTtl = initial.ResumeTtl;
+        _iceServers = ToRtcIceServers(initial.IceServers);
 
         Peers = new ObservableCollection<PeerViewModel>(
             initial.Peers.Select(p => new PeerViewModel(
@@ -483,7 +490,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             // Fan-in (remote streams) flows through per-publisher
             // SubscriberSession PCs, created reactively on server-driven
             // SdpOffers tagged with a publisher's SubscriptionId.
-            session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional, _sessionCodec);
+            session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional, _sessionCodec, _iceServers);
 
             await session.NegotiateAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
 
@@ -550,8 +557,12 @@ public sealed partial class RoomViewModel : ViewModelBase
         var nominalFps = snapshot.nominalFps;
         var toDispose = snapshot.toDispose;
 
-        var session = new SubscriberSession(_signaling, publisherPeerId, _decoderFactory,
-            displayName: displayName);
+        var session = new SubscriberSession(
+            _signaling,
+            publisherPeerId,
+            _decoderFactory,
+            displayName: displayName,
+            iceServers: _iceServers);
 
         try
         {
@@ -1302,6 +1313,10 @@ public sealed partial class RoomViewModel : ViewModelBase
 
                         _resumeToken = rj.ResumeToken ?? _resumeToken;
                         _resumeTtl = rj.ResumeTtl != default ? rj.ResumeTtl : _resumeTtl;
+                        // Refresh ICE config from the resume — server may
+                        // have rotated TURN credentials since the original
+                        // join.
+                        _iceServers = ToRtcIceServers(rj.IceServers);
 
                         // Merge the fresh roster snapshot into Peers. Any new
                         // peers the server knows about get added; IsConnected
@@ -1485,6 +1500,37 @@ public sealed partial class RoomViewModel : ViewModelBase
         }
 
         try { await _signaling.DisposeAsync().ConfigureAwait(true); } catch { }
+    }
+
+    /// <summary>
+    /// Map the protocol-level ICE list the server sends in
+    /// <see cref="RoomJoined.IceServers"/> into SIPSorcery's
+    /// <see cref="RTCIceServer"/> shape. Empty in / empty out — the
+    /// session constructors apply the Google-STUN fallback so we don't
+    /// double-apply it here. SIPSorcery joins multiple URLs with commas
+    /// inside a single <see cref="RTCIceServer.urls"/> string.
+    /// </summary>
+    private static IReadOnlyList<RTCIceServer> ToRtcIceServers(IReadOnlyList<IceServerConfig>? configs)
+    {
+        if (configs is null || configs.Count == 0)
+        {
+            return Array.Empty<RTCIceServer>();
+        }
+        var result = new List<RTCIceServer>(configs.Count);
+        foreach (var c in configs)
+        {
+            if (c.Urls is null || c.Urls.Count == 0)
+            {
+                continue;
+            }
+            result.Add(new RTCIceServer
+            {
+                urls = string.Join(",", c.Urls),
+                username = c.Username ?? string.Empty,
+                credential = c.Credential ?? string.Empty,
+            });
+        }
+        return result;
     }
 
     private async Task NavigateHomeAsync()

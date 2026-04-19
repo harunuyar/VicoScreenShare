@@ -6,7 +6,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SIPSorcery.Net;
+using VicoScreenShare.Server.Config;
 
 /// <summary>
 /// Per-room SFU session. Owns:
@@ -44,11 +46,16 @@ public sealed class SfuSession : IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, byte> _viewers = new();
 
     private readonly ILoggerFactory? _loggerFactory;
+    private readonly IOptionsMonitor<RoomServerOptions>? _options;
 
-    public SfuSession(ILoggerFactory? loggerFactory = null)
+    public SfuSession(ILoggerFactory? loggerFactory = null, IOptionsMonitor<RoomServerOptions>? options = null)
     {
         _loggerFactory = loggerFactory;
+        _options = options;
     }
+
+    private IReadOnlyList<RTCIceServer> GetIceServers() =>
+        IceServers.ToRtc(_options?.CurrentValue.IceServers);
 
     public IReadOnlyCollection<SfuPeer> Peers => _peers.Values.ToArray();
 
@@ -64,7 +71,7 @@ public sealed class SfuSession : IAsyncDisposable
         return _peers.GetOrAdd(peerId, id =>
         {
             var logger = _loggerFactory?.CreateLogger<SfuPeer>();
-            var peer = new SfuPeer(id, logger);
+            var peer = new SfuPeer(id, GetIceServers(), logger);
             var forwarder = new PublisherForwarder(this, id);
             peer.RtpPacketReceived += forwarder.OnRtpReceived;
             _forwarders[id] = forwarder;
@@ -216,7 +223,7 @@ public sealed class SfuSession : IAsyncDisposable
         }
 
         var logger = _loggerFactory?.CreateLogger<SfuSubscriberPeer>();
-        var sub = new SfuSubscriberPeer(viewerPeerId, publisherPeerId, logger);
+        var sub = new SfuSubscriberPeer(viewerPeerId, publisherPeerId, GetIceServers(), logger);
         if (!_subscribers.TryAdd(key, sub))
         {
             await sub.DisposeAsync().ConfigureAwait(false);

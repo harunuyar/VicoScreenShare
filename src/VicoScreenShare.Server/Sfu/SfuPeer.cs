@@ -24,17 +24,14 @@ public sealed class SfuPeer : IAsyncDisposable
     private bool _remoteDescriptionApplied;
     private bool _disposed;
 
-    public SfuPeer(Guid peerId, ILogger<SfuPeer>? logger = null)
+    public SfuPeer(Guid peerId, IReadOnlyList<RTCIceServer> iceServers, ILogger<SfuPeer>? logger = null)
     {
         PeerId = peerId;
         _logger = logger;
 
         _pc = new RTCPeerConnection(new RTCConfiguration
         {
-            iceServers = new List<RTCIceServer>
-            {
-                new() { urls = "stun:stun.l.google.com:19302" },
-            },
+            iceServers = new List<RTCIceServer>(iceServers),
             // SAVPF so the SDP carries rtcp-fb attributes (nack, pli, twcc).
             // Without this SIPSorcery negotiates SAVP and feedback primitives
             // can't cross the wire even when our code tries to send them.
