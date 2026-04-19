@@ -130,6 +130,25 @@ public sealed class CaptureStreamer : IDisposable
     /// <summary>Configured target bitrate read at construction time.</summary>
     public int TargetBitrate => _targetBitrate;
 
+    /// <summary>
+    /// Reconfigure the underlying encoder's target bitrate at runtime.
+    /// Called by the adaptive-bitrate coordinator when RTCP Receiver Reports
+    /// indicate sustained upstream loss. Safe to call before the first
+    /// encode too — will apply when the encoder is constructed.
+    /// </summary>
+    public void UpdateBitrate(int bitsPerSecond)
+    {
+        if (bitsPerSecond <= 0)
+        {
+            return;
+        }
+        try
+        {
+            _encoder?.UpdateBitrate(bitsPerSecond);
+        }
+        catch { /* encoder tearing down */ }
+    }
+
     /// <summary>Underlying codec identifier of the last encoder instance
     /// (useful for the stats panel to show "H264" vs "VP8").</summary>
     public VideoCodec? CurrentCodec => _encoder?.Codec;

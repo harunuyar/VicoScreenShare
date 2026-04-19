@@ -4,10 +4,12 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using SIPSorcery.Net;
 using VicoScreenShare.Client;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media;
@@ -42,6 +44,9 @@ public sealed partial class RoomViewModel : ViewModelBase
     private WebRtcSession? _webRtc;
     private ICaptureSource? _localCaptureSource;
     private CaptureStreamer? _captureStreamer;
+    private LossBasedBitrateController? _bitrateController;
+    private Action<IPEndPoint, SDPMediaTypesEnum, RTCPCompoundPacket>? _rtcpReportHandler;
+    private long _bitrateControllerStartTicks;
     private bool _negotiationStarted;
 
     private string _resumeToken = string.Empty;
@@ -604,6 +609,8 @@ public sealed partial class RoomViewModel : ViewModelBase
             _captureStreamer = streamer;
             streamer.Start();
 
+            StartAdaptiveBitrate(session, streamer);
+
             await source.StartAsync().ConfigureAwait(true);
             IsSharing = true;
             StatusMessage = null;
@@ -630,6 +637,80 @@ public sealed partial class RoomViewModel : ViewModelBase
             StatusMessage = $"Share failed: {ex.Message}";
             await StopSharingInternalAsync().ConfigureAwait(true);
         }
+    }
+
+    /// <summary>
+    /// Attach a loss-based adaptive bitrate controller to the publisher's
+    /// upstream PC. The PC receives RTCP Receiver Reports from the server
+    /// with fraction-lost; we feed those into the controller and call back
+    /// into the encoder when the recommended rate changes. Bypassed entirely
+    /// when <see cref="VideoSettings.EnableAdaptiveBitrate"/> is off.
+    /// </summary>
+    private void StartAdaptiveBitrate(WebRtcSession session, CaptureStreamer streamer)
+    {
+        if (!_settings.Video.EnableAdaptiveBitrate)
+        {
+            return;
+        }
+
+        _bitrateControllerStartTicks = Environment.TickCount64;
+        var clock = () => TimeSpan.FromMilliseconds(Environment.TickCount64 - _bitrateControllerStartTicks);
+        var min = _settings.Video.MinAdaptiveBitrate;
+        if (min <= 0 || min > _settings.Video.TargetBitrate)
+        {
+            min = Math.Max(1, Math.Min(500_000, _settings.Video.TargetBitrate / 4));
+        }
+
+        var controller = new LossBasedBitrateController(_settings.Video.TargetBitrate, min, clock);
+        controller.BitrateChanged += bps =>
+        {
+            try
+            {
+                streamer.UpdateBitrate(bps);
+                DebugLog.Write($"[room] adaptive bitrate → {bps / 1000} kbps");
+            }
+            catch { /* encoder tearing down */ }
+        };
+
+        Action<IPEndPoint, SDPMediaTypesEnum, RTCPCompoundPacket> handler = (_, mediaType, report) =>
+        {
+            if (mediaType != SDPMediaTypesEnum.video)
+            {
+                return;
+            }
+            var rr = report.ReceiverReport;
+            if (rr is null)
+            {
+                return;
+            }
+            // Take the WORST (highest fraction-lost) sample across reports.
+            // For a single-subscriber upstream this is a list of one anyway.
+            byte worst = 0;
+            foreach (var s in rr.ReceptionReports)
+            {
+                if (s.FractionLost > worst)
+                {
+                    worst = s.FractionLost;
+                }
+            }
+            controller.Observe(worst / 256.0);
+        };
+
+        session.PeerConnection.OnReceiveReport += handler;
+        _bitrateController = controller;
+        _rtcpReportHandler = handler;
+    }
+
+    private void StopAdaptiveBitrate()
+    {
+        var session = _webRtc;
+        var handler = _rtcpReportHandler;
+        if (session is not null && handler is not null)
+        {
+            try { session.PeerConnection.OnReceiveReport -= handler; } catch { }
+        }
+        _bitrateController = null;
+        _rtcpReportHandler = null;
     }
 
     [RelayCommand]
@@ -698,6 +779,8 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         _captureStreamer = null;
         _localCaptureSource = null;
+
+        StopAdaptiveBitrate();
 
         if (streamer is not null)
         {

@@ -68,6 +68,16 @@ public interface IVideoEncoder : IDisposable
     /// runtime keyframe control (VP8 via libvpx).
     /// </summary>
     void RequestKeyframe() { }
+
+    /// <summary>
+    /// Reconfigure the encoder's target bitrate in bits per second while
+    /// it's running. Called by the adaptive-bitrate controller when loss
+    /// on the upstream path forces us to back off (or recover toward the
+    /// original target as loss clears). Safe to call from any thread.
+    /// Default implementation is a no-op for codecs that don't support
+    /// runtime bitrate control (VP8 via libvpx in this build).
+    /// </summary>
+    void UpdateBitrate(int bitsPerSecond) { }
 }
 
 /// <summary>

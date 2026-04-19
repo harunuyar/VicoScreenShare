@@ -198,6 +198,41 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     }
 
     /// <summary>
+    /// Reconfigure the encoder's target bitrate live. Reapplies the full CBR
+    /// triple (<c>MeanBitRate</c> + <c>MaxBitRate</c> + <c>BufferSize</c>) on
+    /// the running MFT so NVENC keeps hitting the rate consistently instead
+    /// of undershooting. Called by the adaptive-bitrate controller when the
+    /// upstream RR reports sustained loss; a few hundred ms later frames
+    /// come out at the new rate.
+    /// </summary>
+    public void UpdateBitrate(int bitsPerSecond)
+    {
+        if (bitsPerSecond <= 0)
+        {
+            return;
+        }
+        lock (_processLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            var clamped = (uint)Math.Min(bitsPerSecond, uint.MaxValue);
+            try
+            {
+                _transform.Attributes.Set(CodecApiAVEncCommonMeanBitRate, clamped);
+                _transform.Attributes.Set(CodecApiAVEncCommonMaxBitRate, clamped);
+                _transform.Attributes.Set(CodecApiAVEncCommonBufferSize, clamped);
+                DebugLog.Write($"[mf] H264 encoder bitrate → {bitsPerSecond / 1000} kbps");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[mf] H264 encoder UpdateBitrate threw: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
     /// The internal D3D11 device, exposed so callers (like the test harness
     /// or future zero-copy capture path) can allocate textures on the same
     /// device the encoder is using. Null when no GPU manager is attached
