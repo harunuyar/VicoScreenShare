@@ -69,14 +69,26 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     public string DisplayName { get; }
 
-    public long FramesReceived { get; private set; }
+    private long _framesReceivedCount;
+    private long _encodedByteCountAtomic;
+
+    /// <summary>
+    /// Count of complete encoded frames that have arrived on this
+    /// receiver's video track. Incremented at network arrival (on the
+    /// SIPSorcery receive thread), so it reflects what the wire
+    /// actually delivered — not what survived the decode queue.
+    /// </summary>
+    public long FramesReceived => System.Threading.Interlocked.Read(ref _framesReceivedCount);
 
     public long FramesDecoded { get; private set; }
 
-    /// <summary>Cumulative encoded bytes received on the peer connection's
-    /// video track since this receiver attached. The stats overlay divides
-    /// the delta between two reads by elapsed time to get a bitrate.</summary>
-    public long EncodedByteCount { get; private set; }
+    /// <summary>
+    /// Cumulative encoded bytes received on the peer connection's video
+    /// track since this receiver attached. Measured at arrival, so the
+    /// stats overlay's derived bitrate reflects real network intake even
+    /// when the decode queue is shedding frames to keep up.
+    /// </summary>
+    public long EncodedByteCount => System.Threading.Interlocked.Read(ref _encodedByteCountAtomic);
 
     /// <summary>Width of the most recently decoded frame, or 0 if nothing
     /// has decoded yet.</summary>
@@ -293,6 +305,16 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
             return;
         }
 
+        // Count bytes at the ARRIVAL point, not post-decode. If we
+        // counted in DecodeAndDispatch, a decoder falling behind would
+        // make the decode queue drop encoded frames (DropOldest), and
+        // those bytes would never be tallied — making the stats overlay
+        // read "incoming bitrate decreased" when the network is
+        // actually carrying the full rate. Measuring here is the
+        // authoritative network-intake rate.
+        System.Threading.Interlocked.Increment(ref _framesReceivedCount);
+        System.Threading.Interlocked.Add(ref _encodedByteCountAtomic, encodedSample.Length);
+
         var queue = _decodeQueue;
         if (queue is null)
         {
@@ -341,8 +363,10 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
                 return;
             }
 
-            FramesReceived++;
-            EncodedByteCount += encodedSample.Length;
+            // FramesReceived + EncodedByteCount now tick at network
+            // arrival in OnVideoFrameReceived — not here — so the stats
+            // overlay reads real intake rate regardless of what the
+            // decode queue discards under backpressure.
             _gpuEmittedThisCall = 0;
             try
             {
