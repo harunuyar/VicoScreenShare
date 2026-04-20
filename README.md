@@ -15,9 +15,9 @@ Short version — the gap looked like this:
 - **Discord** caps free screen share around 1080p60 / 8 Mbps; Nitro lifts it to 4K60 but you're still renting. Multi-publisher rooms exist but the pipe is theirs.
 - **Jitsi / BigBlueButton / similar** are video-conferencing first; screen share is a secondary track with conferencing-tier bitrate and resolution.
 - **RustDesk / VNC / RDP** are remote-control tools. One viewer, one host, no room model.
-- **Moonlight/Sunshine** are game-streaming tools. Host-to-single-client, not a room of viewers watching multiple publishers.
+- **Moonlight / Sunshine** are game-streaming tools. Host-to-single-client, not a room of viewers watching multiple publishers.
 
-VicoScreenShare is screen-sharing-first, room-model, self-hosted. The server is ASP.NET Core / Linux-friendly; the client is Windows (WGC + D3D11 + Media Foundation).
+VicoScreenShare is screen-sharing-first, room-model, self-hosted. The server is a plain ASP.NET Core app; the client is Windows (WGC + D3D11 + Media Foundation).
 
 ## What's in the box
 
@@ -52,12 +52,6 @@ VicoScreenShare is screen-sharing-first, room-model, self-hosted. The server is 
 - Codec and dimension changes mid-session rebuild the decoder cleanly without tearing down the peer connection.
 - Stats overlay per tile: fps, bitrate, dropped frames, render fps, packet loss — visible while you use the app, no debugger required.
 
-**Ops**
-
-- Server version is stamped from `git rev-list --count HEAD` and returned on `GET /healthz` so you can confirm which build is live.
-- Room and total-room capacity limits configurable via `appsettings.json`.
-- Runs on any .NET 10 target; Linux-x64 binaries exercised on Azure VMs under systemd.
-
 ## Architecture
 
 ```
@@ -85,7 +79,7 @@ Projects:
 
 ## Quick start
 
-Requires the .NET 10 SDK. Client needs Windows 11 22H2 or later (WGC border API).
+Requires the .NET 10 SDK. Client needs Windows 10 version 2004 (May 2020) or later.
 
 Build and test:
 
@@ -137,26 +131,20 @@ All tunables under `Rooms` in `appsettings.json`; anything unset uses the defaul
 - **`IceServers`** — STUN/TURN servers shipped to every client in `RoomJoined.IceServers` and used by the server's own SFU peer connections. Empty list falls back to Google's public STUN (testing only — production should configure its own STUN and a TURN for viewers behind symmetric NATs).
 - **`PeerGracePeriod`** — how long a disconnected peer's room slot is kept alive for `ResumeSession`. After this window the slot is evicted.
 
-## Deployment
+## Running the server
 
-The production path is Azure VM + systemd, published over SSH. A `deploy-screenshare.ps1` script (kept alongside your SSH key, not committed) publishes `linux-x64`, SCPs to `/tmp/screenshare/`, and swaps into `/opt/screenshare/app/` under a systemd unit named `screenshare`. Sketch:
+The server is a standard ASP.NET Core app. Publish for your target:
 
-```powershell
+```
 dotnet publish src/VicoScreenShare.Server -c Release -r linux-x64 --self-contained
-scp -r publish/ azureuser@vm:/tmp/screenshare/
-ssh azureuser@vm 'sudo systemctl stop screenshare && \
-                  sudo rsync -a --delete /tmp/screenshare/ /opt/screenshare/app/ && \
-                  sudo systemctl start screenshare'
 ```
 
-The server prints its version (git rev count) on `GET /healthz`, so you can verify the deploy landed.
-
-You'll also want `sysctl -w net.core.rmem_max=67108864 net.core.wmem_max=67108864` on a Linux host that carries many publishers — the kernel's default UDP buffer is small enough that bursty keyframe traffic can drop under load.
+Run the output directly, behind any reverse proxy you like (nginx, Caddy, Traefik), as a systemd unit, in Docker, or on Kubernetes — whatever fits your environment. `GET /healthz` reports status and whether authentication is required.
 
 ## Compatibility
 
-- **Client**: Windows 11 22H2+. Uses `Windows.Graphics.Capture` + D3D11; no WinUI dependency.
-- **Server**: any .NET 10 target. Tested on Linux (Ubuntu 22.04 / Azure F2s v2).
+- **Client**: Windows 10 version 2004 or later. Uses `Windows.Graphics.Capture` + D3D11; no WinUI dependency. On pre–Windows 11 22H2 the yellow capture border stays visible and the capture frame rate can be DWM-paced below the display refresh; functionally everything else works.
+- **Server**: any .NET 10 target (Linux, Windows, macOS).
 - **GPUs**: any GPU with a DXVA H.264 decoder works for viewing. For publishing, hardware H.264 encode is auto-selected from NVENC (NVIDIA), Quick Sync (Intel), or AMF (AMD); software H.264 and VP8 are fallbacks.
 - **Mobile**: not planned. Browser client is a long-term maybe.
 
