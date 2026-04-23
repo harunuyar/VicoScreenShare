@@ -90,6 +90,29 @@ public sealed partial class RoomViewModel : ViewModelBase
     // mounts/unmounts its D3DImageVideoRenderer.
     public ObservableCollection<PublisherTileViewModel> Tiles { get; } = new();
 
+    // Volume / mute the user last applied to any tile in this room.
+    // Newly-arriving tiles inherit these so changing one tile's volume
+    // and then a new publisher joining doesn't blast the user at full
+    // volume from the new tile. Defaults: full volume, not muted.
+    private double _lastTileVolume = 1.0;
+    private bool _lastTileMuted;
+
+    private void OnPublisherTileAudioChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is not PublisherTileViewModel tile)
+        {
+            return;
+        }
+        if (e.PropertyName == nameof(PublisherTileViewModel.Volume))
+        {
+            _lastTileVolume = tile.Volume;
+        }
+        else if (e.PropertyName == nameof(PublisherTileViewModel.IsMuted))
+        {
+            _lastTileMuted = tile.IsMuted;
+        }
+    }
+
     // Nominal frame rate per publisher, captured from StreamStarted so the
     // per-tile renderer's jitter buffer can size to the sender's cadence even
     // before the subscriber PC negotiation completes. Keyed by publisher peer id.
@@ -597,12 +620,21 @@ public sealed partial class RoomViewModel : ViewModelBase
             return;
         }
 
-        var tile = new PublisherTileViewModel(session, displayName, nominalFps, _navigation.UiDispatcher);
+        // Seed new tiles with the user's last-used per-tile audio
+        // level so a quiet room stays quiet when a new publisher joins.
+        // Tile-local changes propagate back to _lastTileVolume /
+        // _lastTileMuted via PropertyChanged below.
+        var tile = new PublisherTileViewModel(
+            session, displayName, nominalFps, _navigation.UiDispatcher,
+            initialVolume: _lastTileVolume,
+            initialMuted: _lastTileMuted);
+        tile.PropertyChanged += OnPublisherTileAudioChanged;
 
         await _uiDispatcher.InvokeAsync(() =>
         {
             if (toDispose is not null)
             {
+                toDispose.PropertyChanged -= OnPublisherTileAudioChanged;
                 Tiles.Remove(toDispose);
             }
             // Seed IsFocused before the tile enters the visual tree so the
@@ -1133,6 +1165,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             return;
         }
 
+        tile.PropertyChanged -= OnPublisherTileAudioChanged;
         Tiles.Remove(tile);
         try { await tile.DisposeAsync().ConfigureAwait(true); } catch { }
     }

@@ -356,6 +356,7 @@ public sealed class LoopbackMediaE2ETests
     {
         public int SampleRate { get; private set; }
         public int Channels { get; private set; }
+        public double Volume { get; set; } = 1.0;
         public int ObservedSampleRate { get; private set; }
         public int ObservedChannels { get; private set; }
         public int FramesSubmitted { get; private set; }

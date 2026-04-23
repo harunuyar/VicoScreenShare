@@ -90,6 +90,45 @@ public sealed class AudioReceiver : IAsyncDisposable
     /// </summary>
     public long FramesDropped => Interlocked.Read(ref _framesDropped);
 
+    /// <summary>
+    /// When true, incoming audio RTP packets are dropped at the socket
+    /// boundary before they reach the decoder — muted streams cost no
+    /// CPU beyond the RTP header walk SIPSorcery already does. The
+    /// renderer is also silenced via <see cref="IAudioRenderer.Volume"/>
+    /// so any already-queued samples flush as silence.
+    /// </summary>
+    public bool IsMuted
+    {
+        get => Volatile.Read(ref _isMuted) != 0;
+        set
+        {
+            Volatile.Write(ref _isMuted, value ? 1 : 0);
+            if (value)
+            {
+                // Drop anything already queued so unmuting doesn't
+                // dump a stale burst.
+                lock (_decodeLock)
+                {
+                    _jitterBuffer.Clear();
+                }
+            }
+        }
+    }
+
+    private int _isMuted;
+
+    /// <summary>
+    /// Linear [0, 1] volume forwarded to the renderer — 1.0 is
+    /// unattenuated, 0.0 is silence. Separate from
+    /// <see cref="IsMuted"/> so the UI can let the user pick a target
+    /// volume with mute engaged and unmute to exactly that level.
+    /// </summary>
+    public double Volume
+    {
+        get => _renderer.Volume;
+        set => _renderer.Volume = value;
+    }
+
     public async Task StartAsync()
     {
         if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
@@ -156,6 +195,13 @@ public sealed class AudioReceiver : IAsyncDisposable
             return;
         }
         Interlocked.Increment(ref _packetsReceived);
+        if (Volatile.Read(ref _isMuted) != 0)
+        {
+            // Muted: skip decode entirely. We still count packets as
+            // received (so the stats overlay shows the publisher's
+            // audio arrived, just not played) but nothing else runs.
+            return;
+        }
         try
         {
             DecodeAndSubmit(packet.Header.Timestamp, packet.Payload);

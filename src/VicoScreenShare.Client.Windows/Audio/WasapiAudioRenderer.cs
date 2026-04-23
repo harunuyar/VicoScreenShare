@@ -30,11 +30,32 @@ public sealed class WasapiAudioRenderer : IAudioRenderer
     private byte[] _scratch = Array.Empty<byte>();
     private int _sampleRate;
     private int _channels;
+    private double _volume = 1.0;
+    private short[] _scaledScratch = Array.Empty<short>();
     private int _state; // 0 = idle, 1 = running, 2 = disposed
 
     public int SampleRate => _sampleRate;
 
     public int Channels => _channels;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Volume is applied as a software multiplier on the PCM samples
+    /// inside <see cref="Submit"/>, NOT via
+    /// <c>WasapiOut.Volume</c> / AudioStreamVolume. The WASAPI
+    /// stream-volume path behaves inconsistently across drivers (on
+    /// some configurations it acts like an absolute level rather than
+    /// a multiplier on top of the session + system volume), so a
+    /// slider at 100% could play louder than the user's system volume
+    /// would otherwise permit. Software scaling on S16 samples is a
+    /// few instructions per frame and guarantees the per-tile slider
+    /// behaves the same on every machine.
+    /// </remarks>
+    public double Volume
+    {
+        get => Volatile.Read(ref _volume);
+        set => Volatile.Write(ref _volume, Math.Clamp(value, 0.0, 1.0));
+    }
 
     public Task StartAsync(int sampleRate, int channels)
     {
@@ -100,8 +121,48 @@ public sealed class WasapiAudioRenderer : IAudioRenderer
         {
             _scratch = new byte[needed];
         }
-        var byteSpan = System.Runtime.InteropServices.MemoryMarshal.AsBytes(interleavedPcm);
-        byteSpan.CopyTo(_scratch);
+
+        // Apply the per-tile volume as a software multiplier on S16
+        // samples. A straight bit copy at volume == 1 keeps the cheap
+        // path fast for the default "full volume" case.
+        var volume = Volatile.Read(ref _volume);
+        if (volume >= 0.999)
+        {
+            var byteSpan = System.Runtime.InteropServices.MemoryMarshal.AsBytes(interleavedPcm);
+            byteSpan.CopyTo(_scratch);
+        }
+        else if (volume <= 0.0)
+        {
+            // Silence — zero the scratch region we're about to submit.
+            Array.Clear(_scratch, 0, needed);
+        }
+        else
+        {
+            if (_scaledScratch.Length < interleavedPcm.Length)
+            {
+                _scaledScratch = new short[interleavedPcm.Length];
+            }
+            // Saturate on clamp to avoid signed-overflow wrap on the
+            // unlikely edge of a sample already near ±32768.
+            for (var i = 0; i < interleavedPcm.Length; i++)
+            {
+                var scaled = interleavedPcm[i] * volume;
+                if (scaled > short.MaxValue)
+                {
+                    _scaledScratch[i] = short.MaxValue;
+                }
+                else if (scaled < short.MinValue)
+                {
+                    _scaledScratch[i] = short.MinValue;
+                }
+                else
+                {
+                    _scaledScratch[i] = (short)scaled;
+                }
+            }
+            var byteSpan = System.Runtime.InteropServices.MemoryMarshal.AsBytes(_scaledScratch.AsSpan(0, interleavedPcm.Length));
+            byteSpan.CopyTo(_scratch);
+        }
 
         try
         {

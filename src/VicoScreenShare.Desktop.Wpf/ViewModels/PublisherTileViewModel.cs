@@ -4,6 +4,7 @@ using System;
 using System.Threading.Tasks;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
@@ -44,17 +45,32 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
         SubscriberSession session,
         string displayName,
         int nominalFrameRate,
-        IUiDispatcher uiDispatcher)
+        IUiDispatcher uiDispatcher,
+        double initialVolume = 1.0,
+        bool initialMuted = false)
     {
         _session = session;
         _uiDispatcher = uiDispatcher ?? throw new ArgumentNullException(nameof(uiDispatcher));
         _displayName = displayName;
         _nominalFrameRate = nominalFrameRate > 0 ? nominalFrameRate : 60;
+        _volume = Math.Clamp(initialVolume, 0.0, 1.0);
+        _isMuted = initialMuted;
 
         _frameHandler = OnFrameArrived;
         _textureHandler = OnTextureArrived;
         _session.Receiver.FrameArrived += _frameHandler;
         _session.Receiver.TextureArrived += _textureHandler;
+
+        // Propagate the initial volume/mute into the audio receiver so
+        // the first decoded frame already plays at the right level. A
+        // null AudioReceiver means this host has no audio backend —
+        // the slider still exists in the UI but is cosmetic.
+        var audio = _session.AudioReceiver;
+        if (audio is not null)
+        {
+            audio.Volume = _volume;
+            audio.IsMuted = _isMuted;
+        }
 
         // DispatcherTimer needs a WPF Dispatcher instance — WpfUiDispatcher
         // is the single place that owns one, so reach in there for the
@@ -100,6 +116,47 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
 
     /// <summary>Stats line for this tile's incoming stream. Updated on each Tick().</summary>
     [ObservableProperty] private string _stats = "—";
+
+    /// <summary>
+    /// Linear [0, 1] playback volume for this publisher. Changes flow
+    /// straight to the <see cref="AudioReceiver"/> / renderer within
+    /// one audio frame. Exposed to the tile UI's volume slider; the
+    /// <see cref="RoomViewModel"/> watches
+    /// <see cref="PropertyChanged"/> so tile-local changes propagate
+    /// to the room's "last used" defaults (new tiles inherit whatever
+    /// level the user last picked).
+    /// </summary>
+    [ObservableProperty] private double _volume = 1.0;
+
+    /// <summary>
+    /// When true, incoming audio RTP is dropped at the socket boundary
+    /// (no decode, no render), and any already-buffered samples flush
+    /// as silence. Separate from <see cref="Volume"/> so a user can
+    /// mute-then-unmute without losing their preferred level.
+    /// </summary>
+    [ObservableProperty] private bool _isMuted;
+
+    /// <summary>Toggle mute for this tile.</summary>
+    [RelayCommand]
+    private void ToggleMute() => IsMuted = !IsMuted;
+
+    partial void OnVolumeChanged(double value)
+    {
+        var audio = _session.AudioReceiver;
+        if (audio is not null)
+        {
+            audio.Volume = value;
+        }
+    }
+
+    partial void OnIsMutedChanged(bool value)
+    {
+        var audio = _session.AudioReceiver;
+        if (audio is not null)
+        {
+            audio.IsMuted = value;
+        }
+    }
 
     /// <summary>
     /// Paint fps line pushed in from the view. The view's paint-stats pump writes

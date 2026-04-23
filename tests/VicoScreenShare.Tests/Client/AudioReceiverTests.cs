@@ -117,6 +117,7 @@ public class AudioReceiverTests
     {
         public int SampleRate { get; private set; }
         public int Channels { get; private set; }
+        public double Volume { get; set; } = 1.0;
         public List<SubmittedSlice> Submitted { get; } = new();
 
         public Task StartAsync(int sampleRate, int channels)

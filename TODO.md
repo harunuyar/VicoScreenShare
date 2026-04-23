@@ -12,9 +12,6 @@ Users can currently pick a resolution and a bitrate independently. Bad combinati
 
 ## Audio
 
-### Per-tile volume and mute
-Viewers have no control over individual publishers' audio levels — every active audio track mixes at the system level. Add per-tile mute and volume sliders, wired to each `SubscriberSession`'s `AudioReceiver` / `WasapiAudioRenderer`. Mute should drop the packets before decode to save CPU, not just set renderer volume to zero.
-
 ## Send path
 
 ### Packet pacing

@@ -28,6 +28,17 @@ public interface IAudioRenderer : IAsyncDisposable
     int Channels { get; }
 
     /// <summary>
+    /// Linear playback volume in the range <c>[0, 1]</c>. 1.0 is
+    /// unattenuated, 0.0 is silence. Applied on the output endpoint —
+    /// WASAPI handles the level change at the hardware mixer, so
+    /// changes take effect within one audio frame without re-submitting
+    /// decoded samples. The viewer's per-tile slider writes here;
+    /// mute-on-receive happens one level up in <c>AudioReceiver</c>
+    /// so muted streams skip the decode as well.
+    /// </summary>
+    double Volume { get; set; }
+
+    /// <summary>
     /// Open the render endpoint and begin consuming audio. The renderer
     /// converts between its internal buffer format and the device's
     /// native mix format (WASAPI shared mode); sample rate / channel

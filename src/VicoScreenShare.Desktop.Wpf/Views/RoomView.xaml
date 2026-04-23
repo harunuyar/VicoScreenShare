@@ -3,6 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:VicoScreenShare.Desktop.App.ViewModels"
              xmlns:rendering="clr-namespace:VicoScreenShare.Desktop.App.Rendering"
+             xmlns:ctl="clr-namespace:VicoScreenShare.Desktop.App.Controls"
              xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
              d:DataContext="{d:DesignInstance Type=vm:RoomViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -100,6 +101,14 @@
                             Padding="2"
                             rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
                         <StackPanel Orientation="Horizontal">
+                            <!-- Speaker button with a hover-revealed volume
+                                 slider that fades in, anchored below. Own
+                                 state machine handles the
+                                 button-or-slider hover + timeout-close. -->
+                            <ctl:VolumeFlyoutButton
+                                Value="{Binding Volume, Mode=TwoWay}"
+                                IsMuted="{Binding IsMuted, Mode=TwoWay}"
+                                ToggleMuteCommand="{Binding ToggleMuteCommand}" />
                             <ui:Button Appearance="Transparent"
                                        Icon="{ui:SymbolIcon Symbol=FullScreenMaximize24}"
                                        Foreground="White"
