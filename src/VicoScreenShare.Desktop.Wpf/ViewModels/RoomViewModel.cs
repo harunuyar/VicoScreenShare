@@ -136,6 +136,15 @@ public sealed partial class RoomViewModel : ViewModelBase
     private DateTime _latestUpstreamLossUtc = DateTime.MinValue;
     private DateTime _latestDownstreamLossUtc = DateTime.MinValue;
 
+    /// <summary>
+    /// Controls the fade-in / fade-out of chrome overlays on top of the
+    /// video tiles (per-tile top-right button strip, display-name pill).
+    /// Reset to true on every mouse-move over the room view; flipped to
+    /// false by the idle timer. UI elements bind their Opacity +
+    /// IsHitTestVisible to this through a fade animation.
+    /// </summary>
+    [ObservableProperty] private bool _isChromeVisible = true;
+
 
     public RoomViewModel(
         SignalingClient signaling,

@@ -97,3 +97,8 @@ The receive-side buffer today paces *decoded* frames for painting. It doesn't ab
 
 ### Parallel multi-viewer decode
 With three or more concurrent streams on one viewer, the decoders share one GPU device and serialize on it, capping aggregate throughput. Run each decoder on its own private device and hand results to the renderer without any shared-state handoff that can race under WPF's layout / template churn. Single-viewer performance must not regress.
+
+## Render architecture
+
+### Migrate video renderer from HwndHost to D3DImage
+`D3DImageVideoRenderer` is currently an `HwndHost` hosting a DXGI flip-model swap chain in its own child HWND. Every bit of chrome-over-video UI has to work around WPF airspace: cutouts (`CutoutFor` / `CutoutForAll`), ancestor-clip walks, `WM_NCHITTEST` → `HTTRANSPARENT` so input flows to WPF, synchronous `LayoutUpdated` region rebuilds so the HWND region doesn't lag behind scroll, `Visibility` / opacity keyframe hacks so cutouts disappear when chrome fades. All of that is airspace tax, not essential rendering. Migrating to actual WPF `D3DImage` (D3D11 shared-handle → D3D9Ex bridge → WPF composition) deletes the whole pile: WPF chrome composites over video natively, overlays work, scroll-clipping works, fades work. Cost: ~1 extra compositor pass per frame (< 2 ms on modern GPUs at 1440p, a bit more at 4K) and frames pace to WPF's render cadence instead of Present-direct. Worth it for the architectural cleanup; every chrome-over-video bug we've shipped workarounds for lives in the HwndHost pile.

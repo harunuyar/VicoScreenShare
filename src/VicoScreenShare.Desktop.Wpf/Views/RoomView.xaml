@@ -11,6 +11,53 @@
              mc:Ignorable="d">
 
     <UserControl.Resources>
+        <!-- Shared style for chrome overlays that fade on mouse idle.
+             Opacity animates on the IsChromeVisible room-VM flag so
+             chrome shows/hides smoothly; IsHitTestVisible follows so
+             invisible chrome can't receive clicks. Fade-in is snappier
+             than fade-out (150 ms vs 300 ms) to match how users
+             perceive the reappear-on-activity action as "instant."
+
+             Visibility is also toggled — Collapsed at the END of
+             fade-out, Visible at the START of fade-in. That matters
+             because the renderer's CutoutFor mechanism skips elements
+             whose IsVisible is false; without the Visibility toggle,
+             the fade-out ends with Opacity=0 but the cutout is still
+             punched, leaving a black hole in the video where the
+             chrome used to sit. -->
+        <Style x:Key="AutoHideChromeStyle" TargetType="FrameworkElement">
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="Visibility" Value="Visible" />
+            <Setter Property="IsHitTestVisible" Value="True" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DataContext.IsChromeVisible, RelativeSource={RelativeSource AncestorType=UserControl}}" Value="False">
+                    <Setter Property="IsHitTestVisible" Value="False" />
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                 To="0" Duration="0:0:0.3" />
+                                <ObjectAnimationUsingKeyFrames Storyboard.TargetProperty="Visibility">
+                                    <DiscreteObjectKeyFrame KeyTime="0:0:0.3" Value="{x:Static Visibility.Collapsed}" />
+                                </ObjectAnimationUsingKeyFrames>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                    <DataTrigger.ExitActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <ObjectAnimationUsingKeyFrames Storyboard.TargetProperty="Visibility">
+                                    <DiscreteObjectKeyFrame KeyTime="0:0:0" Value="{x:Static Visibility.Visible}" />
+                                </ObjectAnimationUsingKeyFrames>
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                 To="1" Duration="0:0:0.15" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.ExitActions>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <!-- Tile template shared between Grid mode, Focus mode's main slot,
              and Focus mode's bottom strip. Single source of truth for the
              renderer + paused overlay + chrome bar + click-to-focus.
@@ -77,13 +124,15 @@
                          composite over live video pixels, so the pill's cutout
                          reveals the tile's dark fill — styled intentionally with
                          subtle rounding + modest padding so the background reads
-                         as a label chip, not a box around bare text. -->
+                         as a label chip, not a box around bare text.
+                         Auto-hides after 10 s of mouse idle via shared style. -->
                     <Border HorizontalAlignment="Left" VerticalAlignment="Bottom"
                             Margin="10"
                             Background="#B3000000"
                             CornerRadius="4"
                             Padding="8,3"
                             IsHitTestVisible="False"
+                            Style="{StaticResource AutoHideChromeStyle}"
                             rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
                         <TextBlock Text="{Binding DisplayName}"
                                    Foreground="White"
@@ -93,12 +142,14 @@
                     </Border>
 
                     <!-- Controls pill: top-right. Same cutout pattern so buttons
-                         are rendered by WPF (and actually receive clicks). -->
+                         are rendered by WPF (and actually receive clicks).
+                         Auto-hides after 10 s of mouse idle via shared style. -->
                     <Border HorizontalAlignment="Right" VerticalAlignment="Top"
                             Margin="8"
                             Background="#B3000000"
                             CornerRadius="20"
                             Padding="2"
+                            Style="{StaticResource AutoHideChromeStyle}"
                             rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
                         <StackPanel Orientation="Horizontal">
                             <!-- Speaker button with a hover-revealed volume

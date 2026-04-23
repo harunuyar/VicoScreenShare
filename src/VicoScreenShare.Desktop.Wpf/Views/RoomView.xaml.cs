@@ -11,7 +11,13 @@ using VicoScreenShare.Desktop.App.ViewModels;
 
 public partial class RoomView : UserControl
 {
+    // Idle threshold after which the tile chrome fades out. Resets on
+    // any mouse move anywhere in the room view; any re-entry or twitch
+    // brings the chrome back.
+    private static readonly TimeSpan ChromeIdleTimeout = TimeSpan.FromSeconds(3);
+
     private DispatcherTimer? _paintStatsTimer;
+    private DispatcherTimer? _chromeIdleTimer;
 
     // Previous counters for self-preview renderer only. Per-tile paint fps is
     // Phase 6 polish — the ItemsControl-mounted D3D renderers would need a
@@ -29,7 +35,38 @@ public partial class RoomView : UserControl
         // fire before any child control can eat the key. Settings overlay lives
         // in its own popup HWND, so its Escape handler doesn't compete.
         PreviewKeyDown += OnPreviewKeyDown;
+        // PreviewMouseMove so tile-level Panels don't swallow the event
+        // before this handler sees it — we want every mouse twitch
+        // anywhere in the room to count as "user is here, keep chrome
+        // visible."
+        PreviewMouseMove += OnAnyMouseMove;
+        MouseLeave += OnAnyMouseMove;
+        MouseEnter += OnAnyMouseMove;
         Focusable = true;
+    }
+
+    private void OnAnyMouseMove(object sender, MouseEventArgs e) => NoteUserActivity();
+
+    private void NoteUserActivity()
+    {
+        if (DataContext is RoomViewModel vm)
+        {
+            vm.IsChromeVisible = true;
+        }
+        // Restart the countdown from zero — any motion resets the
+        // idle window, so a user constantly hovering never hides
+        // chrome.
+        _chromeIdleTimer?.Stop();
+        _chromeIdleTimer?.Start();
+    }
+
+    private void OnChromeIdleTick(object? sender, EventArgs e)
+    {
+        _chromeIdleTimer?.Stop();
+        if (DataContext is RoomViewModel vm)
+        {
+            vm.IsChromeVisible = false;
+        }
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
@@ -68,12 +105,21 @@ public partial class RoomView : UserControl
         };
         _paintStatsTimer.Tick += OnPaintStatsTick;
         _paintStatsTimer.Start();
+
+        _chromeIdleTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = ChromeIdleTimeout,
+        };
+        _chromeIdleTimer.Tick += OnChromeIdleTick;
+        _chromeIdleTimer.Start();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         _paintStatsTimer?.Stop();
         _paintStatsTimer = null;
+        _chromeIdleTimer?.Stop();
+        _chromeIdleTimer = null;
     }
 
     /// <summary>
