@@ -4,6 +4,7 @@ using System;
 using System.Threading.Tasks;
 using NAudio.CoreAudioApi;
 using VicoScreenShare.Client.Platform;
+using VicoScreenShare.Client.Windows.Audio;
 
 /// <summary>
 /// Windows implementation of <see cref="IAudioCaptureProvider"/>. Builds a
@@ -41,6 +42,27 @@ public sealed class WasapiAudioCaptureProvider : IAudioCaptureProvider
         // when disposed. The variable-name shadow matches the MMDevice
         // ownership semantics elsewhere in NAudio.
         IAudioCaptureSource source = new WasapiLoopbackAudioSource(device);
+        return Task.FromResult<IAudioCaptureSource?>(source);
+    }
+
+    public Task<IAudioCaptureSource?> CreateProcessLoopbackSourceAsync(int processId)
+    {
+        if (processId <= 0)
+        {
+            return Task.FromResult<IAudioCaptureSource?>(null);
+        }
+        IAudioCaptureSource source;
+        try
+        {
+            source = new ProcessLoopbackAudioSource(processId);
+        }
+        catch
+        {
+            // Invalid PID (process gone between picker and here): caller
+            // treats null as "fall back to silent share" — better than
+            // tearing down the whole share flow for a race condition.
+            return Task.FromResult<IAudioCaptureSource?>(null);
+        }
         return Task.FromResult<IAudioCaptureSource?>(source);
     }
 }

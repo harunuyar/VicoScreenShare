@@ -4,29 +4,31 @@ namespace VicoScreenShare.Client.Media;
 /// User-configurable audio pipeline settings. Drives the Opus encoder's
 /// bitrate and channel layout, the Opus application hint (voip vs
 /// general audio, which affects SILK vs CELT mode selection in the codec),
-/// and whether the publisher captures system loopback at all. Persisted
-/// to disk alongside <see cref="VideoSettings"/> via
+/// and the per-window vs system-wide capture mode. Persisted to disk
+/// alongside <see cref="VideoSettings"/> via
 /// <see cref="Services.SettingsStore"/>.
 /// <para>
-/// Shared-content audio is opt-in: <see cref="Enabled"/> defaults to
-/// false. A user who shares their screen without thinking about audio
-/// gets the same silent stream the app always produced; enabling audio
-/// is a deliberate settings toggle. This keeps the privacy posture
-/// conservative by default — a YouTube tab playing in the background
-/// doesn't leak audio into a pair-programming room unless the sharer asks
-/// for it.
+/// Audio is always sent alongside video — the old "disable audio"
+/// toggle is gone. The remaining decision is scope: when the user
+/// shares a specific window, do we capture JUST that window's audio
+/// (the default, via the Windows 10 2004+ process-loopback API) or
+/// the whole system mix? <see cref="ForceSystemAudio"/> is the escape
+/// hatch for the system-wide behavior; by default it is off so per-window
+/// shares don't leak unrelated notifications / background apps into
+/// the stream.
 /// </para>
 /// </summary>
 public sealed class AudioSettings
 {
     /// <summary>
-    /// Master switch for shared-content audio. When false the publisher
-    /// never opens a loopback capture device and <c>StreamStarted.HasAudio</c>
-    /// is false — the audio <c>m=</c> section in the SDP still negotiates
-    /// (so toggling does not force renegotiation of a live video stream)
-    /// but no bytes flow.
+    /// When true, always capture the whole default-render-endpoint mix
+    /// (system loopback) even on single-window shares. Default false —
+    /// window shares use process-scoped loopback so only the shared
+    /// window's audio crosses the wire. Monitor shares always use
+    /// system loopback regardless of this flag (there's no single
+    /// process to scope to).
     /// </summary>
-    public bool Enabled { get; set; } = false;
+    public bool ForceSystemAudio { get; set; } = false;
 
     /// <summary>
     /// Target Opus bitrate in bits per second. 96 kbps stereo is a

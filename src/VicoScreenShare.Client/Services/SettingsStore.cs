@@ -133,8 +133,16 @@ public sealed class SettingsStore
         // Audio (shared-content loopback). Separate fields rather than a
         // nested object so existing settings.json files still load cleanly
         // — a file written by a pre-audio client just leaves these at the
-        // default (disabled, 96 kbps stereo).
-        public bool AudioEnabled { get; set; } = false;
+        // default (96 kbps stereo, per-window where possible).
+        //
+        // AudioEnabled is retained as a legacy field so configs written
+        // by the opt-in era don't silently surprise users on upgrade —
+        // the migration in ToClientSettings treats a legacy Enabled=false
+        // as "they wanted silence, respect that by forcing system audio
+        // off" and resets on first save under the new schema. Pre-audio
+        // configs (no such field at all) just land on the new defaults.
+        public bool? AudioEnabled { get; set; }
+        public bool AudioForceSystemAudio { get; set; } = false;
         public int AudioTargetBitrate { get; set; } = 96_000;
         public bool AudioStereo { get; set; } = true;
         public int AudioFrameDurationMs { get; set; } = 20;
@@ -165,7 +173,7 @@ public sealed class SettingsStore
             MinAdaptiveBitrate = source.Video.MinAdaptiveBitrate,
             EnableIntraRefresh = source.Video.EnableIntraRefresh,
             IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
-            AudioEnabled = source.Audio.Enabled,
+            AudioForceSystemAudio = source.Audio.ForceSystemAudio,
             AudioTargetBitrate = source.Audio.TargetBitrate,
             AudioStereo = source.Audio.Stereo,
             AudioFrameDurationMs = source.Audio.FrameDurationMs,
@@ -193,7 +201,7 @@ public sealed class SettingsStore
                 },
                 Audio = new AudioSettings
                 {
-                    Enabled = AudioEnabled,
+                    ForceSystemAudio = AudioForceSystemAudio,
                     // Accept the standard Opus operating band (6-510 kbps);
                     // out-of-band values on disk silently fall back to the
                     // default so a hand-edited file can't break encoder

@@ -12,9 +12,6 @@ Users can currently pick a resolution and a bitrate independently. Bad combinati
 
 ## Audio
 
-### Per-app audio capture
-Current shared-audio path captures the whole default render endpoint via WASAPI loopback — every sound the host machine plays, including notifications and unrelated apps, mixes into the outgoing stream. The custom share picker already knows the target window's PID (`CaptureTarget.ProcessId`); add a `ProcessLoopbackAudioSource` sibling to `WasapiLoopbackAudioSource` built on the Windows 10 2004+ process-scoped loopback API (`ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_PARAMS`, `PROCESS_LOOPBACK` mode) and switch the room to it when the user shares a single window. Monitor shares keep the system-loopback path.
-
 ### Per-tile volume and mute
 Viewers have no control over individual publishers' audio levels — every active audio track mixes at the system level. Add per-tile mute and volume sliders, wired to each `SubscriberSession`'s `AudioReceiver` / `WasapiAudioRenderer`. Mute should drop the packets before decode to save CPU, not just set renderer volume to zero.
 

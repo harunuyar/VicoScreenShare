@@ -116,7 +116,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
             new AudioBitrateOption("128 Kbps — high quality music", 128_000),
             new AudioBitrateOption("192 Kbps — near-transparent", 192_000),
         };
-        _enableAudio = _settings.Audio.Enabled;
+        _forceSystemAudio = _settings.Audio.ForceSystemAudio;
         _audioStereo = _settings.Audio.Stereo;
         _selectedAudioBitrate = AudioBitrateOptions.FirstOrDefault(o => o.Bitrate == _settings.Audio.TargetBitrate)
             ?? AudioBitrateOptions[1];
@@ -180,7 +180,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
     [ObservableProperty]
-    private bool _enableAudio;
+    private bool _forceSystemAudio;
 
     [ObservableProperty]
     private bool _audioStereo;
@@ -243,7 +243,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
         _settings.Video.IntraRefreshPeriodFrames = Math.Clamp(IntraRefreshPeriodFrames, 6, 600);
 
-        _settings.Audio.Enabled = EnableAudio;
+        _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;
         _settings.Audio.TargetBitrate = SelectedAudioBitrate.Bitrate;
 

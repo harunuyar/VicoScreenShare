@@ -31,7 +31,7 @@ public class AudioStreamerTests
 
         using var streamer = new AudioStreamer(
             source, resampler, OnEncoded,
-            new AudioSettings { Enabled = true, Stereo = true },
+            new AudioSettings { Stereo = true },
             factory);
         streamer.Start();
 
@@ -75,7 +75,7 @@ public class AudioStreamerTests
 
         using var streamer = new AudioStreamer(
             source, resampler, (_, _, _) => emitted++,
-            new AudioSettings { Enabled = true, Stereo = true },
+            new AudioSettings { Stereo = true },
             factory);
         streamer.Start();
 
@@ -100,7 +100,7 @@ public class AudioStreamerTests
 
         using var streamer = new AudioStreamer(
             source, resampler, (_, _, ts) => emittedTimestamps.Add(ts),
-            new AudioSettings { Enabled = true, Stereo = true },
+            new AudioSettings { Stereo = true },
             factory);
         streamer.Start();
 

@@ -724,45 +724,59 @@ public sealed partial class RoomViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Open the shared-audio loopback capture and wire an
+    /// Open the shared-audio capture and wire an
     /// <see cref="AudioStreamer"/> to the session's <c>SendAudio</c>.
-    /// No-op (and returns false) when <see cref="AudioSettings.Enabled"/>
-    /// is off, when <see cref="ClientHost.AudioCaptureProvider"/> is not
-    /// registered (non-Windows host), or when the provider can't find
-    /// an active render endpoint. Reuses any <see cref="_localAudioSource"/>
-    /// that carried over from a WS reconnect — resume path rebinds the
-    /// streamer to the new PC without reopening WASAPI, so the user
-    /// does not hear a gap in their own speakers.
+    /// Picks the right source based on the picked target:
+    /// <list type="bullet">
+    /// <item>Monitor share, OR <see cref="AudioSettings.ForceSystemAudio"/>
+    /// set, OR no PID on a window (rare race) → system loopback, the
+    /// whole default-render-endpoint mix.</item>
+    /// <item>Window share with a valid PID → process loopback, audio
+    /// only from that window's process tree. No notifications, no
+    /// unrelated apps mixing in.</item>
+    /// </list>
+    /// Returns false when no capture backend is registered or the
+    /// platform refused activation; the share continues silently in
+    /// that case.
     /// </summary>
     private async Task<bool> TryStartAudioStreamerAsync(WebRtcSession session)
     {
-        if (!_settings.Audio.Enabled)
-        {
-            return false;
-        }
-
         var captureProvider = ClientHost.AudioCaptureProvider;
         var resamplerFactory = ClientHost.AudioResamplerFactory;
         if (captureProvider is null || resamplerFactory is null)
         {
-            DebugLog.Write("[room] audio enabled but no capture provider / resampler registered; sharing silently");
+            DebugLog.Write("[room] no capture provider / resampler registered; sharing silently");
             return false;
         }
 
         if (_localAudioSource is null)
         {
+            var target = _pickedTarget;
+            var useProcessLoopback = target is { Kind: CaptureTargetKind.Window, ProcessId: > 0 }
+                && !_settings.Audio.ForceSystemAudio;
             try
             {
-                _localAudioSource = await captureProvider.CreateLoopbackSourceAsync().ConfigureAwait(true);
+                if (useProcessLoopback)
+                {
+                    _localAudioSource = await captureProvider.CreateProcessLoopbackSourceAsync(target!.ProcessId).ConfigureAwait(true);
+                    if (_localAudioSource is null)
+                    {
+                        DebugLog.Write($"[room] process-loopback activation refused for pid {target.ProcessId}; falling back to system loopback");
+                    }
+                }
+                if (_localAudioSource is null)
+                {
+                    _localAudioSource = await captureProvider.CreateLoopbackSourceAsync().ConfigureAwait(true);
+                }
             }
             catch (Exception ex)
             {
-                DebugLog.Write($"[room] failed to create audio loopback source: {ex.Message}");
+                DebugLog.Write($"[room] failed to create audio source: {ex.Message}");
                 return false;
             }
             if (_localAudioSource is null)
             {
-                DebugLog.Write("[room] no default render endpoint; sharing silently");
+                DebugLog.Write("[room] no audio endpoint available; sharing silently");
                 return false;
             }
         }

@@ -26,4 +26,14 @@ public interface IAudioCaptureProvider
     /// than an error.
     /// </summary>
     Task<IAudioCaptureSource?> CreateLoopbackSourceAsync();
+
+    /// <summary>
+    /// Build a capture source scoped to a single process tree via the
+    /// Windows 10 2004+ process-loopback API. Used when the user shares
+    /// a specific window — audio from ONLY that app (and any children
+    /// it spawned) crosses the wire, not the whole system mix. Returns
+    /// null when the platform doesn't support process loopback (older
+    /// Windows builds, non-Windows ports).
+    /// </summary>
+    Task<IAudioCaptureSource?> CreateProcessLoopbackSourceAsync(int processId);
 }

@@ -169,7 +169,7 @@ public sealed class LoopbackMediaE2ETests
             audioSource,
             resampler,
             (duration, payload, _) => senderRtc.PeerConnection.SendAudio(duration, payload),
-            new AudioSettings { Enabled = true, Stereo = true, TargetBitrate = 96_000 },
+            new AudioSettings { Stereo = true, TargetBitrate = 96_000 },
             codecs);
         audioStreamer.Start();
 

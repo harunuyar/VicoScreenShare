@@ -72,6 +72,7 @@ internal static class Program
                 "bench-audio-loopback" => RunAudioLoopbackBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-av-sync" => RunAvSyncBenchmark(argMap),
                 "list-targets" => RunListTargetsScenario(argMap).GetAwaiter().GetResult(),
+                "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -1165,7 +1166,6 @@ internal static class Program
 
         var settings = new AudioSettings
         {
-            Enabled = true,
             TargetBitrate = bitrate,
             Stereo = stereo,
             FrameDurationMs = 20,
@@ -1266,7 +1266,6 @@ internal static class Program
 
         var settings = new AudioSettings
         {
-            Enabled = true,
             TargetBitrate = bitrate,
             Stereo = true,
             FrameDurationMs = 20,
@@ -1421,7 +1420,7 @@ internal static class Program
         // fires from the same shared clock. Collect content timestamps
         // on every encoded packet.
         var audioTimestamps = new List<TimeSpan>();
-        var audioSettings = new AudioSettings { Enabled = true, Stereo = true, TargetBitrate = 96_000 };
+        var audioSettings = new AudioSettings { Stereo = true, TargetBitrate = 96_000 };
         var codecs = new OpusAudioCodecFactory();
         var audioSource = new SyntheticAudioSource();
         var audioResampler = new PassThroughS16ResamplerForHarness();
@@ -1528,6 +1527,62 @@ internal static class Program
         // would break lip sync on every viewer.
         var pass = pairs > 0 && rmsSkewMs < 15.0;
         Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (RMS {rmsSkewMs:F1} ms, max {skewMaxMs:F1} ms)");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// End-to-end smoke test for <c>ProcessLoopbackAudioSource</c>:
+    /// activate per-process loopback against a target PID and count the
+    /// PCM frames that come through for a few seconds. Confirms the
+    /// <c>ActivateAudioInterfaceAsync</c> / PROCESS_LOOPBACK path works
+    /// on the current Windows build before we wire it into the room.
+    /// Play audio from the target process while this is running.
+    /// </summary>
+    private static async Task<int> RunProcessAudioBenchmark(Dictionary<string, string> args)
+    {
+        if (!args.TryGetValue("pid", out var pidStr) || !int.TryParse(pidStr, out var pid) || pid <= 0)
+        {
+            Console.Error.WriteLine("ERROR: --pid <process id> required");
+            return 2;
+        }
+        var duration = double.Parse(args.GetValueOrDefault("duration", "5"));
+
+        Console.WriteLine($"# bench-process-audio pid={pid} duration={duration}s");
+
+        var source = new VicoScreenShare.Client.Windows.Audio.ProcessLoopbackAudioSource(pid);
+        var frames = 0;
+        var bytes = 0L;
+        source.FrameArrived += (in VicoScreenShare.Client.Platform.AudioFrameData f) =>
+        {
+            Interlocked.Increment(ref frames);
+            Interlocked.Add(ref bytes, f.Pcm.Length);
+        };
+
+        try
+        {
+            await source.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"ERROR: start failed: {ex.GetType().Name}: {ex.Message}");
+            return 2;
+        }
+
+        Console.WriteLine($"# capturing {source.DisplayName} @ {source.SourceSampleRate} Hz / {source.SourceChannels} ch / {source.SourceFormat}");
+        await Task.Delay(TimeSpan.FromSeconds(duration));
+
+        await source.StopAsync();
+        await source.DisposeAsync();
+
+        Console.WriteLine($"RESULT: frames={frames}");
+        Console.WriteLine($"RESULT: bytes={bytes}");
+        Console.WriteLine($"RESULT: bytes_per_sec={bytes / Math.Max(0.001, duration):F0}");
+        // Minimum threshold: even a silent app tree should produce *some*
+        // WASAPI callbacks if activation worked. Zero frames in 5 s means
+        // the activation returned a valid-looking client but the session
+        // never started — usually a format mismatch or wrong PID.
+        var pass = frames > 0;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} ({frames} frames over {duration}s)");
         return pass ? 0 : 3;
     }
 
@@ -1680,5 +1735,8 @@ internal static class Program
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("    --fps N             default 30");
         Console.Error.WriteLine("  list-targets          enumerate shareable windows + monitors");
+        Console.Error.WriteLine("  bench-process-audio   capture a process's audio via PROCESS_LOOPBACK");
+        Console.Error.WriteLine("    --pid N             required, target process id");
+        Console.Error.WriteLine("    --duration sec      default 5");
     }
 }

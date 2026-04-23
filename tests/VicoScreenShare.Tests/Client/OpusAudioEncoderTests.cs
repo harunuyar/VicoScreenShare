@@ -21,7 +21,6 @@ public class OpusAudioEncoderTests
     {
         var settings = new AudioSettings
         {
-            Enabled = true,
             Stereo = stereo,
             TargetBitrate = bitrate,
             FrameDurationMs = 20,
@@ -114,7 +113,7 @@ public class OpusAudioEncoderTests
     [Fact]
     public void Encoder_rejects_wrong_sized_input()
     {
-        var settings = new AudioSettings { Enabled = true, Stereo = true };
+        var settings = new AudioSettings { Stereo = true };
         var factory = new OpusAudioCodecFactory();
         using var encoder = factory.CreateEncoder(settings);
 

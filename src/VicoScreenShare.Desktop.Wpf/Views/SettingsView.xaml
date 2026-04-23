@@ -172,21 +172,19 @@
                     <StackPanel>
                         <TextBlock Text="Shared audio" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" />
                         <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12" Margin="0,0,0,8"
-                                   Text="Captures whatever your default output is playing and sends it alongside the video — YouTube, games, Spotify, Teams meeting audio, anything on your speakers. Does NOT capture your microphone. Off by default so a silent YouTube tab doesn't leak into a pair-programming room by accident." />
-                        <ui:ToggleSwitch IsChecked="{Binding EnableAudio}"
-                                         OffContent="Off — video only"
-                                         OnContent="On — share system audio" />
+                                   Text="Audio from the source you're sharing rides alongside the video. When you share a specific window, only that app's sound is captured — notifications and background apps stay out of the stream. Whole-screen shares capture the full system mix. Does NOT capture your microphone." />
+                        <ui:ToggleSwitch IsChecked="{Binding ForceSystemAudio}"
+                                         OffContent="Match the share — per-window audio on window shares"
+                                         OnContent="Always share whole-system audio" />
                         <StackPanel Margin="0,12,0,0">
                             <TextBlock Text="Opus bitrate" Opacity="0.7" FontSize="11" />
                             <ComboBox ItemsSource="{Binding AudioBitrateOptions}"
                                       SelectedItem="{Binding SelectedAudioBitrate}"
                                       DisplayMemberPath="DisplayName"
-                                      IsEnabled="{Binding EnableAudio}"
                                       HorizontalAlignment="Stretch"
                                       Margin="0,4,0,0" />
                         </StackPanel>
                         <ui:ToggleSwitch IsChecked="{Binding AudioStereo}"
-                                         IsEnabled="{Binding EnableAudio}"
                                          OffContent="Mono"
                                          OnContent="Stereo"
                                          Margin="0,12,0,0" />
