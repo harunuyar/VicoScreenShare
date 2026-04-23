@@ -41,6 +41,45 @@ public sealed partial class NavigationService : ObservableObject, INavigationHos
     [ObservableProperty]
     private object? _activeOverlay;
 
+    /// <summary>
+    /// Preferred width of the current overlay, in logical pixels. The
+    /// Border hosting <see cref="ActiveOverlay"/> binds its Width to
+    /// this so different overlays (compact Settings panel vs wide share
+    /// picker) can claim the size they need. Set immediately before
+    /// <see cref="ShowOverlay"/>; reset to the default (460) on close.
+    /// </summary>
+    [ObservableProperty]
+    private double _overlayWidth = 460;
+
+    /// <summary>
+    /// Max height of the current overlay. Same semantics as
+    /// <see cref="OverlayWidth"/>.
+    /// </summary>
+    [ObservableProperty]
+    private double _overlayMaxHeight = 640;
+
+    /// <summary>
+    /// Horizontal alignment of the overlay card within the window.
+    /// Settings anchors to the right (near its button); the share
+    /// picker centers. Defaults to Right to match the pre-picker
+    /// behavior Settings dialog already relied on.
+    /// </summary>
+    [ObservableProperty]
+    private System.Windows.HorizontalAlignment _overlayHorizontalAlignment = System.Windows.HorizontalAlignment.Right;
+
+    /// <summary>
+    /// Vertical alignment of the overlay card within the window.
+    /// Settings anchors to the top, picker centers.
+    /// </summary>
+    [ObservableProperty]
+    private System.Windows.VerticalAlignment _overlayVerticalAlignment = System.Windows.VerticalAlignment.Top;
+
+    /// <summary>Outer margin of the overlay card. Lets Settings sit
+    /// 64px below the title bar / 16px from the right edge while the
+    /// picker centers at margin zero.</summary>
+    [ObservableProperty]
+    private System.Windows.Thickness _overlayMargin = new(0, 64, 16, 16);
+
     public bool CanGoBack => false;
 
     public void NavigateTo(object viewModel)
@@ -55,5 +94,13 @@ public sealed partial class NavigationService : ObservableObject, INavigationHos
         ActiveOverlay = overlayViewModel;
     }
 
-    public void CloseOverlay() => ActiveOverlay = null;
+    public void CloseOverlay()
+    {
+        ActiveOverlay = null;
+        OverlayWidth = 460;
+        OverlayMaxHeight = 640;
+        OverlayHorizontalAlignment = System.Windows.HorizontalAlignment.Right;
+        OverlayVerticalAlignment = System.Windows.VerticalAlignment.Top;
+        OverlayMargin = new System.Windows.Thickness(0, 64, 16, 16);
+    }
 }

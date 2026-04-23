@@ -4,6 +4,7 @@
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:svc="clr-namespace:VicoScreenShare.Desktop.App.Services"
                  xmlns:b="clr-namespace:VicoScreenShare.Desktop.App.Behaviors"
+                 xmlns:rendering="clr-namespace:VicoScreenShare.Desktop.App.Rendering"
                  Title="Vico Screen Share"
                  Icon="pack://application:,,,/Assets/VicoScreenShare.ico"
                  Width="1280" Height="800"
@@ -41,43 +42,41 @@
         <ContentControl x:Name="PageHost" Grid.Row="1"
                         Content="{Binding Current, Converter={StaticResource VmToPage}}" />
 
-        <!-- In-window Settings panel. Lives in a Popup so its own top-level
-             HWND sits above the page's child HwndHost renderers — the video
-             keeps playing underneath, full color, no dimming. Anchored to
-             the top-right (near the Settings button that opens it) and
-             stretches vertically with a 16px margin from window chrome.
-             The transparent backdrop still catches click-outside-to-dismiss. -->
-        <Popup IsOpen="{Binding ActiveOverlay, Converter={StaticResource NonNullToBool}}"
-               StaysOpen="True"
-               AllowsTransparency="True"
-               Placement="Center"
-               PlacementTarget="{Binding ElementName=PageHost}"
-               Width="{Binding ActualWidth, ElementName=PageHost}"
-               Height="{Binding ActualHeight, ElementName=PageHost}"
-               b:PopupFollowsWindow.IsEnabled="True">
-            <!-- Background alpha 1/255: invisible but hit-testable. A fully
-                 transparent Background lets clicks fall through the
-                 AllowsTransparency popup to the page underneath, so neither
-                 StaysOpen=False nor our manual handler would ever see them. -->
-            <Grid Background="#01000000" Focusable="True"
-                  KeyDown="OnOverlayKeyDown"
-                  MouseDown="OnOverlayBackdropMouseDown">
-                <Border Width="460"
-                        MaxHeight="640"
-                        Margin="0,64,16,16"
-                        Background="{DynamicResource ApplicationBackgroundBrush}"
-                        CornerRadius="8"
-                        BorderThickness="1"
-                        BorderBrush="{DynamicResource ControlElevationBorderBrush}"
-                        HorizontalAlignment="Right" VerticalAlignment="Top"
-                        ClipToBounds="True"
-                        MouseDown="OnOverlayCardMouseDown">
-                    <Border.Effect>
-                        <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.35" />
-                    </Border.Effect>
-                    <ContentControl Content="{Binding ActiveOverlay, Converter={StaticResource VmToPage}}" />
-                </Border>
-            </Grid>
-        </Popup>
+        <!-- In-window overlay panel. Hosts Settings (compact, top-right)
+             and the Share picker (wide, center). D3DImage-based content
+             lives underneath; the overlay composes over it through WPF's
+             normal rendering path — no HwndHost / layered-window issues
+             because neither the renderer nor the overlay uses one. -->
+        <Grid Grid.Row="1"
+              Panel.ZIndex="100"
+              Background="#60000000"
+              Focusable="True"
+              Visibility="{Binding ActiveOverlay, Converter={StaticResource NullToCollapsed}}"
+              KeyDown="OnOverlayKeyDown"
+              MouseDown="OnOverlayBackdropMouseDown">
+            <!-- CutoutForAll on the card (not the dimmed backdrop) so
+                 renderers below the overlay punch a hole under the card
+                 itself, leaving the dimmed backdrop to overlay the video
+                 naturally. Renderers INSIDE the card (e.g. picker tile
+                 previews) skip this cutout via the ancestor-skip check
+                 in UpdateWindowRegion. -->
+            <Border Width="{Binding OverlayWidth}"
+                    MaxHeight="{Binding OverlayMaxHeight}"
+                    Margin="{Binding OverlayMargin}"
+                    Background="{DynamicResource ApplicationBackgroundBrush}"
+                    CornerRadius="8"
+                    BorderThickness="1"
+                    BorderBrush="{DynamicResource ControlElevationBorderBrush}"
+                    HorizontalAlignment="{Binding OverlayHorizontalAlignment}"
+                    VerticalAlignment="{Binding OverlayVerticalAlignment}"
+                    ClipToBounds="True"
+                    rendering:D3DImageVideoRenderer.CutoutForAll="True"
+                    MouseDown="OnOverlayCardMouseDown">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.35" />
+                </Border.Effect>
+                <ContentControl Content="{Binding ActiveOverlay, Converter={StaticResource VmToPage}}" />
+            </Border>
+        </Grid>
     </Grid>
 </ui:FluentWindow>

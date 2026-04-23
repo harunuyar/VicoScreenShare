@@ -71,6 +71,7 @@ internal static class Program
                 "bench-audio-encode" => RunAudioEncodeBenchmark(argMap),
                 "bench-audio-loopback" => RunAudioLoopbackBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-av-sync" => RunAvSyncBenchmark(argMap),
+                "list-targets" => RunListTargetsScenario(argMap).GetAwaiter().GetResult(),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -1530,6 +1531,58 @@ internal static class Program
         return pass ? 0 : 3;
     }
 
+    /// <summary>
+    /// Sanity-check the custom capture-target enumerator: print every
+    /// shareable window + monitor with metadata. Useful for confirming
+    /// the filter is excluding the right things (no cloaked UWP, no
+    /// tool windows without titles) before the UI layer wraps it.
+    /// </summary>
+    private static async Task<int> RunListTargetsScenario(Dictionary<string, string> args)
+    {
+        var withThumbnails = args.GetValueOrDefault("thumbnails", "true") != "false";
+        var enumerator = new Win32CaptureTargetEnumerator();
+        var targets = await enumerator.EnumerateAsync();
+
+        Console.WriteLine($"# list-targets enumerated {targets.Count} shareable targets");
+        var windows = 0;
+        var monitors = 0;
+        var iconsFound = 0;
+        var thumbsFound = 0;
+        var thumbsFailed = 0;
+        foreach (var t in targets)
+        {
+            var iconTag = t.Icon is null ? "" : $"  icon {t.Icon.Width}×{t.Icon.Height}";
+            var thumbTag = string.Empty;
+            if (withThumbnails)
+            {
+                var sw = Stopwatch.StartNew();
+                var thumb = await enumerator.GetThumbnailAsync(t, 280, 160);
+                sw.Stop();
+                if (thumb is not null)
+                {
+                    thumbsFound++;
+                    thumbTag = $"  thumb {thumb.Width}×{thumb.Height} stride={thumb.StrideBytes} pixels={thumb.BgraPixels.Length}B in {sw.ElapsedMilliseconds}ms";
+                }
+                else
+                {
+                    thumbsFailed++;
+                    thumbTag = $"  thumb NULL in {sw.ElapsedMilliseconds}ms";
+                }
+            }
+            Console.WriteLine($"  [{t.Kind}] pid={t.ProcessId,-6} handle=0x{t.Handle.ToInt64():X} \"{t.DisplayName}\" — {t.OwnerDisplayName}{iconTag}{thumbTag}");
+            if (t.Kind == VicoScreenShare.Client.Platform.CaptureTargetKind.Window) windows++;
+            else if (t.Kind == VicoScreenShare.Client.Platform.CaptureTargetKind.Monitor) monitors++;
+            if (t.Icon is not null) iconsFound++;
+        }
+        Console.WriteLine($"RESULT: windows={windows}");
+        Console.WriteLine($"RESULT: monitors={monitors}");
+        Console.WriteLine($"RESULT: icons={iconsFound}");
+        Console.WriteLine($"RESULT: thumbs_ok={thumbsFound}");
+        Console.WriteLine($"RESULT: thumbs_failed={thumbsFailed}");
+        Console.WriteLine($"VERDICT: {(monitors > 0 && windows > 0 ? "PASS" : "FAIL")}");
+        return monitors > 0 && windows > 0 ? 0 : 3;
+    }
+
     private sealed class SyntheticAudioSource : VicoScreenShare.Client.Platform.IAudioCaptureSource
     {
         public string DisplayName => "synthetic";
@@ -1626,5 +1679,6 @@ internal static class Program
         Console.Error.WriteLine("  bench-av-sync         shared-clock audio/video timestamp skew");
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("    --fps N             default 30");
+        Console.Error.WriteLine("  list-targets          enumerate shareable windows + monitors");
     }
 }

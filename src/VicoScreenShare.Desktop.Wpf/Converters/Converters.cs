@@ -12,6 +12,21 @@ using VicoScreenShare.Desktop.App.Views;
 /// <summary>
 /// Small set of value converters the XAML needs. Kept in one file.
 /// </summary>
+/// <summary>
+/// Returns WPF-UI's <c>ControlAppearance.Primary</c> string when the
+/// bound bool is true, <c>Transparent</c> otherwise. Drives the
+/// share picker's tab pills — active tab gets the accent color, the
+/// other stays chromeless. The string values match the enum names
+/// WPF-UI parses at XAML binding time.
+/// </summary>
+public sealed class BoolToAccentTransparentConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is bool b && b ? "Primary" : "Transparent";
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 public sealed class InvertBoolConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
@@ -220,6 +235,7 @@ public sealed class ViewModelToPageConverter : IValueConverter
         [typeof(RoomViewModel)] = vm => new RoomView { DataContext = vm },
         [typeof(CaptureTestViewModel)] = vm => new CaptureTestView { DataContext = vm },
         [typeof(SettingsViewModel)] = vm => new SettingsView { DataContext = vm },
+        [typeof(SharePickerViewModel)] = vm => new SharePickerView { DataContext = vm },
     };
 
     public object? Convert(object value, Type targetType, object parameter, CultureInfo culture)

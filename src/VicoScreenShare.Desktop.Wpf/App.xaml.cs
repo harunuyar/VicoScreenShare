@@ -55,6 +55,7 @@ public partial class App : Application
         SharedDevices = sharedDevices;
 
         ClientHost.CaptureProviderFactory = hwndProvider => new WindowsCaptureProvider(hwndProvider, sharedDevices);
+        ClientHost.CaptureTargetEnumerator = new Win32CaptureTargetEnumerator();
         ClientHost.VideoCodecCatalog = new VideoCodecCatalog();
 
         // Shared-content audio wiring. The capture provider picks the

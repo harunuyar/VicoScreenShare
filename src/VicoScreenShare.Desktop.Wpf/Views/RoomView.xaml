@@ -29,22 +29,26 @@
                     Background="#FF0A0A0A"
                     Cursor="Hand"
                     Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=UserControl}}">
+                <!-- Click/double-click via normal WPF routed events on the
+                     Border. The renderer's child HWND returns HTTRANSPARENT
+                     from WM_NCHITTEST, so mouse input flows through to the
+                     WPF tree and these bindings actually fire. -->
+                <Border.InputBindings>
+                    <MouseBinding MouseAction="LeftClick"
+                                  Command="{Binding Tag.FocusTileCommand, ElementName=TileRoot}"
+                                  CommandParameter="{Binding PublisherPeerId}" />
+                    <MouseBinding MouseAction="LeftDoubleClick"
+                                  Command="{Binding Tag.ToggleFullscreenCommand, ElementName=TileRoot}"
+                                  CommandParameter="{Binding PublisherPeerId}" />
+                </Border.InputBindings>
                 <Grid>
                     <!-- D3D renderer fills the entire tile. CornerRadius shapes the
                          HWND via SetWindowRgn; CutoutFor registrations below poke
-                         rectangular holes in that shape where WPF overlays render.
-                         LeftClick/LeftDoubleClickCommand bridge WM_LBUTTON* out of
-                         the child HWND so clicks on the video reach the VM — WPF
-                         MouseBindings on the Border above can't fire because the
-                         HwndHost consumes mouse input in its area. -->
+                         rectangular holes in that shape where WPF overlays render. -->
                     <rendering:D3DImageVideoRenderer x:Name="TileRenderer"
                                                      Receiver="{Binding Receiver}"
                                                      NominalFrameRate="{Binding NominalFrameRate}"
                                                      CornerRadius="10"
-                                                     LeftClickCommand="{Binding Tag.FocusTileCommand, ElementName=TileRoot}"
-                                                     LeftClickCommandParameter="{Binding PublisherPeerId}"
-                                                     LeftDoubleClickCommand="{Binding Tag.ToggleFullscreenCommand, ElementName=TileRoot}"
-                                                     LeftDoubleClickCommandParameter="{Binding PublisherPeerId}"
                                                      Visibility="{Binding HasFirstFrame, Converter={StaticResource BoolToVisibility}}" />
 
                     <TextBlock Text="Connecting…"

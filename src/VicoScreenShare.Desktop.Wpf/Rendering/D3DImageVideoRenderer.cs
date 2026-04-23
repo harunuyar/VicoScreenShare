@@ -345,12 +345,18 @@ public sealed class D3DImageVideoRenderer : HwndHost
     }
 
     /// <summary>
-    /// Apply a <see cref="SetWindowRgn"/> to the HWND: base shape is a
-    /// rounded rect of the current bounds (CornerRadius applied), minus
-    /// the bounding rect of every registered cutout element. The result
-    /// is the shape of pixels actually drawn by the swap chain; anywhere
-    /// outside this shape, WPF's rendering of the parent HWND shows —
-    /// which is how display-name pills and hover buttons appear on top.
+    /// Apply a <see cref="SetWindowRgn"/> to the HWND. The region is
+    /// <c>(local bounds ∩ every clipping ancestor's visible rect) −
+    /// registered cutout rects</c>. This is the generic fix for
+    /// HwndHost's notorious "ignores WPF clip geometry and sibling
+    /// z-order" behavior: we reconstruct the effective clip WPF would
+    /// apply to a non-HwndHost child and enforce it via the window
+    /// region, so the renderer stops bleeding over scrolled-past
+    /// content, out-of-viewport areas, or overlay panels. Every
+    /// view using the renderer gets correct behavior for free —
+    /// scroll viewports, clip-to-bounds borders, and
+    /// <see cref="CutoutForAllProperty"/>-marked overlays all flow
+    /// through the same pipeline.
     /// </summary>
     private void UpdateWindowRegion()
     {
@@ -359,8 +365,8 @@ public sealed class D3DImageVideoRenderer : HwndHost
             return;
         }
 
-        var w = (int)Math.Max(1, ActualWidth);
-        var h = (int)Math.Max(1, ActualHeight);
+        var w = Math.Max(0.0, ActualWidth);
+        var h = Math.Max(0.0, ActualHeight);
 
         // DIP-to-pixel scaling for GDI — WPF sizes are DIPs; SetWindowRgn
         // wants device pixels. PresentationSource.CompositionTarget gives
@@ -372,21 +378,84 @@ public sealed class D3DImageVideoRenderer : HwndHost
             scale = source.CompositionTarget.TransformToDevice.M11;
         }
 
+        // Intersect the full local bounds with every clipping ancestor's
+        // visible rect (projected into our local coords). Scroll viewports
+        // clip by viewport size; borders / grids with ClipToBounds clip to
+        // their layout bounds; elements with an explicit Clip respect
+        // that. Iterating in DIPs is easier than pixels — we scale at the
+        // very end when building the GDI region.
+        var visible = new System.Windows.Rect(0, 0, w, h);
+        System.Windows.DependencyObject? node = System.Windows.Media.VisualTreeHelper.GetParent(this);
+        while (node is not null && !visible.IsEmpty && visible.Width > 0 && visible.Height > 0)
+        {
+            if (node is FrameworkElement fe)
+            {
+                System.Windows.Rect? ancestorClip = null;
+                if (fe is System.Windows.Controls.ScrollViewer sv)
+                {
+                    // ScrollViewer viewport is implicitly the clip — content
+                    // outside (0,0, ViewportWidth, ViewportHeight) is hidden
+                    // by WPF's visual clipping but HwndHost ignores that.
+                    ancestorClip = new System.Windows.Rect(0, 0, sv.ViewportWidth, sv.ViewportHeight);
+                }
+                else if (fe.ClipToBounds || fe.Clip is not null)
+                {
+                    ancestorClip = new System.Windows.Rect(0, 0, fe.ActualWidth, fe.ActualHeight);
+                }
+
+                if (ancestorClip is System.Windows.Rect clip && clip.Width > 0 && clip.Height > 0)
+                {
+                    try
+                    {
+                        var t = fe.TransformToDescendant(this);
+                        if (t is not null)
+                        {
+                            var clipLocal = t.TransformBounds(clip);
+                            visible.Intersect(clipLocal);
+                        }
+                    }
+                    catch
+                    {
+                        // Visual-tree race during teardown / re-parenting;
+                        // skip this ancestor, next layout tick retries.
+                    }
+                }
+            }
+            node = System.Windows.Media.VisualTreeHelper.GetParent(node);
+        }
+
+        if (visible.IsEmpty || visible.Width <= 0 || visible.Height <= 0)
+        {
+            // Fully clipped — an empty GDI region hides the HWND entirely
+            // (no pixels painted, no space reserved).
+            SetWindowRgn(_hwnd, CreateRectRgn(0, 0, 0, 0), true);
+            return;
+        }
+
+        var left = (int)Math.Round(visible.Left * scale);
+        var top = (int)Math.Round(visible.Top * scale);
+        var right = (int)Math.Round(visible.Right * scale);
+        var bottom = (int)Math.Round(visible.Bottom * scale);
+
         IntPtr baseRgn;
         var cornerPx = (int)Math.Round(CornerRadius * scale * 2); // CreateRoundRectRgn takes diameter
         if (cornerPx > 0)
         {
-            baseRgn = CreateRoundRectRgn(
-                0, 0,
-                (int)Math.Round(w * scale) + 1,
-                (int)Math.Round(h * scale) + 1,
-                cornerPx, cornerPx);
+            // Round the corners only when the visible rect covers the
+            // full renderer — if we're being clipped at an edge, rounding
+            // that clipped edge would produce a weird double-round.
+            var fullyVisible =
+                left <= 0 &&
+                top <= 0 &&
+                right >= (int)Math.Round(w * scale) &&
+                bottom >= (int)Math.Round(h * scale);
+            baseRgn = fullyVisible
+                ? CreateRoundRectRgn(left, top, right + 1, bottom + 1, cornerPx, cornerPx)
+                : CreateRectRgn(left, top, right, bottom);
         }
         else
         {
-            baseRgn = CreateRectRgn(0, 0,
-                (int)Math.Round(w * scale),
-                (int)Math.Round(h * scale));
+            baseRgn = CreateRectRgn(left, top, right, bottom);
         }
 
         if (baseRgn == IntPtr.Zero)
@@ -405,6 +474,19 @@ public sealed class D3DImageVideoRenderer : HwndHost
         foreach (var element in allCutouts)
         {
             if (!element.IsVisible || element.ActualWidth <= 0 || element.ActualHeight <= 0)
+            {
+                continue;
+            }
+
+            // Skip cutouts that are ancestors of this renderer. The intent
+            // of CutoutFor[All] is "this WPF element sits ABOVE the
+            // renderer; don't paint the renderer under it" — but a
+            // renderer nested INSIDE the cutout (e.g. picker tile
+            // previews inside the overlay card) is part of the content
+            // the cutout hosts, not something beneath it. Without this
+            // guard, the picker's own tiles would cut themselves to
+            // empty the moment the overlay card is marked CutoutForAll.
+            if (IsAncestorOf(element, this))
             {
                 continue;
             }
@@ -529,71 +611,15 @@ public sealed class D3DImageVideoRenderer : HwndHost
     // overlays sitting on the video never receive clicks or drag.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, D3DImageVideoRenderer> _instancesByHwnd = new();
 
-    // Mouse message constants.
-    private const int WM_MOUSEMOVE = 0x0200;
-    private const int WM_LBUTTONDOWN = 0x0201;
-    private const int WM_LBUTTONUP = 0x0202;
-    private const int WM_LBUTTONDBLCLK = 0x0203;
-
-    /// <summary>
-    /// Fired when the child window receives <c>WM_LBUTTONDOWN</c>. The
-    /// <see cref="MouseButtonEventArgs"/>-style payload reports the
-    /// click position in the renderer's local DIP coordinates.
-    /// </summary>
-    public event EventHandler<VideoMouseEventArgs>? VideoMouseDown;
-    public event EventHandler<VideoMouseEventArgs>? VideoMouseMove;
-    public event EventHandler<VideoMouseEventArgs>? VideoMouseUp;
-    public event EventHandler<VideoMouseEventArgs>? VideoMouseDoubleClick;
-
-    /// <summary>
-    /// Command invoked on <c>WM_LBUTTONUP</c> when it pairs with a prior
-    /// <c>WM_LBUTTONDOWN</c> on this window — a completed click. Tiles
-    /// bind this to <c>FocusTileCommand</c> so clicking anywhere on the
-    /// video focuses it, not just the few pixels of WPF chrome.
-    /// </summary>
-    public static readonly DependencyProperty LeftClickCommandProperty =
-        DependencyProperty.Register(nameof(LeftClickCommand), typeof(System.Windows.Input.ICommand),
-            typeof(D3DImageVideoRenderer), new PropertyMetadata(null));
-
-    public System.Windows.Input.ICommand? LeftClickCommand
-    {
-        get => (System.Windows.Input.ICommand?)GetValue(LeftClickCommandProperty);
-        set => SetValue(LeftClickCommandProperty, value);
-    }
-
-    public static readonly DependencyProperty LeftClickCommandParameterProperty =
-        DependencyProperty.Register(nameof(LeftClickCommandParameter), typeof(object),
-            typeof(D3DImageVideoRenderer), new PropertyMetadata(null));
-
-    public object? LeftClickCommandParameter
-    {
-        get => GetValue(LeftClickCommandParameterProperty);
-        set => SetValue(LeftClickCommandParameterProperty, value);
-    }
-
-    public static readonly DependencyProperty LeftDoubleClickCommandProperty =
-        DependencyProperty.Register(nameof(LeftDoubleClickCommand), typeof(System.Windows.Input.ICommand),
-            typeof(D3DImageVideoRenderer), new PropertyMetadata(null));
-
-    public System.Windows.Input.ICommand? LeftDoubleClickCommand
-    {
-        get => (System.Windows.Input.ICommand?)GetValue(LeftDoubleClickCommandProperty);
-        set => SetValue(LeftDoubleClickCommandProperty, value);
-    }
-
-    public static readonly DependencyProperty LeftDoubleClickCommandParameterProperty =
-        DependencyProperty.Register(nameof(LeftDoubleClickCommandParameter), typeof(object),
-            typeof(D3DImageVideoRenderer), new PropertyMetadata(null));
-
-    public object? LeftDoubleClickCommandParameter
-    {
-        get => GetValue(LeftDoubleClickCommandParameterProperty);
-        set => SetValue(LeftDoubleClickCommandParameterProperty, value);
-    }
-
-    // Drag-detection state: WM_LBUTTONDOWN sets _lbuttonDownInside, WM_LBUTTONUP
-    // clears it and fires LeftClickCommand iff we never left the window.
-    private bool _lbuttonDownInside;
+    // Hit-test constants. WM_NCHITTEST → HTTRANSPARENT makes the child
+    // HWND invisible to mouse hit-testing, so Windows routes all mouse
+    // input (clicks, moves, wheel) straight to the parent HWND where
+    // WPF's routed-event system handles it normally. Callers wanting
+    // click-on-video behavior (focus, fullscreen) wire up MouseLeftButtonDown
+    // / MouseDoubleClick etc. on the WPF element wrapping the renderer —
+    // there's no Win32 WndProc dispatch path in this class anymore.
+    private const int WM_NCHITTEST = 0x0084;
+    private const int HTTRANSPARENT = -1;
 
     /// <summary>
     /// Keep this renderer's child HWND at the top of its sibling z-order,
@@ -809,6 +835,15 @@ public sealed class D3DImageVideoRenderer : HwndHost
         // size (via Arrange) and the frame size.
         _presentLoop.Start();
         RefreshActiveFrameSource();
+
+        // Rebuild the window region whenever any ancestor's layout
+        // shifts — parent ScrollViewer scroll, window resize, splitter
+        // drag, etc. LayoutUpdated fires on us even when our own size
+        // didn't change, as long as something upstream did. Without this
+        // the renderer would keep painting at its old visible-rect
+        // intersection and bleed over scrolled content.
+        LayoutUpdated += OnAncestorLayoutUpdated;
+
         // Pick up any existing global cutouts on this fresh renderer.
         // Without this, a tile mounted AFTER a global cutout is registered
         // would render over that cutout area until the next layout tick.
@@ -816,8 +851,37 @@ public sealed class D3DImageVideoRenderer : HwndHost
         return new HandleRef(this, _hwnd);
     }
 
+    private void OnAncestorLayoutUpdated(object? sender, EventArgs e)
+    {
+        // Synchronous on layout changes: the HwndHost has just moved
+        // to its new position but still carries the prior window
+        // region. Deferring via QueueRegionUpdate (DispatcherPriority.Render)
+        // runs the SetWindowRgn AFTER the current frame paints, so a
+        // scrolled tile shows its old overflow for one frame before the
+        // region catches up — visible as a flicker. Calling directly
+        // here applies the region in the same layout tick, before paint.
+        // SetWindowRgn is a GDI call, not expensive at this cadence.
+        UpdateWindowRegion();
+    }
+
+    private static bool IsAncestorOf(System.Windows.DependencyObject ancestor, System.Windows.DependencyObject descendant)
+    {
+        var node = System.Windows.Media.VisualTreeHelper.GetParent(descendant);
+        while (node is not null)
+        {
+            if (ReferenceEquals(node, ancestor))
+            {
+                return true;
+            }
+            node = System.Windows.Media.VisualTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
     protected override void DestroyWindowCore(HandleRef hwnd)
     {
+        LayoutUpdated -= OnAncestorLayoutUpdated;
+
         // Stop the present loop BEFORE tearing D3D state. The loop calls
         // PaintFromQueue → upload + scale + Present which touches
         // _swapChain / _scaler / _uploadTexture; disposing those while
@@ -1719,22 +1783,17 @@ public sealed class D3DImageVideoRenderer : HwndHost
             // the video. Keep rooted so GC can't collect the delegate.
             WindowProcDelegate wndProc = ClassWndProc;
             _wndProcHandle = GCHandle.Alloc(wndProc);
-            // CS_DBLCLKS (0x0008) enables WM_LBUTTONDBLCLK delivery. Without
-            // it, Windows never promotes a fast LBUTTONDOWN pair to the
-            // double-click message and double-click-to-fullscreen silently
-            // falls back to two single clicks.
-            const uint CS_DBLCLKS = 0x0008;
             var wc = new WNDCLASSEX
             {
                 cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(),
-                style = CS_DBLCLKS,
+                style = 0,
                 lpfnWndProc = Marshal.GetFunctionPointerForDelegate(wndProc),
                 hInstance = GetModuleHandleW(null),
-                // Hand cursor class-wide — the WPF Cursor="Hand" on the
-                // tile Border can't reach the child HWND's area (HwndHost
-                // airspace eats the cursor), so we bake it into the window
-                // class here. Every renderer HWND gets the same hand.
-                hCursor = LoadCursorW(IntPtr.Zero, IDC_HAND),
+                // No cursor on the window class — WM_NCHITTEST returns
+                // HTTRANSPARENT so mouse hits never reach this window;
+                // cursor selection is handled by whichever WPF element
+                // ends up hit-tested in the parent.
+                hCursor = IntPtr.Zero,
                 // Black background brush so the child window is filled
                 // with black on WM_ERASEBKGND before our first Present.
                 // Without this, whatever was painted underneath the
@@ -1751,82 +1810,20 @@ public sealed class D3DImageVideoRenderer : HwndHost
 
     private static IntPtr ClassWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
-        if (_instancesByHwnd.TryGetValue(hwnd, out var self))
+        // Make the renderer HWND transparent to hit-testing. Windows
+        // calls WM_NCHITTEST before routing any mouse input; returning
+        // HTTRANSPARENT tells Windows "pretend this window isn't here,
+        // route through to the parent." That means clicks, moves, and
+        // wheel scrolls all flow straight to the WPF main window where
+        // normal routed-event handling takes over — the Border wrapping
+        // a tile gets MouseLeftButtonDown, the ancestor ScrollViewer
+        // gets the wheel, etc. The renderer stops being special.
+        if (msg == WM_NCHITTEST)
         {
-            var handled = self.DispatchMouseMessage(msg, lParam);
-            if (handled)
-            {
-                return IntPtr.Zero;
-            }
+            return (IntPtr)HTTRANSPARENT;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
-    /// <summary>
-    /// Forwards WM_LBUTTON* / WM_MOUSEMOVE into WPF via CLR events and
-    /// command invocations. The child HWND would otherwise eat every
-    /// click/drag in its area, leaving the video un-interactable.
-    /// </summary>
-    private bool DispatchMouseMessage(uint msg, IntPtr lParam)
-    {
-        // LOWORD/HIWORD of lParam are x/y in window client pixels; convert
-        // to DIPs so event payloads match the WPF coordinate system.
-        short px = (short)((int)lParam & 0xFFFF);
-        short py = (short)(((int)lParam >> 16) & 0xFFFF);
-        var scale = 1.0;
-        var source = PresentationSource.FromVisual(this);
-        if (source?.CompositionTarget is not null)
-        {
-            scale = source.CompositionTarget.TransformToDevice.M11;
-        }
-        var pos = new System.Windows.Point(px / scale, py / scale);
-
-        switch (msg)
-        {
-            case WM_LBUTTONDOWN:
-                _lbuttonDownInside = true;
-                VideoMouseDown?.Invoke(this, new VideoMouseEventArgs(pos));
-                return true;
-            case WM_MOUSEMOVE:
-                VideoMouseMove?.Invoke(this, new VideoMouseEventArgs(pos));
-                return true;
-            case WM_LBUTTONUP:
-                VideoMouseUp?.Invoke(this, new VideoMouseEventArgs(pos));
-                if (_lbuttonDownInside)
-                {
-                    _lbuttonDownInside = false;
-                    var cmd = LeftClickCommand;
-                    var param = LeftClickCommandParameter;
-                    if (cmd is not null && cmd.CanExecute(param))
-                    {
-                        cmd.Execute(param);
-                    }
-                }
-                return true;
-            case WM_LBUTTONDBLCLK:
-                VideoMouseDoubleClick?.Invoke(this, new VideoMouseEventArgs(pos));
-                {
-                    var cmd = LeftDoubleClickCommand;
-                    var param = LeftDoubleClickCommandParameter;
-                    if (cmd is not null && cmd.CanExecute(param))
-                    {
-                        cmd.Execute(param);
-                    }
-                }
-                return true;
-        }
-        return false;
-    }
-
     private delegate IntPtr WindowProcDelegate(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-}
-
-/// <summary>
-/// Event payload for mouse events forwarded out of the child HWND into WPF.
-/// Position is in the renderer's local DIP coordinate space.
-/// </summary>
-public sealed class VideoMouseEventArgs : EventArgs
-{
-    public VideoMouseEventArgs(System.Windows.Point position) { Position = position; }
-    public System.Windows.Point Position { get; }
 }

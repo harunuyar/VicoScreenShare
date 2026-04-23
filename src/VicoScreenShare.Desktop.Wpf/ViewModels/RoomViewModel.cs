@@ -52,6 +52,11 @@ public sealed partial class RoomViewModel : ViewModelBase
     // twice, once per media type).
     private IAudioCaptureSource? _localAudioSource;
     private AudioStreamer? _audioStreamer;
+    // Last-picked target + effective settings, kept so the resume path
+    // after a WS reconnect restarts against the same window / monitor
+    // with the same overrides the user chose at share-time.
+    private CaptureTarget? _pickedTarget;
+    private VideoSettings? _effectiveVideoSettings;
     private LossBasedBitrateController? _bitrateController;
     private Action<IPEndPoint, SDPMediaTypesEnum, RTCPCompoundPacket>? _rtcpReportHandler;
     private long _bitrateControllerStartTicks;
@@ -629,12 +634,40 @@ public sealed partial class RoomViewModel : ViewModelBase
         ICaptureSource? source = null;
         try
         {
-            source = await _captureProvider.PickSourceAsync(_settings.Video.TargetFrameRate).ConfigureAwait(true);
-            if (source is null)
+            var enumerator = ClientHost.CaptureTargetEnumerator;
+            if (enumerator is null)
+            {
+                StatusMessage = "No capture target enumerator registered.";
+                return;
+            }
+            // Gear button in the picker → closes the picker (cancelled
+            // result) and opens the saved Settings dialog. Done this way
+            // rather than embedding quality sliders in the picker itself
+            // so there's one settings surface for the whole app.
+            var pick = await Views.SharePickerDialog.ShowAsync(
+                enumerator,
+                _captureProvider,
+                _settings.Video,
+                openSettings: () => Views.SettingsDialog.Show(_settings, _settingsStore)).ConfigureAwait(true);
+            if (pick is null)
             {
                 StatusMessage = "Picker cancelled.";
                 return;
             }
+
+            DebugLog.Write($"[room] picker returned {pick.Target.Kind} \"{pick.Target.DisplayName}\" handle=0x{pick.Target.Handle.ToInt64():X} pid={pick.Target.ProcessId}");
+
+            _pickedTarget = pick.Target;
+            _effectiveVideoSettings = pick.EffectiveSettings;
+            source = await _captureProvider.CreateSourceForTargetAsync(pick.Target, pick.EffectiveSettings.TargetFrameRate).ConfigureAwait(true);
+            if (source is null)
+            {
+                StatusMessage = "That window or monitor is no longer available.";
+                MediaStatus = "That window or monitor is no longer available.";
+                DebugLog.Write($"[room] CreateSourceForTargetAsync returned null for {pick.Target.Kind} \"{pick.Target.DisplayName}\"");
+                return;
+            }
+            DebugLog.Write($"[room] capture source materialized for \"{pick.Target.DisplayName}\"");
 
             _localCaptureSource = source;
             SetPeerStreaming(YourPeerId, true);
@@ -644,7 +677,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             var streamer = new CaptureStreamer(
                 source,
                 (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload),
-                _settings.Video,
+                pick.EffectiveSettings,
                 _encoderFactory);
             _captureStreamer = streamer;
             streamer.Start();
@@ -671,9 +704,9 @@ public sealed partial class RoomViewModel : ViewModelBase
                     streamId,
                     StreamKind.Screen,
                     hasAudio: audioEnabled,
-                    nominalFrameRate: _settings.Video.TargetFrameRate)
+                    nominalFrameRate: pick.EffectiveSettings.TargetFrameRate)
                     .ConfigureAwait(true);
-                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={_settings.Video.TargetFrameRate}, hasAudio={audioEnabled})");
+                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={pick.EffectiveSettings.TargetFrameRate}, hasAudio={audioEnabled}, target={pick.Target.Kind} \"{pick.Target.DisplayName}\")");
             }
             catch (Exception ex)
             {
@@ -683,6 +716,9 @@ public sealed partial class RoomViewModel : ViewModelBase
         catch (Exception ex)
         {
             StatusMessage = $"Share failed: {ex.Message}";
+            MediaStatus = $"Share failed: {ex.Message}";
+            DebugLog.Write($"[room] ShareScreenAsync threw {ex.GetType().Name}: {ex.Message}");
+            DebugLog.Write(ex.StackTrace ?? "(no stack)");
             await StopSharingInternalAsync().ConfigureAwait(true);
         }
     }
@@ -936,6 +972,8 @@ public sealed partial class RoomViewModel : ViewModelBase
         _localCaptureSource = null;
         _audioStreamer = null;
         _localAudioSource = null;
+        _pickedTarget = null;
+        _effectiveVideoSettings = null;
 
         StopAdaptiveBitrate();
 
@@ -1552,10 +1590,15 @@ public sealed partial class RoomViewModel : ViewModelBase
         try
         {
             var session = _webRtc;
+            // Use the same VideoSettings snapshot the user picked at
+            // share time (resolution / fps / bitrate overrides), not
+            // the saved settings — the drop shouldn't silently change
+            // quality.
+            var effective = _effectiveVideoSettings ?? _settings.Video;
             var streamer = new CaptureStreamer(
                 _localCaptureSource,
                 (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload),
-                _settings.Video,
+                effective,
                 _encoderFactory);
             _captureStreamer = streamer;
             streamer.Start();
@@ -1585,7 +1628,7 @@ public sealed partial class RoomViewModel : ViewModelBase
                 streamId,
                 StreamKind.Screen,
                 hasAudio: audioEnabled,
-                nominalFrameRate: _settings.Video.TargetFrameRate)
+                nominalFrameRate: effective.TargetFrameRate)
                 .ConfigureAwait(true);
 
             DebugLog.Write($"[room] re-emitted StreamStarted after resume (streamId={streamId}, hasAudio={audioEnabled})");

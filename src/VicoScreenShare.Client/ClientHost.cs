@@ -42,6 +42,14 @@ public static class ClientHost
     public static Action<VideoCodecCatalog>? RegisterAdditionalCodecs { get; set; }
 
     /// <summary>
+    /// Capture-target enumerator used by the custom share picker to
+    /// list windows and monitors. Null when the host has no such
+    /// backend (test harnesses); the share picker treats null as "no
+    /// targets" and cancels gracefully.
+    /// </summary>
+    public static ICaptureTargetEnumerator? CaptureTargetEnumerator { get; set; }
+
+    /// <summary>
     /// System-audio loopback capture provider. Null when the host has
     /// no audio backend (headless test, Linux port until WASAPI is
     /// replaced). <see cref="ViewModels.RoomViewModel"/> reads this to

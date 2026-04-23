@@ -93,11 +93,30 @@ public sealed class WindowsCaptureSource : ICaptureSource
     /// is <see cref="Direct3D11CaptureFrame.SystemRelativeTime"/> from
     /// WGC — the capture clock, verbatim.
     /// </summary>
+    // Optional cap on the framepool's texture size. When non-zero the
+    // framepool is created at (max × max × aspect) instead of the
+    // item's native size — WGC / DWM downscales on capture with its
+    // own high-quality compositor filter, which is night-and-day
+    // better than a post-capture 10× bilinear for picker tiles.
+    // Zero (the default) keeps the original behavior for the encoder
+    // path: capture at source native resolution.
+    private readonly int _maxPreviewDimension;
+
     public WindowsCaptureSource(GraphicsCaptureItem item, D3D11DeviceManager devices, int targetFrameRate)
+        : this(item, devices, targetFrameRate, maxPreviewDimension: 0)
+    {
+    }
+
+    public WindowsCaptureSource(
+        GraphicsCaptureItem item,
+        D3D11DeviceManager devices,
+        int targetFrameRate,
+        int maxPreviewDimension)
     {
         _item = item;
         _devices = devices;
         _targetFrameRate = Math.Clamp(targetFrameRate, 1, 240);
+        _maxPreviewDimension = Math.Max(0, maxPreviewDimension);
         _pacer = new FrameRatePacer(_targetFrameRate);
         DisplayName = item.DisplayName;
         _item.Closed += OnItemClosed;
@@ -119,8 +138,22 @@ public sealed class WindowsCaptureSource : ICaptureSource
         }
 
         var size = _item.Size;
+        if (_maxPreviewDimension > 0 && size.Width > 0 && size.Height > 0
+            && (size.Width > _maxPreviewDimension || size.Height > _maxPreviewDimension))
+        {
+            // Scale the framepool to fit within maxPreviewDimension per side
+            // while preserving aspect ratio. WGC / DWM handles the downscale
+            // during capture with its own compositor filter, which is much
+            // higher quality than bilinear-at-display-time for heavy scales.
+            var scale = Math.Min(
+                (double)_maxPreviewDimension / size.Width,
+                (double)_maxPreviewDimension / size.Height);
+            var scaledW = Math.Max(2, (int)Math.Round(size.Width * scale));
+            var scaledH = Math.Max(2, (int)Math.Round(size.Height * scale));
+            size = new global::Windows.Graphics.SizeInt32 { Width = scaledW, Height = scaledH };
+        }
 
-        // Pre-size the staging texture to the item's current size so the first
+        // Pre-size the staging texture to the framepool's size so the first
         // FrameArrived goes straight through the copy path instead of being
         // dropped on the size-change branch.
         RecreateStagingTexture(size.Width, size.Height);

@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using global::Windows.Graphics.Capture;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Windows.Direct3D;
+using CaptureTarget = VicoScreenShare.Client.Platform.CaptureTarget;
+using CaptureTargetKind = VicoScreenShare.Client.Platform.CaptureTargetKind;
 
 /// <summary>
 /// <see cref="ICaptureProvider"/> backed by <c>Windows.Graphics.Capture</c>. Shows
@@ -70,6 +72,62 @@ public sealed class WindowsCaptureProvider : ICaptureProvider, IDisposable
         }
 
         return new WindowsCaptureSource(item, _devices, targetFrameRate);
+    }
+
+    public Task<ICaptureSource?> CreateSourceForTargetAsync(CaptureTarget target, int targetFrameRate, int maxPreviewDimension = 0)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return target.Kind switch
+        {
+            CaptureTargetKind.Window => CreateSourceForWindowAsync(target.Handle, targetFrameRate, maxPreviewDimension),
+            CaptureTargetKind.Monitor => CreateSourceForMonitorAsync(target.Handle, targetFrameRate, maxPreviewDimension),
+            _ => Task.FromResult<ICaptureSource?>(null),
+        };
+    }
+
+    /// <summary>
+    /// Build a capture source for a specific <c>HWND</c>, bypassing the
+    /// system picker. Used by the custom share picker which already
+    /// knows the target. Returns null if the window disappears between
+    /// enumeration and materialization.
+    /// </summary>
+    public async Task<ICaptureSource?> CreateSourceForWindowAsync(IntPtr hwnd, int targetFrameRate, int maxPreviewDimension = 0)
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(WindowsCaptureProvider));
+        }
+        if (!GraphicsCaptureSession.IsSupported())
+        {
+            throw new PlatformNotSupportedException(
+                "Windows.Graphics.Capture is not available on this build of Windows.");
+        }
+
+        _devices.Initialize();
+        var item = await GraphicsCaptureItemInterop.CreateForWindowAsync(hwnd).ConfigureAwait(true);
+        return item is null ? null : new WindowsCaptureSource(item, _devices, targetFrameRate, maxPreviewDimension);
+    }
+
+    /// <summary>
+    /// Build a capture source for a specific <c>HMONITOR</c>, bypassing
+    /// the system picker. Returns null if the monitor handle has gone
+    /// stale (display disconnected).
+    /// </summary>
+    public async Task<ICaptureSource?> CreateSourceForMonitorAsync(IntPtr hMonitor, int targetFrameRate, int maxPreviewDimension = 0)
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(WindowsCaptureProvider));
+        }
+        if (!GraphicsCaptureSession.IsSupported())
+        {
+            throw new PlatformNotSupportedException(
+                "Windows.Graphics.Capture is not available on this build of Windows.");
+        }
+
+        _devices.Initialize();
+        var item = await GraphicsCaptureItemInterop.CreateForMonitorAsync(hMonitor).ConfigureAwait(true);
+        return item is null ? null : new WindowsCaptureSource(item, _devices, targetFrameRate, maxPreviewDimension);
     }
 
     public void Dispose()

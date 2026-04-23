@@ -24,6 +24,7 @@
             <conv:TileLayoutRowsConverter x:Key="TileLayoutRows" />
             <conv:PeerConnectionTooltipConverter x:Key="PeerConnectionTooltip" />
             <conv:ViewModelToPageConverter x:Key="VmToPage" />
+            <conv:BoolToAccentTransparentConverter x:Key="BoolToAccentTransparent" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>
