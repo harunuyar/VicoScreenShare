@@ -44,6 +44,13 @@ public sealed class ClientSettings
     /// to persist it.
     /// </summary>
     public VideoSettings Video { get; set; } = new();
+
+    /// <summary>
+    /// Shared-content audio preferences. Disabled by default — the
+    /// publisher does not open a loopback capture unless the user
+    /// explicitly opts in via the settings UI. See <see cref="AudioSettings"/>.
+    /// </summary>
+    public AudioSettings Audio { get; set; } = new();
 }
 
 /// <summary>

@@ -106,6 +106,21 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _enableIntraRefresh = _settings.Video.EnableIntraRefresh;
         _intraRefreshPeriodFrames = Math.Clamp(_settings.Video.IntraRefreshPeriodFrames, 6, 600);
 
+        // Audio settings. Bitrate combo is fixed-set so the UI stays
+        // simple; people who want to experiment with 160 kbps Opus can
+        // edit the JSON settings file directly.
+        AudioBitrateOptions = new[]
+        {
+            new AudioBitrateOption("64 Kbps — voice-leaning", 64_000),
+            new AudioBitrateOption("96 Kbps — mixed content (recommended)", 96_000),
+            new AudioBitrateOption("128 Kbps — high quality music", 128_000),
+            new AudioBitrateOption("192 Kbps — near-transparent", 192_000),
+        };
+        _enableAudio = _settings.Audio.Enabled;
+        _audioStereo = _settings.Audio.Stereo;
+        _selectedAudioBitrate = AudioBitrateOptions.FirstOrDefault(o => o.Bitrate == _settings.Audio.TargetBitrate)
+            ?? AudioBitrateOptions[1];
+
         // Dirty tracking: any change to a bound setting flips IsDirty to
         // true so the floating Save pill becomes visible. Save() resets
         // it after a successful write.
@@ -162,6 +177,17 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private int _intraRefreshPeriodFrames;
 
+    public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
+
+    [ObservableProperty]
+    private bool _enableAudio;
+
+    [ObservableProperty]
+    private bool _audioStereo;
+
+    [ObservableProperty]
+    private AudioBitrateOption _selectedAudioBitrate;
+
     [ObservableProperty]
     private string? _statusMessage;
 
@@ -216,6 +242,10 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableAdaptiveBitrate = EnableAdaptiveBitrate;
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
         _settings.Video.IntraRefreshPeriodFrames = Math.Clamp(IntraRefreshPeriodFrames, 6, 600);
+
+        _settings.Audio.Enabled = EnableAudio;
+        _settings.Audio.Stereo = AudioStereo;
+        _settings.Audio.TargetBitrate = SelectedAudioBitrate.Bitrate;
 
         try
         {
@@ -284,3 +314,4 @@ public sealed record QualityPreset(
     double KeyframeIntervalSeconds,
     ScalerMode Scaler);
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);
+public sealed record AudioBitrateOption(string DisplayName, int Bitrate);

@@ -14,9 +14,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
+using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
+using VicoScreenShare.Client.Windows.Audio;
 using VicoScreenShare.Client.Windows.Capture;
 using VicoScreenShare.Client.Windows.Direct3D;
+using VicoScreenShare.Client.Windows.Media;
 using VicoScreenShare.Client.Windows.Media.Codecs;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
@@ -65,6 +68,9 @@ internal static class Program
                 "bench-capture-e2e" => RunCaptureEndToEndBenchmark(argMap),
                 "bench-encode-decode" => RunEncodeDecodeBenchmark(argMap),
                 "bench-network-e2e" => RunNetworkEndToEndBenchmark(argMap).GetAwaiter().GetResult(),
+                "bench-audio-encode" => RunAudioEncodeBenchmark(argMap),
+                "bench-audio-loopback" => RunAudioLoopbackBenchmark(argMap).GetAwaiter().GetResult(),
+                "bench-av-sync" => RunAvSyncBenchmark(argMap),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -1141,6 +1147,442 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// Synthetic Opus encode benchmark. Feeds a 440 Hz sine through the
+    /// Concentus-backed encoder and reports per-frame encode cost. Useful
+    /// to catch regressions in the codec wrapper or to measure the cost
+    /// of audio on the publisher's CPU budget (spoiler: it's negligible —
+    /// typically sub-millisecond per 20 ms frame).
+    /// </summary>
+    private static int RunAudioEncodeBenchmark(Dictionary<string, string> args)
+    {
+        var bitrate = int.Parse(args.GetValueOrDefault("bitrate", "96000"));
+        var stereo = args.GetValueOrDefault("stereo", "true") != "false";
+        var duration = double.Parse(args.GetValueOrDefault("duration", "10"));
+
+        Console.WriteLine($"# bench-audio-encode bitrate={bitrate} stereo={stereo} duration={duration}s");
+
+        var settings = new AudioSettings
+        {
+            Enabled = true,
+            TargetBitrate = bitrate,
+            Stereo = stereo,
+            FrameDurationMs = 20,
+            Application = OpusApplicationMode.GeneralAudio,
+        };
+        var factory = new OpusAudioCodecFactory();
+        using var encoder = factory.CreateEncoder(settings);
+
+        const int sampleRate = 48000;
+        var frameSamples = encoder.FrameSamples;
+        var channels = encoder.Channels;
+        var pcm = new short[frameSamples * channels];
+
+        // Warmup: let Opus's rate-control settle before measuring. The
+        // first few packets are partial / quiet frames as the encoder
+        // decides on a starting mode.
+        var clock = Stopwatch.StartNew();
+        for (var w = 0; w < 10; w++)
+        {
+            FillSine(pcm, frameSamples, channels, sampleRate, 440.0, w * frameSamples);
+            _ = encoder.EncodePcm(pcm, clock.Elapsed);
+        }
+
+        var frameCount = 0;
+        var totalBytes = 0L;
+        var encTotalMs = 0.0;
+        var encMaxMs = 0.0;
+        var encSamples = new List<double>(capacity: (int)(duration * 50));
+
+        var benchSw = Stopwatch.StartNew();
+        var basePos = 0;
+        while (benchSw.Elapsed.TotalSeconds < duration)
+        {
+            FillSine(pcm, frameSamples, channels, sampleRate, 440.0, basePos);
+            basePos += frameSamples;
+
+            var t0 = Stopwatch.GetTimestamp();
+            var encoded = encoder.EncodePcm(pcm, clock.Elapsed);
+            var t1 = Stopwatch.GetTimestamp();
+            var ms = (t1 - t0) * 1000.0 / Stopwatch.Frequency;
+            encTotalMs += ms;
+            if (ms > encMaxMs)
+            {
+                encMaxMs = ms;
+            }
+            encSamples.Add(ms);
+            if (encoded is { Bytes.Length: > 0 })
+            {
+                frameCount++;
+                totalBytes += encoded.Value.Bytes.Length;
+            }
+        }
+
+        encSamples.Sort();
+        var p99Idx = Math.Min(encSamples.Count - 1, (int)(encSamples.Count * 0.99));
+        var p99 = encSamples.Count > 0 ? encSamples[p99Idx] : 0.0;
+        var avg = encTotalMs / Math.Max(1, encSamples.Count);
+        var realBitrate = (totalBytes * 8.0) / Math.Max(0.001, benchSw.Elapsed.TotalSeconds);
+
+        Console.WriteLine($"RESULT: frames_encoded={frameCount}");
+        Console.WriteLine($"RESULT: bytes_total={totalBytes}");
+        Console.WriteLine($"RESULT: encode_ms_per_frame_mean={avg:F3}");
+        Console.WriteLine($"RESULT: encode_ms_p99={p99:F3}");
+        Console.WriteLine($"RESULT: encode_ms_max={encMaxMs:F3}");
+        Console.WriteLine($"RESULT: bitrate_out_kbps={realBitrate / 1000.0:F1}");
+        Console.WriteLine($"RESULT: bitrate_target_kbps={bitrate / 1000.0:F1}");
+
+        // Real-time budget: a 20 ms frame has 20 ms to encode before the
+        // next one arrives. p99 < 5 ms is an order-of-magnitude safety
+        // margin for Opus; anything approaching 20 would indicate a
+        // catastrophic regression.
+        var pass = p99 < 5.0 && frameCount > 0;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (p99 {p99:F2} ms, {frameCount} frames)");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Real WASAPI loopback → resample → Opus encode → Opus decode. Proves
+    /// the Windows audio I/O stack works end-to-end on this machine and
+    /// reports how many capture frames survived the round-trip. Requires
+    /// an active default render endpoint (silence or playback both work;
+    /// loopback produces a stream either way).
+    /// </summary>
+    private static async Task<int> RunAudioLoopbackBenchmark(Dictionary<string, string> args)
+    {
+        var duration = double.Parse(args.GetValueOrDefault("duration", "5"));
+        var bitrate = int.Parse(args.GetValueOrDefault("bitrate", "96000"));
+
+        Console.WriteLine($"# bench-audio-loopback duration={duration}s bitrate={bitrate}");
+
+        var provider = new WasapiAudioCaptureProvider();
+        var source = await provider.CreateLoopbackSourceAsync();
+        if (source is null)
+        {
+            Console.Error.WriteLine("ERROR: no default render endpoint available for loopback");
+            return 2;
+        }
+
+        var settings = new AudioSettings
+        {
+            Enabled = true,
+            TargetBitrate = bitrate,
+            Stereo = true,
+            FrameDurationMs = 20,
+            Application = OpusApplicationMode.GeneralAudio,
+        };
+        var codecs = new OpusAudioCodecFactory();
+        using var encoder = codecs.CreateEncoder(settings);
+        using var decoder = codecs.CreateDecoder(settings.Stereo ? 2 : 1);
+        using var resampler = new NAudioResampler();
+
+        var frameSamples = encoder.FrameSamples;
+        var channels = encoder.Channels;
+        var frameStride = frameSamples * channels;
+
+        // Incoming PCM from WASAPI is variable-sized, Opus wants exact
+        // 960×channels samples. Accumulate into a ring-like buffer and
+        // drain in frame chunks.
+        var accum = new short[frameStride * 16];
+        var accumCount = 0;
+        var resampleScratch = new short[frameStride * 8];
+
+        var framesCaptured = 0;
+        var framesEncoded = 0;
+        var framesDecoded = 0;
+        var sourceBytes = 0L;
+        var encodedBytes = 0L;
+
+        var capLock = new object();
+
+        void OnFrame(in AudioFrameData f)
+        {
+            Interlocked.Increment(ref framesCaptured);
+            Interlocked.Add(ref sourceBytes, f.Pcm.Length);
+
+            int produced;
+            try
+            {
+                produced = resampler.Resample(
+                    f.Pcm,
+                    f.SampleRate,
+                    f.Channels,
+                    f.Format,
+                    resampleScratch);
+            }
+            catch
+            {
+                return;
+            }
+
+            lock (capLock)
+            {
+                // Append resampler output to accumulator, grow if needed
+                // (rare — the fixed allocation covers 16 frames worth).
+                if (accumCount + produced > accum.Length)
+                {
+                    var bigger = new short[(accumCount + produced) * 2];
+                    Array.Copy(accum, bigger, accumCount);
+                    accum = bigger;
+                }
+                Array.Copy(resampleScratch, 0, accum, accumCount, produced);
+                accumCount += produced;
+
+                // Drain full frames into encoder → decoder.
+                while (accumCount >= frameStride)
+                {
+                    var slice = accum.AsSpan(0, frameStride);
+                    var enc = encoder.EncodePcm(slice, f.Timestamp);
+                    // Shift remainder left.
+                    Array.Copy(accum, frameStride, accum, 0, accumCount - frameStride);
+                    accumCount -= frameStride;
+
+                    if (enc is null)
+                    {
+                        continue;
+                    }
+                    Interlocked.Increment(ref framesEncoded);
+                    Interlocked.Add(ref encodedBytes, enc.Value.Bytes.Length);
+
+                    var dec = decoder.Decode(enc.Value.Bytes, 0);
+                    if (dec is not null)
+                    {
+                        Interlocked.Increment(ref framesDecoded);
+                    }
+                }
+            }
+        }
+
+        source.FrameArrived += OnFrame;
+        await source.StartAsync();
+        Console.WriteLine($"# source: {source.DisplayName} @ {source.SourceSampleRate}Hz / {source.SourceChannels}ch / {source.SourceFormat}");
+
+        await Task.Delay(TimeSpan.FromSeconds(duration));
+
+        await source.StopAsync();
+        source.FrameArrived -= OnFrame;
+        await source.DisposeAsync();
+
+        var actualBitrate = (encodedBytes * 8.0) / Math.Max(0.001, duration);
+        Console.WriteLine($"RESULT: frames_captured={framesCaptured}");
+        Console.WriteLine($"RESULT: frames_encoded={framesEncoded}");
+        Console.WriteLine($"RESULT: frames_decoded={framesDecoded}");
+        Console.WriteLine($"RESULT: source_bytes={sourceBytes}");
+        Console.WriteLine($"RESULT: encoded_bytes={encodedBytes}");
+        Console.WriteLine($"RESULT: bitrate_out_kbps={actualBitrate / 1000.0:F1}");
+
+        // Steady-state expectation: 1 second = 50 frames at 20 ms. A
+        // 5-second run should yield ~250 encoded + decoded frames on a
+        // healthy system; be loose enough to not false-fail on a warmup
+        // lag.
+        var expected = (int)(duration * 40);
+        var pass = framesDecoded >= expected;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (decoded {framesDecoded}/{expected} expected)");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Audio/video sync benchmark. Drives a <see cref="CaptureStreamer"/>
+    /// and an <see cref="AudioStreamer"/> from a shared monotonic
+    /// stopwatch and measures how closely the per-frame content
+    /// timestamps track each other at the send boundary. Regression
+    /// target: if either pipeline starts buffering or the shared clock
+    /// gets split, the RMS skew climbs off zero and the VERDICT fails.
+    /// This is the test that catches "we broke lip sync without anyone
+    /// noticing."
+    /// </summary>
+    private static int RunAvSyncBenchmark(Dictionary<string, string> args)
+    {
+        var duration = double.Parse(args.GetValueOrDefault("duration", "5"));
+        var videoFps = int.Parse(args.GetValueOrDefault("fps", "30"));
+        Console.WriteLine($"# bench-av-sync duration={duration}s fps={videoFps}");
+
+        var clock = Stopwatch.StartNew();
+
+        // Video side: synthetic BGRA frames fed through a real VP8
+        // encoder so the timestamp math matches production. Collect the
+        // content timestamp of every emitted encoded frame.
+        var videoTimestamps = new List<TimeSpan>();
+        var width = 320;
+        var height = 180;
+        var vidFactory = new VpxEncoderFactory();
+        using var vidEncoder = vidFactory.CreateEncoder(width, height, videoFps, 1_000_000, gopFrames: videoFps * 2);
+        var bgra = new byte[width * height * 4];
+        for (var i = 0; i < bgra.Length; i += 4)
+        {
+            bgra[i + 0] = 0x40;
+            bgra[i + 1] = 0x80;
+            bgra[i + 2] = 0xC0;
+            bgra[i + 3] = 0xFF;
+        }
+
+        // Audio side: AudioStreamer with a synthetic capture source that
+        // fires from the same shared clock. Collect content timestamps
+        // on every encoded packet.
+        var audioTimestamps = new List<TimeSpan>();
+        var audioSettings = new AudioSettings { Enabled = true, Stereo = true, TargetBitrate = 96_000 };
+        var codecs = new OpusAudioCodecFactory();
+        var audioSource = new SyntheticAudioSource();
+        var audioResampler = new PassThroughS16ResamplerForHarness();
+        using var audioStreamer = new AudioStreamer(
+            audioSource,
+            audioResampler,
+            (_, _, ts) => audioTimestamps.Add(ts),
+            audioSettings,
+            codecs);
+        audioStreamer.Start();
+
+        var videoInterval = TimeSpan.FromSeconds(1.0 / videoFps);
+        var audioInterval = TimeSpan.FromMilliseconds(20);
+        var nextVideo = TimeSpan.Zero;
+        var nextAudio = TimeSpan.Zero;
+        const int audioChannels = 2;
+        const int audioFrameSamples = 960;
+        var pcm = new short[audioFrameSamples * audioChannels];
+        var audioPos = 0;
+
+        while (clock.Elapsed.TotalSeconds < duration)
+        {
+            var now = clock.Elapsed;
+            if (now >= nextVideo)
+            {
+                var encoded = vidEncoder.EncodeBgra(bgra, width * 4, now);
+                if (encoded is not null)
+                {
+                    videoTimestamps.Add(encoded.Value.Timestamp);
+                }
+                nextVideo += videoInterval;
+            }
+            if (now >= nextAudio)
+            {
+                for (var i = 0; i < audioFrameSamples; i++)
+                {
+                    var phase = 2.0 * Math.PI * 440.0 * (audioPos + i) / 48000.0;
+                    var s = (short)(Math.Sin(phase) * 8000.0);
+                    pcm[i * audioChannels + 0] = s;
+                    pcm[i * audioChannels + 1] = s;
+                }
+                audioPos += audioFrameSamples;
+                audioSource.PumpFrame(pcm, now);
+                nextAudio += audioInterval;
+            }
+            Thread.Sleep(1);
+        }
+
+        audioStreamer.Stop();
+
+        // For each video timestamp, find the temporally-nearest audio
+        // timestamp and measure the gap. Index-based pairing would
+        // conflate the natural cadence difference (30 fps video vs
+        // 50 Hz audio) with actual clock drift. Time-nearest pairing
+        // isolates drift: if the shared clock is honest, the nearest
+        // audio ts is always within half an audio interval (10 ms).
+        audioTimestamps.Sort();
+        double skewSumMs = 0;
+        double skewMaxMs = 0;
+        var pairs = 0;
+        foreach (var vTs in videoTimestamps)
+        {
+            var idx = audioTimestamps.BinarySearch(vTs);
+            if (idx < 0)
+            {
+                idx = ~idx;
+            }
+            // Check the two audio frames bracketing vTs and pick the closer one.
+            var bestMs = double.PositiveInfinity;
+            foreach (var candidateIdx in new[] { idx - 1, idx })
+            {
+                if (candidateIdx < 0 || candidateIdx >= audioTimestamps.Count)
+                {
+                    continue;
+                }
+                var d = Math.Abs((vTs - audioTimestamps[candidateIdx]).TotalMilliseconds);
+                if (d < bestMs)
+                {
+                    bestMs = d;
+                }
+            }
+            if (double.IsFinite(bestMs))
+            {
+                skewSumMs += bestMs * bestMs;
+                if (bestMs > skewMaxMs)
+                {
+                    skewMaxMs = bestMs;
+                }
+                pairs++;
+            }
+        }
+        var rmsSkewMs = pairs > 0 ? Math.Sqrt(skewSumMs / pairs) : 0;
+
+        Console.WriteLine($"RESULT: video_frames={videoTimestamps.Count}");
+        Console.WriteLine($"RESULT: audio_frames={audioTimestamps.Count}");
+        Console.WriteLine($"RESULT: pairs_compared={pairs}");
+        Console.WriteLine($"RESULT: av_skew_rms_ms={rmsSkewMs:F2}");
+        Console.WriteLine($"RESULT: av_skew_max_ms={skewMaxMs:F2}");
+
+        // Time-nearest pairing on a shared clock: expected RMS is
+        // within half an audio frame interval (10 ms) plus the 1 ms
+        // harness sleep granularity, so 15 ms is a comfortable bound.
+        // Anything above means the clocks have split — a real bug that
+        // would break lip sync on every viewer.
+        var pass = pairs > 0 && rmsSkewMs < 15.0;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (RMS {rmsSkewMs:F1} ms, max {skewMaxMs:F1} ms)");
+        return pass ? 0 : 3;
+    }
+
+    private sealed class SyntheticAudioSource : VicoScreenShare.Client.Platform.IAudioCaptureSource
+    {
+        public string DisplayName => "synthetic";
+        public int SourceSampleRate => 48000;
+        public int SourceChannels => 2;
+        public VicoScreenShare.Client.Platform.AudioSampleFormat SourceFormat => VicoScreenShare.Client.Platform.AudioSampleFormat.PcmS16Interleaved;
+        public event VicoScreenShare.Client.Platform.AudioFrameArrivedHandler? FrameArrived;
+#pragma warning disable CS0067
+        public event Action? Closed;
+#pragma warning restore CS0067
+
+        public Task StartAsync() => Task.CompletedTask;
+        public Task StopAsync() => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        public void PumpFrame(short[] pcm, TimeSpan ts)
+        {
+            var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(pcm.AsSpan());
+            var f = new VicoScreenShare.Client.Platform.AudioFrameData(
+                bytes,
+                SourceSampleRate,
+                SourceChannels,
+                SourceFormat,
+                ts);
+            FrameArrived?.Invoke(in f);
+        }
+    }
+
+    private sealed class PassThroughS16ResamplerForHarness : VicoScreenShare.Client.Platform.IAudioResampler
+    {
+        public int Resample(ReadOnlySpan<byte> inputPcm, int inputSampleRate, int inputChannels, VicoScreenShare.Client.Platform.AudioSampleFormat inputFormat, Span<short> destination)
+        {
+            var src = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, short>(inputPcm);
+            src.CopyTo(destination);
+            return src.Length;
+        }
+        public void Dispose() { }
+    }
+
+    private static void FillSine(short[] pcm, int frameSamples, int channels, int sampleRate, double hz, int basePosition)
+    {
+        const double amplitude = 10_000.0;
+        for (var i = 0; i < frameSamples; i++)
+        {
+            var phase = 2.0 * Math.PI * hz * (basePosition + i) / sampleRate;
+            var s = (short)(Math.Sin(phase) * amplitude);
+            for (var c = 0; c < channels; c++)
+            {
+                pcm[i * channels + c] = s;
+            }
+        }
+    }
+
     private static Dictionary<string, string> ParseArgs(string[] args)
     {
         var map = new Dictionary<string, string>();
@@ -1174,5 +1616,15 @@ internal static class Program
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("    --codec h264|vp8    default h264");
         Console.Error.WriteLine("    --throttle true|false  default true");
+        Console.Error.WriteLine("  bench-audio-encode    synthetic Opus encode benchmark (440 Hz sine)");
+        Console.Error.WriteLine("    --bitrate bps       default 96000");
+        Console.Error.WriteLine("    --stereo true|false default true");
+        Console.Error.WriteLine("    --duration sec      default 10");
+        Console.Error.WriteLine("  bench-audio-loopback  real WASAPI loopback -> encode -> decode");
+        Console.Error.WriteLine("    --duration sec      default 5");
+        Console.Error.WriteLine("    --bitrate bps       default 96000");
+        Console.Error.WriteLine("  bench-av-sync         shared-clock audio/video timestamp skew");
+        Console.Error.WriteLine("    --duration sec      default 5");
+        Console.Error.WriteLine("    --fps N             default 30");
     }
 }

@@ -8,6 +8,7 @@ using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
+using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Protocol.Messages;
 
 /// <summary>
@@ -36,6 +37,14 @@ public sealed class SubscriberSession : IAsyncDisposable
 
     public StreamReceiver Receiver { get; }
 
+    /// <summary>
+    /// Shared-content audio sink, if the host registered an audio
+    /// decoder factory + renderer. Null when audio isn't available on
+    /// this host (e.g. a headless benchmark harness), in which case
+    /// audio RTP packets are silently dropped at the SIPSorcery layer.
+    /// </summary>
+    public AudioReceiver? AudioReceiver { get; }
+
     public RTCPeerConnection PeerConnection => _pc;
 
     public SubscriberSession(
@@ -43,7 +52,7 @@ public sealed class SubscriberSession : IAsyncDisposable
         Guid publisherPeerId,
         IVideoDecoderFactory decoderFactory,
         string displayName)
-        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers: null)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers: null, audioDecoderFactory: null, audioRenderer: null)
     {
     }
 
@@ -53,6 +62,18 @@ public sealed class SubscriberSession : IAsyncDisposable
         IVideoDecoderFactory decoderFactory,
         string displayName,
         IReadOnlyList<RTCIceServer>? iceServers)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers, audioDecoderFactory: null, audioRenderer: null)
+    {
+    }
+
+    public SubscriberSession(
+        SignalingClient signaling,
+        Guid publisherPeerId,
+        IVideoDecoderFactory decoderFactory,
+        string displayName,
+        IReadOnlyList<RTCIceServer>? iceServers,
+        IAudioDecoderFactory? audioDecoderFactory,
+        IAudioRenderer? audioRenderer)
     {
         _signaling = signaling;
         PublisherPeerId = publisherPeerId;
@@ -86,10 +107,32 @@ public sealed class SubscriberSession : IAsyncDisposable
             streamStatus: MediaStreamStatusEnum.RecvOnly);
         _pc.addTrack(videoTrack);
 
+        // Opus RecvOnly track. The server's SfuSubscriberPeer sends on
+        // audio PT 111; this PC must advertise the matching format so
+        // the m=audio section intersects and audio RTP actually lands.
+        var audioTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            isRemote: false,
+            capabilities: new List<SDPAudioVideoMediaFormat> { new(AudioCommonlyUsedFormats.OpusWebRTC) },
+            streamStatus: MediaStreamStatusEnum.RecvOnly);
+        _pc.addTrack(audioTrack);
+
         _pc.onicecandidate += OnLocalIceCandidate;
         _signaling.IceCandidateReceived += OnRemoteIceCandidate;
 
         Receiver = new StreamReceiver(_pc, decoderFactory, displayName);
+
+        // AudioReceiver is a sibling (not a layer inside StreamReceiver)
+        // so the video receiver's bounded-channel / drop-to-IDR / GPU
+        // texture path stays specialized to video. If either the
+        // factory or the renderer is null the viewer simply doesn't
+        // play shared-content audio for this publisher — the RTP still
+        // reaches SIPSorcery but OnRtpPacketReceived ignores audio
+        // packets (StreamReceiver filters by mediaType == video).
+        if (audioDecoderFactory is not null && audioRenderer is not null)
+        {
+            AudioReceiver = new AudioReceiver(_pc, audioDecoderFactory, audioRenderer, displayName);
+        }
     }
 
     /// <summary>
@@ -126,6 +169,14 @@ public sealed class SubscriberSession : IAsyncDisposable
         // Start the receiver so OnVideoFrameReceived flows through the decoder
         // into the viewer's renderer as soon as the first RTP arrives.
         await Receiver.StartAsync().ConfigureAwait(false);
+
+        // AudioReceiver subscribes to OnRtpPacketReceived so it must
+        // start after the PC is negotiated; do it now rather than at
+        // construction to mirror the video receiver's lifecycle.
+        if (AudioReceiver is not null)
+        {
+            await AudioReceiver.StartAsync().ConfigureAwait(false);
+        }
     }
 
     private void OnLocalIceCandidate(RTCIceCandidate candidate)
@@ -211,6 +262,10 @@ public sealed class SubscriberSession : IAsyncDisposable
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }
 
         try { await Receiver.DisposeAsync().ConfigureAwait(false); } catch { }
+        if (AudioReceiver is not null)
+        {
+            try { await AudioReceiver.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
         try { _pc.close(); } catch { }
         try { _pc.Dispose(); } catch { }
     }

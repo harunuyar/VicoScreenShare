@@ -140,6 +140,72 @@ public sealed class SfuHandshakeTests : IAsyncLifetime
         await CleanCloseAsync(socket);
     }
 
+    [Fact]
+    public async Task Server_answers_an_audio_plus_video_offer_with_both_m_lines()
+    {
+        // Shared-content audio risk gate: prove that when the client
+        // offers both m=video and m=audio (matching what WebRtcSession
+        // constructs in production), the server's answer carries both
+        // back and intersects on the expected Opus / VP8 formats.
+        // Regression here = audio track silently absent from the
+        // answer = no packets ever flow.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var socket = await ConnectAndJoinAsync("Alice", cts.Token);
+
+        var clientPc = new RTCPeerConnection(null);
+        var videoTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.video,
+            isRemote: false,
+            capabilities: new List<SDPAudioVideoMediaFormat>
+            {
+                new(new VideoFormat(VideoCodecsEnum.VP8, 96)),
+                new(new VideoFormat(VideoCodecsEnum.H264, 102)),
+            },
+            streamStatus: MediaStreamStatusEnum.SendRecv);
+        clientPc.addTrack(videoTrack);
+        var audioTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            isRemote: false,
+            capabilities: new List<SDPAudioVideoMediaFormat> { new(AudioCommonlyUsedFormats.OpusWebRTC) },
+            streamStatus: MediaStreamStatusEnum.SendRecv);
+        clientPc.addTrack(audioTrack);
+
+        var offer = clientPc.createOffer(null);
+        await clientPc.setLocalDescription(offer);
+        offer.sdp.Should().Contain("m=audio");
+        offer.sdp.Should().Contain("m=video");
+
+        await SendAsync(socket, MessageType.SdpOffer, new SdpOffer(offer.sdp), cts.Token);
+
+        var envelope = await ExpectAsync(socket, MessageType.SdpAnswer, cts.Token);
+        var answer = envelope.Payload.Deserialize<SdpAnswer>(ProtocolJson.Options)!;
+
+        answer.Sdp.Should().NotBeNullOrEmpty();
+        answer.Sdp.Should().Contain("m=video", "video m-line must survive server's createAnswer");
+        answer.Sdp.Should().Contain("m=audio", "audio m-line must survive — this is the shared-content audio track");
+        // SIPSorcery emits the Opus rtpmap in upper-case per AudioFormat.FormatName.
+        // Browsers and other interop partners accept either case, but the wire
+        // value is OPUS here; don't case-fuzz the assertion, match what we ship.
+        answer.Sdp.Should().Contain("OPUS/48000/2", "Opus must be the negotiated audio codec at 48 kHz stereo");
+        answer.Sdp.Should().Contain("rtpmap:111", "Opus must carry the WebRTC-canonical payload type 111");
+
+        // Closing the round-trip: client's setRemoteDescription has to
+        // accept it too. If the server produced a well-formed answer
+        // with both tracks, this succeeds; if the audio m-line is
+        // malformed, SIPSorcery's setRemoteDescription surfaces the
+        // failure here.
+        var setResult = clientPc.setRemoteDescription(new RTCSessionDescriptionInit
+        {
+            sdp = answer.Sdp,
+            type = RTCSdpType.answer,
+        });
+        setResult.Should().Be(SetDescriptionResultEnum.OK);
+
+        clientPc.close();
+        await CleanCloseAsync(socket);
+    }
+
     private async Task<WebSocket> ConnectAndJoinAsync(string displayName, CancellationToken ct)
     {
         var client = _factory!.Server.CreateWebSocketClient();

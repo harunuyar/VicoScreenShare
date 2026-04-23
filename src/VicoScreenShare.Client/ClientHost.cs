@@ -3,6 +3,7 @@ namespace VicoScreenShare.Client;
 using System;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
+using VicoScreenShare.Client.Media;
 
 /// <summary>
 /// Process-global bag of host-provided factories. Populated by the
@@ -39,4 +40,32 @@ public static class ClientHost
     /// wiped by an early <see cref="Diagnostics.DebugLog.Reset"/>.
     /// </summary>
     public static Action<VideoCodecCatalog>? RegisterAdditionalCodecs { get; set; }
+
+    /// <summary>
+    /// System-audio loopback capture provider. Null when the host has
+    /// no audio backend (headless test, Linux port until WASAPI is
+    /// replaced). <see cref="ViewModels.RoomViewModel"/> reads this to
+    /// decide whether to offer shared-content audio.
+    /// </summary>
+    public static IAudioCaptureProvider? AudioCaptureProvider { get; set; }
+
+    /// <summary>Shared factory for Opus encoders (Concentus). Default is
+    /// <see cref="OpusAudioCodecFactory"/>; tests can swap in a fake.</summary>
+    public static IAudioEncoderFactory AudioEncoderFactory { get; set; } = new OpusAudioCodecFactory();
+
+    /// <summary>Shared factory for Opus decoders. Same default / swap
+    /// semantics as the encoder factory; the single instance is
+    /// thread-safe because each <see cref="IAudioDecoderFactory.CreateDecoder"/>
+    /// yields a fresh decoder.</summary>
+    public static IAudioDecoderFactory AudioDecoderFactory { get; set; } = new OpusAudioCodecFactory();
+
+    /// <summary>Factory for the WASAPI-backed audio resampler (or a
+    /// pass-through for tests). Called once per publisher session.</summary>
+    public static Func<IAudioResampler>? AudioResamplerFactory { get; set; }
+
+    /// <summary>Factory for a per-viewer <see cref="IAudioRenderer"/>.
+    /// Each <see cref="ViewModels.SubscriberSession"/> gets its own
+    /// renderer instance; NAudio handles mixing multiple outputs at
+    /// the system-mixer layer.</summary>
+    public static Func<IAudioRenderer>? AudioRendererFactory { get; set; }
 }

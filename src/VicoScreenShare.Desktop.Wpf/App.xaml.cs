@@ -5,8 +5,10 @@ using System.Windows;
 using VicoScreenShare.Client;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
+using VicoScreenShare.Client.Windows.Audio;
 using VicoScreenShare.Client.Windows.Capture;
 using VicoScreenShare.Client.Windows.Direct3D;
+using VicoScreenShare.Client.Windows.Media;
 using VicoScreenShare.Client.Windows.Media.Codecs;
 using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
@@ -54,6 +56,16 @@ public partial class App : Application
 
         ClientHost.CaptureProviderFactory = hwndProvider => new WindowsCaptureProvider(hwndProvider, sharedDevices);
         ClientHost.VideoCodecCatalog = new VideoCodecCatalog();
+
+        // Shared-content audio wiring. The capture provider picks the
+        // default render endpoint (loopback); each publisher session
+        // gets its own resampler (stateless, cheap) and each viewer tile
+        // its own renderer (NAudio mixes their outputs at the system
+        // layer). Opus encoder / decoder factories are preconstructed
+        // in ClientHost — pure Concentus, no per-host configuration.
+        ClientHost.AudioCaptureProvider = new WasapiAudioCaptureProvider();
+        ClientHost.AudioResamplerFactory = () => new NAudioResampler();
+        ClientHost.AudioRendererFactory = () => new WasapiAudioRenderer();
 
         // Prime the receiver's prebuffer depth from saved settings so
         // the first renderer instance constructed picks up the user's

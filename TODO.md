@@ -12,8 +12,11 @@ Users can currently pick a resolution and a bitrate independently. Bad combinati
 
 ## Audio
 
-### Shared-content audio
-The audio the shared screen or app is playing isn't captured or transmitted at all — we send video only. Add a full audio pipeline: capture the source's audio (system loopback, per-app if feasible), encode, send as a second media track, receive, decode, play. Must stay synchronized with the video track. No voice chat / microphone — this is only the audio the shared content itself is producing.
+### Per-app audio capture
+Current shared-audio path captures the whole default render endpoint via WASAPI loopback — every sound the host machine plays, including notifications and unrelated apps, mixes into the outgoing stream. Windows 10 2004+ exposes a process-scoped loopback API (`ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_PARAMS`, `PROCESS_LOOPBACK` mode) that captures a single process tree in- or out-of-inclusion. Add a process picker in the share flow and a `ProcessLoopbackAudioSource` sibling to the existing `WasapiLoopbackAudioSource` so users can share just the app they're showing.
+
+### Per-tile volume and mute
+Viewers have no control over individual publishers' audio levels — every active audio track mixes at the system level. Add per-tile mute and volume sliders, wired to each `SubscriberSession`'s `AudioReceiver` / `WasapiAudioRenderer`. Mute should drop the packets before decode to save CPU, not just set renderer volume to zero.
 
 ## Send path
 

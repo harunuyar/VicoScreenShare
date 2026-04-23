@@ -44,6 +44,14 @@ public sealed partial class RoomViewModel : ViewModelBase
     private WebRtcSession? _webRtc;
     private ICaptureSource? _localCaptureSource;
     private CaptureStreamer? _captureStreamer;
+    // Shared-content audio (opt-in per AudioSettings.Enabled). Allocated
+    // in ShareScreenAsync when audio is enabled, torn down in
+    // StopSharingInternalAsync. Reuses the same WebRtcSession as the
+    // video pipeline — audio and video ride on one PeerConnection with
+    // two m= sections (see WebRtcSession.cs where addTrack is called
+    // twice, once per media type).
+    private IAudioCaptureSource? _localAudioSource;
+    private AudioStreamer? _audioStreamer;
     private LossBasedBitrateController? _bitrateController;
     private Action<IPEndPoint, SDPMediaTypesEnum, RTCPCompoundPacket>? _rtcpReportHandler;
     private long _bitrateControllerStartTicks;
@@ -557,12 +565,21 @@ public sealed partial class RoomViewModel : ViewModelBase
         var nominalFps = snapshot.nominalFps;
         var toDispose = snapshot.toDispose;
 
+        // Give the subscriber an audio decoder + renderer only when the
+        // host registered a renderer factory. Headless / test harness
+        // subscribers pass null-null here and AudioReceiver isn't built;
+        // audio RTP still flows but is ignored on this side.
+        var audioRenderer = ClientHost.AudioRendererFactory?.Invoke();
+        var audioDecoderFactory = audioRenderer is not null ? ClientHost.AudioDecoderFactory : null;
+
         var session = new SubscriberSession(
             _signaling,
             publisherPeerId,
             _decoderFactory,
             displayName: displayName,
-            iceServers: _iceServers);
+            iceServers: _iceServers,
+            audioDecoderFactory: audioDecoderFactory,
+            audioRenderer: audioRenderer);
 
         try
         {
@@ -634,6 +651,14 @@ public sealed partial class RoomViewModel : ViewModelBase
 
             StartAdaptiveBitrate(session, streamer);
 
+            // Shared-content audio pipeline. Strictly parallel to the
+            // video path: open the system-loopback capture, wrap it in
+            // the Opus streamer, wire the encoded packets straight into
+            // SendAudio. Skipped entirely when the user hasn't opted in
+            // via AudioSettings.Enabled so the publisher never opens a
+            // capture endpoint unless it intends to transmit.
+            var audioEnabled = await TryStartAudioStreamerAsync(session).ConfigureAwait(true);
+
             await source.StartAsync().ConfigureAwait(true);
             IsSharing = true;
             StatusMessage = null;
@@ -645,10 +670,10 @@ public sealed partial class RoomViewModel : ViewModelBase
                 await _signaling.SendStreamStartedAsync(
                     streamId,
                     StreamKind.Screen,
-                    hasAudio: false,
+                    hasAudio: audioEnabled,
                     nominalFrameRate: _settings.Video.TargetFrameRate)
                     .ConfigureAwait(true);
-                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={_settings.Video.TargetFrameRate})");
+                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={_settings.Video.TargetFrameRate}, hasAudio={audioEnabled})");
             }
             catch (Exception ex)
             {
@@ -660,6 +685,80 @@ public sealed partial class RoomViewModel : ViewModelBase
             StatusMessage = $"Share failed: {ex.Message}";
             await StopSharingInternalAsync().ConfigureAwait(true);
         }
+    }
+
+    /// <summary>
+    /// Open the shared-audio loopback capture and wire an
+    /// <see cref="AudioStreamer"/> to the session's <c>SendAudio</c>.
+    /// No-op (and returns false) when <see cref="AudioSettings.Enabled"/>
+    /// is off, when <see cref="ClientHost.AudioCaptureProvider"/> is not
+    /// registered (non-Windows host), or when the provider can't find
+    /// an active render endpoint. Reuses any <see cref="_localAudioSource"/>
+    /// that carried over from a WS reconnect — resume path rebinds the
+    /// streamer to the new PC without reopening WASAPI, so the user
+    /// does not hear a gap in their own speakers.
+    /// </summary>
+    private async Task<bool> TryStartAudioStreamerAsync(WebRtcSession session)
+    {
+        if (!_settings.Audio.Enabled)
+        {
+            return false;
+        }
+
+        var captureProvider = ClientHost.AudioCaptureProvider;
+        var resamplerFactory = ClientHost.AudioResamplerFactory;
+        if (captureProvider is null || resamplerFactory is null)
+        {
+            DebugLog.Write("[room] audio enabled but no capture provider / resampler registered; sharing silently");
+            return false;
+        }
+
+        if (_localAudioSource is null)
+        {
+            try
+            {
+                _localAudioSource = await captureProvider.CreateLoopbackSourceAsync().ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[room] failed to create audio loopback source: {ex.Message}");
+                return false;
+            }
+            if (_localAudioSource is null)
+            {
+                DebugLog.Write("[room] no default render endpoint; sharing silently");
+                return false;
+            }
+        }
+
+        var resampler = resamplerFactory();
+        var encoderFactory = ClientHost.AudioEncoderFactory;
+        var streamer = new AudioStreamer(
+            _localAudioSource,
+            resampler,
+            (duration, payload, _) => session.PeerConnection.SendAudio(duration, payload),
+            _settings.Audio,
+            encoderFactory);
+        _audioStreamer = streamer;
+        streamer.Start();
+
+        try
+        {
+            await _localAudioSource.StartAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[room] WASAPI loopback start threw: {ex.Message}");
+            streamer.Stop();
+            streamer.Dispose();
+            _audioStreamer = null;
+            try { await _localAudioSource.DisposeAsync().ConfigureAwait(true); } catch { }
+            _localAudioSource = null;
+            return false;
+        }
+        DebugLog.Write($"[room] audio streamer started ({_localAudioSource.DisplayName} " +
+            $"{_localAudioSource.SourceSampleRate}Hz/{_localAudioSource.SourceChannels}ch/{_localAudioSource.SourceFormat})");
+        return true;
     }
 
     /// <summary>
@@ -830,9 +929,13 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         var streamer = _captureStreamer;
         var source = _localCaptureSource;
+        var audioStreamer = _audioStreamer;
+        var audioSource = _localAudioSource;
 
         _captureStreamer = null;
         _localCaptureSource = null;
+        _audioStreamer = null;
+        _localAudioSource = null;
 
         StopAdaptiveBitrate();
 
@@ -842,11 +945,23 @@ public sealed partial class RoomViewModel : ViewModelBase
             streamer.Dispose();
         }
 
+        if (audioStreamer is not null)
+        {
+            audioStreamer.Stop();
+            audioStreamer.Dispose();
+        }
+
         if (source is not null)
         {
             source.Closed -= OnLocalCaptureClosed;
             try { await source.StopAsync().ConfigureAwait(true); } catch { }
             try { await source.DisposeAsync().ConfigureAwait(true); } catch { }
+        }
+
+        if (audioSource is not null)
+        {
+            try { await audioSource.StopAsync().ConfigureAwait(true); } catch { }
+            try { await audioSource.DisposeAsync().ConfigureAwait(true); } catch { }
         }
 
         IsSharing = false;
@@ -1121,6 +1236,17 @@ public sealed partial class RoomViewModel : ViewModelBase
                 try { _captureStreamer.Stop(); } catch { }
                 try { _captureStreamer.Dispose(); } catch { }
                 _captureStreamer = null;
+            }
+
+            // Same for audio. The WASAPI loopback source stays open (it
+            // has no association with the PeerConnection), but the
+            // AudioStreamer was sending into the dead PC and must be
+            // rebuilt against the new one in RestoreSharingAfterResumeAsync.
+            if (_audioStreamer is not null)
+            {
+                try { _audioStreamer.Stop(); } catch { }
+                try { _audioStreamer.Dispose(); } catch { }
+                _audioStreamer = null;
             }
 
             // Tear down local media state tied to the dead signaling client.
@@ -1440,6 +1566,13 @@ public sealed partial class RoomViewModel : ViewModelBase
             // silently disappeared after every WS reconnect.
             StartAdaptiveBitrate(session, streamer);
 
+            // Re-wire the shared-audio streamer to the new PC's SendAudio.
+            // The capture source kept running across the drop so the user
+            // hears no gap in self-loopback (their own speakers) but the
+            // outbound track was torn down with the old PC and needs a
+            // fresh AudioStreamer bound to the new SendAudio.
+            var audioEnabled = await TryStartAudioStreamerAsync(session).ConfigureAwait(true);
+
             // Reuse the original stream id so the server's fan-out semantics
             // (viewers already have a tile for this PeerId) keep working across
             // the drop. Without this the viewers would see StreamEnded at the
@@ -1451,11 +1584,11 @@ public sealed partial class RoomViewModel : ViewModelBase
             await _signaling.SendStreamStartedAsync(
                 streamId,
                 StreamKind.Screen,
-                hasAudio: false,
+                hasAudio: audioEnabled,
                 nominalFrameRate: _settings.Video.TargetFrameRate)
                 .ConfigureAwait(true);
 
-            DebugLog.Write($"[room] re-emitted StreamStarted after resume (streamId={streamId})");
+            DebugLog.Write($"[room] re-emitted StreamStarted after resume (streamId={streamId}, hasAudio={audioEnabled})");
         }
         catch (Exception ex)
         {

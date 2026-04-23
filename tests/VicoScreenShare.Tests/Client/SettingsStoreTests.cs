@@ -22,6 +22,63 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void Save_then_LoadOrCreate_roundtrips_audio_settings()
+    {
+        var store = new SettingsStore(_settingsPath);
+        store.Save(new ClientSettings
+        {
+            Audio = new AudioSettings
+            {
+                Enabled = true,
+                TargetBitrate = 128_000,
+                Stereo = false,
+                FrameDurationMs = 20,
+                Application = OpusApplicationMode.Voip,
+            },
+        });
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+
+        loaded.Audio.Enabled.Should().BeTrue();
+        loaded.Audio.TargetBitrate.Should().Be(128_000);
+        loaded.Audio.Stereo.Should().BeFalse();
+        loaded.Audio.FrameDurationMs.Should().Be(20);
+        loaded.Audio.Application.Should().Be(OpusApplicationMode.Voip);
+    }
+
+    [Fact]
+    public void LoadOrCreate_defaults_audio_to_disabled_opus_mixed()
+    {
+        var store = new SettingsStore(_settingsPath);
+        var settings = store.LoadOrCreate();
+
+        settings.Audio.Enabled.Should().BeFalse("shared audio is opt-in");
+        settings.Audio.TargetBitrate.Should().Be(96_000);
+        settings.Audio.Stereo.Should().BeTrue();
+        settings.Audio.Application.Should().Be(OpusApplicationMode.GeneralAudio);
+    }
+
+    [Fact]
+    public void LoadOrCreate_clamps_invalid_audio_bitrate_to_default()
+    {
+        // Write a settings file by hand with an out-of-band Opus bitrate;
+        // LoadOrCreate must fall back to the default rather than push a
+        // bad value into the encoder constructor.
+        var json = """
+            {
+              "audioEnabled": true,
+              "audioTargetBitrate": 2000,
+              "audioStereo": true
+            }
+            """;
+        File.WriteAllText(_settingsPath, json);
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+        loaded.Audio.Enabled.Should().BeTrue();
+        loaded.Audio.TargetBitrate.Should().Be(96_000, "2 kbps is below Opus's 6 kbps floor, fell back to default");
+    }
+
+    [Fact]
     public void LoadOrCreate_returns_defaults_when_file_missing()
     {
         var store = new SettingsStore(_settingsPath);

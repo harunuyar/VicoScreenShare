@@ -130,6 +130,16 @@ public sealed class SettingsStore
         public bool EnableIntraRefresh { get; set; } = false;
         public int IntraRefreshPeriodFrames { get; set; } = 60;
 
+        // Audio (shared-content loopback). Separate fields rather than a
+        // nested object so existing settings.json files still load cleanly
+        // — a file written by a pre-audio client just leaves these at the
+        // default (disabled, 96 kbps stereo).
+        public bool AudioEnabled { get; set; } = false;
+        public int AudioTargetBitrate { get; set; } = 96_000;
+        public bool AudioStereo { get; set; } = true;
+        public int AudioFrameDurationMs { get; set; } = 20;
+        public OpusApplicationMode AudioApplication { get; set; } = OpusApplicationMode.GeneralAudio;
+
         // Legacy fields kept so existing settings.json files migrate instead
         // of silently dropping back to defaults. Only read on load — never
         // written back. MaxEncoderHeight becomes the new TargetHeight;
@@ -155,6 +165,11 @@ public sealed class SettingsStore
             MinAdaptiveBitrate = source.Video.MinAdaptiveBitrate,
             EnableIntraRefresh = source.Video.EnableIntraRefresh,
             IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
+            AudioEnabled = source.Audio.Enabled,
+            AudioTargetBitrate = source.Audio.TargetBitrate,
+            AudioStereo = source.Audio.Stereo,
+            AudioFrameDurationMs = source.Audio.FrameDurationMs,
+            AudioApplication = source.Audio.Application,
         };
 
         public ClientSettings ToClientSettings()
@@ -175,6 +190,18 @@ public sealed class SettingsStore
                     MinAdaptiveBitrate = MinAdaptiveBitrate > 0 && MinAdaptiveBitrate <= 50_000_000 ? MinAdaptiveBitrate : 500_000,
                     EnableIntraRefresh = EnableIntraRefresh,
                     IntraRefreshPeriodFrames = IntraRefreshPeriodFrames >= 6 && IntraRefreshPeriodFrames <= 600 ? IntraRefreshPeriodFrames : 60,
+                },
+                Audio = new AudioSettings
+                {
+                    Enabled = AudioEnabled,
+                    // Accept the standard Opus operating band (6-510 kbps);
+                    // out-of-band values on disk silently fall back to the
+                    // default so a hand-edited file can't break encoder
+                    // construction.
+                    TargetBitrate = AudioTargetBitrate is >= 6_000 and <= 510_000 ? AudioTargetBitrate : 96_000,
+                    Stereo = AudioStereo,
+                    FrameDurationMs = AudioFrameDurationMs is 10 or 20 or 40 ? AudioFrameDurationMs : 20,
+                    Application = AudioApplication,
                 },
             };
 

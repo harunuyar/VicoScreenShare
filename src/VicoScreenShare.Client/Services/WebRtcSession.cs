@@ -97,6 +97,20 @@ public sealed class WebRtcSession : IAsyncDisposable
             streamStatus: direction);
         _pc.addTrack(videoTrack);
 
+        // Shared-content audio track. Opus at PT 111, 48 kHz stereo — the
+        // WebRTC canonical parameters, also what the SFU advertises on
+        // both SfuPeer (ingest) and SfuSubscriberPeer (egress). The track
+        // is always negotiated so enabling / disabling audio capture at
+        // runtime never forces an SDP renegotiation that would glitch
+        // the live video stream; the AudioStreamer controls whether
+        // bytes actually flow via SendAudio.
+        var audioTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            isRemote: false,
+            capabilities: new List<SDPAudioVideoMediaFormat> { new(AudioCommonlyUsedFormats.OpusWebRTC) },
+            streamStatus: direction);
+        _pc.addTrack(audioTrack);
+
         _pc.onicecandidate += OnLocalIceCandidate;
         _signaling.IceCandidateReceived += OnRemoteIceCandidate;
     }

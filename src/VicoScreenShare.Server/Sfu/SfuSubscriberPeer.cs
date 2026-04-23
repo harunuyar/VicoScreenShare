@@ -67,6 +67,22 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
             streamStatus: MediaStreamStatusEnum.SendOnly);
         _pc.addTrack(videoTrack);
 
+        // Opus SendOnly track mirrored with the RecvOnly on the viewer's
+        // SubscriberSession. SfuSession.ForwardPublisherRtp already
+        // forwards audio packets through SendForwardedRtp regardless of
+        // media type, so once this track is here the publisher's audio
+        // reaches the viewer automatically.
+        var audioCapabilities = new List<SDPAudioVideoMediaFormat>
+        {
+            new(AudioCommonlyUsedFormats.OpusWebRTC),
+        };
+        var audioTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            isRemote: false,
+            capabilities: audioCapabilities,
+            streamStatus: MediaStreamStatusEnum.SendOnly);
+        _pc.addTrack(audioTrack);
+
         _pc.onicecandidate += OnLocalIceCandidate;
         _pc.onconnectionstatechange += OnConnectionStateChange;
         _pc.OnReceiveReport += OnViewerReceiveReport;

@@ -62,6 +62,24 @@ public sealed class SfuPeer : IAsyncDisposable
             streamStatus: MediaStreamStatusEnum.RecvOnly);
         _pc.addTrack(videoTrack);
 
+        // Also accept an Opus audio track — the shared-content audio
+        // pipeline. Matches PT 111 (AudioCommonlyUsedFormats.OpusWebRTC)
+        // which every client advertises. SFU fan-out is media-type
+        // agnostic: OnRtpPacketReceived already fires for audio, and
+        // SfuSession.ForwardPublisherRtp forwards whatever media type it
+        // sees, so adding the track here is the full story — the audio
+        // packets the client publishes will reach every subscriber.
+        var audioCapabilities = new List<SDPAudioVideoMediaFormat>
+        {
+            new(AudioCommonlyUsedFormats.OpusWebRTC),
+        };
+        var audioTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            isRemote: false,
+            capabilities: audioCapabilities,
+            streamStatus: MediaStreamStatusEnum.RecvOnly);
+        _pc.addTrack(audioTrack);
+
         _pc.onicecandidate += OnLocalIceCandidate;
         _pc.onconnectionstatechange += OnConnectionStateChange;
         _pc.OnRtpPacketReceived += OnRtpPacketReceived;

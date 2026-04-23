@@ -14,6 +14,14 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="SIPSorcery" Version="10.0.3" />
     <PackageReference Include="SIPSorceryMedia.Encoders" Version="10.0.4" />
+    <!-- Concentus is a pure-managed Opus port (BSD-3); used by OpusAudioEncoder /
+         OpusAudioDecoder for the shared-content audio track. SIPSorcery 10.0.3
+         ships the SDP-level Opus format (AudioCommonlyUsedFormats.OpusWebRTC,
+         PT=111, 48 kHz stereo) but does not expose a public Opus encoder API —
+         Concentus provides the actual codec. No native dependency: the DLL is
+         all C# and runs anywhere .NET does, so the tests project and the
+         MediaHarness can exercise encode/decode without the .Windows reference. -->
+    <PackageReference Include="Concentus" Version="2.2.2" />
   </ItemGroup>
 
   <ItemGroup>
