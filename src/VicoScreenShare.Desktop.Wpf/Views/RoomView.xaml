@@ -12,22 +12,13 @@
 
     <UserControl.Resources>
         <!-- Shared style for chrome overlays that fade on mouse idle.
-             Opacity animates on the IsChromeVisible room-VM flag so
-             chrome shows/hides smoothly; IsHitTestVisible follows so
-             invisible chrome can't receive clicks. Fade-in is snappier
-             than fade-out (150 ms vs 300 ms) to match how users
-             perceive the reappear-on-activity action as "instant."
-
-             Visibility is also toggled — Collapsed at the END of
-             fade-out, Visible at the START of fade-in. That matters
-             because the renderer's CutoutFor mechanism skips elements
-             whose IsVisible is false; without the Visibility toggle,
-             the fade-out ends with Opacity=0 but the cutout is still
-             punched, leaving a black hole in the video where the
-             chrome used to sit. -->
+             Opacity animates on the IsChromeVisible room-VM flag;
+             IsHitTestVisible follows so invisible chrome can't receive
+             clicks. Fade-in is snappier than fade-out (150 ms vs
+             300 ms) to match how users perceive the reappear-on-
+             activity action as "instant." -->
         <Style x:Key="AutoHideChromeStyle" TargetType="FrameworkElement">
             <Setter Property="Opacity" Value="1" />
-            <Setter Property="Visibility" Value="Visible" />
             <Setter Property="IsHitTestVisible" Value="True" />
             <Style.Triggers>
                 <DataTrigger Binding="{Binding DataContext.IsChromeVisible, RelativeSource={RelativeSource AncestorType=UserControl}}" Value="False">
@@ -37,18 +28,12 @@
                             <Storyboard>
                                 <DoubleAnimation Storyboard.TargetProperty="Opacity"
                                                  To="0" Duration="0:0:0.3" />
-                                <ObjectAnimationUsingKeyFrames Storyboard.TargetProperty="Visibility">
-                                    <DiscreteObjectKeyFrame KeyTime="0:0:0.3" Value="{x:Static Visibility.Collapsed}" />
-                                </ObjectAnimationUsingKeyFrames>
                             </Storyboard>
                         </BeginStoryboard>
                     </DataTrigger.EnterActions>
                     <DataTrigger.ExitActions>
                         <BeginStoryboard>
                             <Storyboard>
-                                <ObjectAnimationUsingKeyFrames Storyboard.TargetProperty="Visibility">
-                                    <DiscreteObjectKeyFrame KeyTime="0:0:0" Value="{x:Static Visibility.Visible}" />
-                                </ObjectAnimationUsingKeyFrames>
                                 <DoubleAnimation Storyboard.TargetProperty="Opacity"
                                                  To="1" Duration="0:0:0.15" />
                             </Storyboard>
@@ -58,15 +43,12 @@
             </Style.Triggers>
         </Style>
 
-        <!-- Tile template shared between Grid mode, Focus mode's main slot,
-             and Focus mode's bottom strip. Single source of truth for the
-             renderer + paused overlay + chrome bar + click-to-focus.
-             Structural note: the D3D renderer is an HwndHost, which means
-             WPF content cannot render above it and its HWND consumes any
-             mouse event in its area. Controls live in a dedicated chrome
-             strip (Row 0) above the renderer (Row 1) so they're hit-testable.
-             Name + hover-style buttons live there, always visible so users
-             never have to hunt. -->
+        <!-- Tile template shared between Grid mode, Focus mode's main
+             slot, and Focus mode's bottom strip. Single source of
+             truth for the renderer + paused overlay + chrome bar +
+             click-to-focus. The D3DImage-based renderer composites as
+             a normal WPF visual, so chrome and overlays stack above
+             it without airspace tricks. -->
         <DataTemplate x:Key="PublisherTileTemplate" DataType="{x:Type vm:PublisherTileViewModel}">
             <Border x:Name="TileRoot"
                     Margin="3"
@@ -77,10 +59,8 @@
                     Background="#FF0A0A0A"
                     Cursor="Hand"
                     Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=UserControl}}">
-                <!-- Click/double-click via normal WPF routed events on the
-                     Border. The renderer's child HWND returns HTTRANSPARENT
-                     from WM_NCHITTEST, so mouse input flows through to the
-                     WPF tree and these bindings actually fire. -->
+                <!-- Click/double-click via normal WPF routed events on
+                     the Border. -->
                 <Border.InputBindings>
                     <MouseBinding MouseAction="LeftClick"
                                   Command="{Binding Tag.FocusTileCommand, ElementName=TileRoot}"
@@ -90,9 +70,7 @@
                                   CommandParameter="{Binding PublisherPeerId}" />
                 </Border.InputBindings>
                 <Grid>
-                    <!-- D3D renderer fills the entire tile. CornerRadius shapes the
-                         HWND via SetWindowRgn; CutoutFor registrations below poke
-                         rectangular holes in that shape where WPF overlays render. -->
+                    <!-- D3D renderer fills the entire tile. -->
                     <rendering:D3DImageVideoRenderer x:Name="TileRenderer"
                                                      Receiver="{Binding Receiver}"
                                                      NominalFrameRate="{Binding NominalFrameRate}"
@@ -120,20 +98,15 @@
                         </Border>
                     </Grid>
 
-                    <!-- Display name: tight rounded pill, bottom-left. HwndHost can't
-                         composite over live video pixels, so the pill's cutout
-                         reveals the tile's dark fill — styled intentionally with
-                         subtle rounding + modest padding so the background reads
-                         as a label chip, not a box around bare text.
-                         Auto-hides after 10 s of mouse idle via shared style. -->
+                    <!-- Display name: rounded pill, bottom-left.
+                         Auto-hides after mouse idle via shared style. -->
                     <Border HorizontalAlignment="Left" VerticalAlignment="Bottom"
                             Margin="10"
                             Background="#B3000000"
                             CornerRadius="4"
                             Padding="8,3"
                             IsHitTestVisible="False"
-                            Style="{StaticResource AutoHideChromeStyle}"
-                            rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
+                            Style="{StaticResource AutoHideChromeStyle}">
                         <TextBlock Text="{Binding DisplayName}"
                                    Foreground="White"
                                    FontSize="12" FontWeight="SemiBold"
@@ -141,16 +114,14 @@
                                    MaxWidth="280" />
                     </Border>
 
-                    <!-- Controls pill: top-right. Same cutout pattern so buttons
-                         are rendered by WPF (and actually receive clicks).
-                         Auto-hides after 10 s of mouse idle via shared style. -->
+                    <!-- Controls pill: top-right. Auto-hides after
+                         mouse idle via shared style. -->
                     <Border HorizontalAlignment="Right" VerticalAlignment="Top"
                             Margin="8"
                             Background="#B3000000"
                             CornerRadius="20"
                             Padding="2"
-                            Style="{StaticResource AutoHideChromeStyle}"
-                            rendering:D3DImageVideoRenderer.CutoutFor="{Binding ElementName=TileRenderer}">
+                            Style="{StaticResource AutoHideChromeStyle}">
                         <StackPanel Orientation="Horizontal">
                             <!-- Speaker button with a hover-revealed volume
                                  slider that fades in, anchored below. Own
@@ -406,16 +377,13 @@
                                 <rendering:D3DImageVideoRenderer x:Name="SelfRenderer"
                                                                  LocalPreviewSource="{Binding LocalPreviewSource}"
                                                                  CornerRadius="10"
-                                                                 IsAlwaysTopmost="True"
                                                                  Visibility="{Binding IsSelfPreviewCollapsed, Converter={StaticResource InvertBoolToVisibility}}" />
 
-                                <!-- Chrome strip: LIVE pill + collapse chevron. CutoutForAll
-                                     punches a hole in EVERY renderer (the self-preview AND
-                                     any publisher tile whose HWND lands over the same
-                                     screen region), so the WPF chrome always shows through. -->
+                                <!-- Chrome strip: LIVE pill + collapse
+                                     chevron. Composes over the self-
+                                     preview via WPF Z-order. -->
                                 <Grid VerticalAlignment="Top" Height="28"
-                                      Background="#80000000"
-                                      rendering:D3DImageVideoRenderer.CutoutForAll="True">
+                                      Background="#80000000">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />

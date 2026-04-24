@@ -54,12 +54,6 @@
               Visibility="{Binding ActiveOverlay, Converter={StaticResource NullToCollapsed}}"
               KeyDown="OnOverlayKeyDown"
               MouseDown="OnOverlayBackdropMouseDown">
-            <!-- CutoutForAll on the card (not the dimmed backdrop) so
-                 renderers below the overlay punch a hole under the card
-                 itself, leaving the dimmed backdrop to overlay the video
-                 naturally. Renderers INSIDE the card (e.g. picker tile
-                 previews) skip this cutout via the ancestor-skip check
-                 in UpdateWindowRegion. -->
             <Border Width="{Binding OverlayWidth}"
                     MaxHeight="{Binding OverlayMaxHeight}"
                     Margin="{Binding OverlayMargin}"
@@ -70,7 +64,6 @@
                     HorizontalAlignment="{Binding OverlayHorizontalAlignment}"
                     VerticalAlignment="{Binding OverlayVerticalAlignment}"
                     ClipToBounds="True"
-                    rendering:D3DImageVideoRenderer.CutoutForAll="True"
                     MouseDown="OnOverlayCardMouseDown">
                 <Border.Effect>
                     <DropShadowEffect BlurRadius="24" ShadowDepth="0" Opacity="0.35" />

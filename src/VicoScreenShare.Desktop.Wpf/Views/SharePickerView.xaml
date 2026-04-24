@@ -37,15 +37,14 @@
                                          something to look at while WGC warms up. -->
                                     <Border Background="#15FFFFFF" CornerRadius="4" />
 
-                                    <!-- Live preview via the same D3DImage renderer the
-                                         room uses for its self-preview. The renderer
-                                         returns HTTRANSPARENT from WM_NCHITTEST so
-                                         mouse input flows through to the wrapping
-                                         Button — no special click plumbing needed. -->
+                                    <!-- Live preview via the same D3DImage renderer
+                                         the room uses for its self-preview. The
+                                         renderer is non-interactive by default so
+                                         clicks flow through to the wrapping Button. -->
                                     <rendering:D3DImageVideoRenderer
                                         LocalPreviewSource="{Binding CaptureSource}"
-                                        CornerRadius="4"
-                                        IsAlwaysTopmost="False" />
+                                        IsHitTestVisible="False"
+                                        CornerRadius="4" />
 
                                     <!-- Spinner while the first frame is on its way. -->
                                     <ui:ProgressRing IsIndeterminate="True"
