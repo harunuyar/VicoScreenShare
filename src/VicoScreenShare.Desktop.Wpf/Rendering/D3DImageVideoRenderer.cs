@@ -5,6 +5,9 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
+using VicoScreenShare.Client.Diagnostics;
+using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Windows.Direct3D;
@@ -13,27 +16,37 @@ using Vortice.Direct3D11;
 using Vortice.DXGI;
 
 /// <summary>
-/// Paints decoded BGRA video into a WPF <see cref="D3DImage"/> via the
-/// D3D11 → D3D9Ex shared-handle bridge. The element is a regular
-/// <see cref="FrameworkElement"/> — chrome, overlays, scroll clipping,
-/// opacity fades, and Z-order all work natively because the video
-/// composes into the WPF visual tree like any other image.
+/// Paints decoded BGRA video into a WPF <see cref="D3DImage"/> via a
+/// D3D11 → D3D9Ex shared-handle bridge so the video composes into the
+/// WPF visual tree like any other image (chrome, overlays, scroll
+/// clipping, opacity fades, Z-order all work natively).
 ///
-/// Pipeline: decoded BGRA (CPU or GPU texture) → upload into
-/// <c>_uploadTexture</c> → <see cref="D3D11VideoScaler"/> letterboxes
-/// into one of two shared-handle D3D11 textures
-/// (<see cref="SharedTextureSlot"/>) → <c>context.Flush()</c> →
-/// publish the written slot index as the "next to expose". A
-/// <see cref="CompositionTarget.Rendering"/> handler on the UI thread
-/// locks the <see cref="D3DImage"/>, swaps the back-buffer pointer to
-/// the D3D9 surface that aliases the shared texture, and adds a dirty
-/// rect. WPF composition samples the slot on the next monitor
-/// refresh.
+/// Receiver path: decoder thread pushes onto a
+/// <see cref="TimestampedFrameQueue"/> (sized by
+/// <c>App.ReceiveBufferFrames</c>); a dedicated
+/// <see cref="PaintLoop"/> thread dequeues at content-timestamp
+/// cadence, writes into a single shared-handle slot
+/// (<see cref="SharedTextureSlot"/>), flushes the D3D11 context, and
+/// marshals <c>AddDirtyRect</c> to the UI thread via the dispatcher.
 ///
-/// Two slots alternate each frame: one is currently bound to D3DImage
-/// while the other accepts the next write. Without the double buffer,
-/// the scaler's write and WPF's read would race on the same pixels
-/// (D3D9 has no keyed-mutex interop).
+/// Self-preview path: no queue, no paint loop — paints inline on the
+/// capture-source thread.
+///
+/// The slot is sized to the source content, not the display
+/// rectangle. Display resizes do not touch the GPU slot;
+/// <see cref="Image"/> with <see cref="Stretch.Uniform"/> scales the
+/// slot to fit the renderer's layout box, preserving aspect ratio
+/// with a letterbox that shows the parent's background through. The
+/// slot is recreated only when the source resolution changes.
+///
+/// <see cref="D3DImage.SetBackBuffer"/> is called once per slot
+/// instance; every subsequent expose is just <see cref="D3DImage.AddDirtyRect"/>.
+///
+/// Without a keyed mutex the D3D11 write / D3D9 read ordering relies
+/// on <c>context.Flush()</c> submitting before <c>AddDirtyRect</c>
+/// signals WPF. On a same-adapter device this is safe in practice —
+/// the driver's command queue orders cross-device access to the
+/// shared surface.
 /// </summary>
 public sealed class D3DImageVideoRenderer : FrameworkElement
 {
@@ -44,15 +57,19 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _imageChild = new Image
         {
             Source = _d3dImage,
-            Stretch = Stretch.Fill,
-            // Pixel-accurate sampling: the slot is already at display
-            // pixel size (scaler letterboxed into it), so we just want
-            // WPF to blit 1:1 without extra filtering.
-            SnapsToDevicePixels = true,
+            // Uniform preserves aspect ratio; parent background shows
+            // through the letterbox. The slot is at source-content
+            // size, WPF scales it to the renderer's layout box.
+            Stretch = Stretch.Uniform,
         };
-        RenderOptions.SetBitmapScalingMode(_imageChild, BitmapScalingMode.NearestNeighbor);
+        // Video content benefits from linear filtering on upscale;
+        // nearest would alias on non-integer scale factors.
+        RenderOptions.SetBitmapScalingMode(_imageChild, BitmapScalingMode.Linear);
         AddVisualChild(_imageChild);
         AddLogicalChild(_imageChild);
+
+        _playoutQueue = new TimestampedFrameQueue(App.ReceiveBufferFrames);
+        _paintLoop = new PaintLoop(_playoutQueue, PaintFromQueue);
 
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
@@ -65,8 +82,8 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
 
     private void EmitPulse()
     {
-        long input, submissions;
-        int attachedSlot, pendingSlot;
+        long input, scaled, exposed;
+        int playoutDepth, ringBusy, ringSize;
         lock (_renderLock)
         {
             if (_disposed)
@@ -74,23 +91,42 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                 return;
             }
             input = InputFrameCount;
-            submissions = PresentSubmissionCount;
-            attachedSlot = _attachedSlotIndex;
-            pendingSlot = _pendingSlotIndex;
+            scaled = ScaledFrameCount;
+            exposed = ExposedFrameCount;
+            playoutDepth = _playoutQueue.Count;
+            ringSize = _textureRing?.Length ?? 0;
+            ringBusy = 0;
+            if (_ringSlotInUse is not null)
+            {
+                for (var i = 0; i < _ringSlotInUse.Length; i++)
+                {
+                    if (_ringSlotInUse[i])
+                    {
+                        ringBusy++;
+                    }
+                }
+            }
         }
         var dIn = input - _pulseLastInput; _pulseLastInput = input;
-        var dSub = submissions - _pulseLastSubmissions; _pulseLastSubmissions = submissions;
-        if (dIn == 0 && dSub == 0)
+        var dSc = scaled - _pulseLastScaled; _pulseLastScaled = scaled;
+        var dEx = exposed - _pulseLastExposed; _pulseLastExposed = exposed;
+        var wpfTicks = WpfCompositionMetrics.TickCount;
+        var dWpf = wpfTicks - _pulseLastWpfTicks; _pulseLastWpfTicks = wpfTicks;
+        if (dIn == 0 && dSc == 0 && dEx == 0)
         {
             return;
         }
-        VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-            $"[paint-pulse] 2s: input=+{dIn} exposed=+{dSub} attached={attachedSlot} pending={pendingSlot}");
+        // wpfTicks = shared process-wide count of WPF composition ticks
+        // across the 2 s window — this is WPF's actual compose rate,
+        // NOT our AddDirtyRect submission rate. When wpfTicks << exposed,
+        // WPF is coalescing our writes into fewer composites than we
+        // submit (i.e. the display is running below dispatch rate,
+        // typically monitor-refresh-bound or worse).
+        DebugLog.Write(
+            $"[paint-pulse inst={_instanceId}] 2s: input=+{dIn} scaled=+{dSc} exposed=+{dEx} wpfTicks=+{dWpf} " +
+            $"paintQ={playoutDepth}/{_playoutQueue.MaxCapacity} ring={ringBusy}/{ringSize}");
     }
 
-    /// <summary>
-    /// Receives decoded BGRA frames from the network path.
-    /// </summary>
     public static readonly DependencyProperty ReceiverProperty =
         DependencyProperty.Register(
             nameof(Receiver),
@@ -104,12 +140,6 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         set => SetValue(ReceiverProperty, value);
     }
 
-    /// <summary>
-    /// When non-null the renderer subscribes to this source instead of
-    /// <see cref="Receiver"/>, so the streamer sees a self-preview of
-    /// what they're sharing. Set to null to go back to the remote
-    /// stream.
-    /// </summary>
     public static readonly DependencyProperty LocalPreviewSourceProperty =
         DependencyProperty.Register(
             nameof(LocalPreviewSource),
@@ -124,9 +154,10 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     }
 
     /// <summary>
-    /// Legacy property kept for XAML compatibility. Frame pacing is now
-    /// owned by WPF composition (<see cref="CompositionTarget.Rendering"/>),
-    /// not the renderer.
+    /// Kept for XAML compatibility. The paint thread paces from content
+    /// timestamps, not a target fps — this value is currently unused at
+    /// runtime but preserved for bindings that predate the paint-loop
+    /// pacing rewrite.
     /// </summary>
     public static readonly DependencyProperty NominalFrameRateProperty =
         DependencyProperty.Register(
@@ -142,10 +173,9 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     }
 
     /// <summary>
-    /// Radius (in DIPs) of rounded corners. Implemented as a
-    /// <see cref="RectangleGeometry"/> <see cref="UIElement.Clip"/>,
-    /// not a child-HWND region, so fades / opacity / animations just
-    /// work.
+    /// Radius (in DIPs) of rounded corners. Applied via
+    /// <see cref="UIElement.Clip"/> so fades and opacity animations
+    /// compose correctly.
     /// </summary>
     public static readonly DependencyProperty CornerRadiusProperty =
         DependencyProperty.Register(
@@ -181,10 +211,6 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         Clip = new RectangleGeometry(new Rect(0, 0, w, h), radius, radius);
     }
 
-    // The Image child hosts our D3DImage. We own it as a single logical
-    // and visual child so WPF measures / arranges / renders it as part
-    // of our subtree.
-    private readonly Image _imageChild;
     protected override int VisualChildrenCount => 1;
     protected override Visual GetVisualChild(int index) => index == 0
         ? _imageChild
@@ -193,7 +219,13 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     protected override System.Windows.Size MeasureOverride(System.Windows.Size availableSize)
     {
         _imageChild.Measure(availableSize);
-        return _imageChild.DesiredSize;
+        // Claim the full layout box. Default Image measurement returns
+        // min(content, available) which would shrink the renderer to the
+        // source's pixel dimensions. We want to occupy the host cell
+        // and let the Image's Stretch.Uniform scale within it.
+        var width = double.IsInfinity(availableSize.Width) ? _imageChild.DesiredSize.Width : availableSize.Width;
+        var height = double.IsInfinity(availableSize.Height) ? _imageChild.DesiredSize.Height : availableSize.Height;
+        return new System.Windows.Size(width, height);
     }
 
     protected override System.Windows.Size ArrangeOverride(System.Windows.Size finalSize)
@@ -206,103 +238,150 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
     {
         base.OnRenderSizeChanged(sizeInfo);
+        // Display resizes only update the clip — the GPU slot is
+        // sized to the source content, so WPF's Stretch.Uniform
+        // handles display-side scaling without any GPU work.
         UpdateClipGeometry();
-        ResizeSlotsIfNeeded();
     }
 
-    // The D3D side — all fields touched from the decoder thread
-    // (OnFrameArrived/OnTextureArrived) and/or the UI thread
-    // (CompositionTarget.Rendering). _renderLock serializes.
+    // Monotonic renderer ID used by the diagnostic pulse log so
+    // multiple live instances (self-preview + N publisher tiles) are
+    // distinguishable in the log stream without relying on
+    // GetHashCode, which can collide and isn't stable.
+    private static int s_nextInstanceId;
+    private readonly int _instanceId = System.Threading.Interlocked.Increment(ref s_nextInstanceId);
+
+    private readonly Image _imageChild;
     private readonly D3DImage _d3dImage;
     private ID3D11Device? _device;
     private ID3D11DeviceContext? _context;
-    private ID3D11Texture2D? _uploadTexture;
-    private int _uploadWidth;
-    private int _uploadHeight;
-    private D3D11VideoScaler? _scaler;
     private D3D9ExBridge? _bridge;
 
-    // Two-slot display ring. Each slot is a D3D11 shared texture
-    // paired with the D3D9 surface that aliases its GPU memory. The
-    // decoder thread scales into the non-attached slot; the UI thread
-    // binds the newly-written slot to D3DImage on the next composition
-    // tick.
-    private readonly SharedTextureSlot?[] _slots = new SharedTextureSlot?[2];
+    // Single shared-handle slot. Sized to source content. SetBackBuffer
+    // is called exactly once per slot instance (on the first expose
+    // after creation / resource-change recreate); subsequent exposes
+    // only AddDirtyRect. Slot is recreated when the source's
+    // width/height changes — that's rare (stream restart, renegotiate),
+    // not every layout tick.
+    private SharedTextureSlot? _slot;
     private int _slotWidth;
     private int _slotHeight;
-    private int _attachedSlotIndex = -1;
-    private int _pendingSlotIndex = -1;
+    private bool _slotAttached;
+    private bool _hasPendingFrame;
+    private bool _exposeQueued;
 
-    // Last painted source and its dimensions. Used to re-letterbox
-    // into freshly-recreated slots after a resize when no new frame
-    // has arrived (common on static sources like an idle browser
-    // tab). The reference is non-owning — it points at _uploadTexture
-    // which persists for the life of the renderer.
-    private ID3D11Texture2D? _lastPaintedTexture;
-    private int _lastPaintedSourceWidth;
-    private int _lastPaintedSourceHeight;
+    // GPU texture ring — hand-off buffer for the GPU decode path.
+    // OnTextureArrived GPU-copies the decoder's texture into one of
+    // these slots and enqueues the slot index onto the playout queue;
+    // PaintFromQueue dequeues and CopyResources from the ring slot
+    // into the display slot on the paint thread, then releases the
+    // ring slot back to the pool. This is what makes
+    // ReceiveBufferFrames work on the GPU path.
+    private ID3D11Texture2D?[]? _textureRing;
+    private int[]? _ringSlotWidth;
+    private int[]? _ringSlotHeight;
+    private bool[]? _ringSlotInUse;
 
     private ICaptureSource? _attachedReceiver;
     private ICaptureSource? _attachedLocalSource;
     private readonly object _renderLock = new();
     private bool _disposed;
 
+    // Receive-side jitter buffer + paint pacer.
+    private readonly TimestampedFrameQueue _playoutQueue;
+    private readonly PaintLoop _paintLoop;
+
     private System.Threading.Timer? _pulseTimer;
     private long _pulseLastInput;
-    private long _pulseLastSubmissions;
+    private long _pulseLastScaled;
+    private long _pulseLastExposed;
+    private long _pulseLastWpfTicks;
+    private bool _wpfMetricsSubscribed;
     private long _frameFailureCount;
 
-    /// <summary>Every frame that reached <see cref="OnFrameArrived"/> or
-    /// <see cref="OnTextureArrived"/> from the decoder.</summary>
+    /// <summary>
+    /// Rate-limited exception log for the hot paint paths. Writes the
+    /// first five failures, then every 60th — avoids spamming the log
+    /// when every frame trips the same bug while still keeping long
+    /// sessions observable.
+    /// </summary>
+    private void LogFrameFailure(string context, Exception ex)
+    {
+        var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
+        if (count <= 5 || count % 60 == 0)
+        {
+            DebugLog.Write(
+                $"[renderer] {context} threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Every frame that reached <see cref="OnFrameArrived"/>
+    /// or <see cref="OnTextureArrived"/> from the decoder.</summary>
     public long InputFrameCount { get; private set; }
 
-    /// <summary>D3DImage <c>SetBackBuffer + AddDirtyRect</c> calls — one
-    /// per frame actually shown to WPF composition. Under contention a
-    /// freshly-written slot can be overwritten by a newer frame before
-    /// the UI thread exposes it, so this counts unique exposures, not
-    /// scaler invocations.</summary>
-    public long PresentSubmissionCount { get; private set; }
+    /// <summary>Frames the paint thread wrote into the display slot.</summary>
+    public long ScaledFrameCount { get; private set; }
 
-    /// <summary>In the D3DImage model there is no separate "DWM
-    /// presented" count — WPF pulls from the attached slot at its own
-    /// cadence. Returns the same value as
-    /// <see cref="PresentSubmissionCount"/> for binding compatibility.</summary>
-    public long PaintedFrameCount => PresentSubmissionCount;
+    /// <summary>
+    /// <c>Lock + AddDirtyRect + Unlock</c> calls on the UI thread —
+    /// frames submitted to WPF for composition. WPF may internally
+    /// coalesce several of these into one composite when the paint
+    /// rate exceeds the compositor's rate; there is no public API
+    /// that reports the actually-composited count.
+    /// </summary>
+    public long ExposedFrameCount { get; private set; }
 
-    /// <summary>Frames scaled but overwritten in the display ring
-    /// before the UI thread could expose them.</summary>
-    public long DroppedFrameCount => InputFrameCount - PresentSubmissionCount;
+    /// <summary>
+    /// Legacy alias for <see cref="ExposedFrameCount"/>. Kept for
+    /// diagnostic consumers that predate the property rename.
+    /// </summary>
+    public long PaintedFrameCount => ExposedFrameCount;
 
-    /// <summary>Wall-clock duration of the last UI-thread expose
-    /// (Lock + SetBackBuffer + AddDirtyRect + Unlock).</summary>
+    /// <summary>
+    /// Frames that arrived from the decoder but weren't submitted to
+    /// WPF — jitter-buffer evictions plus any dispatcher coalescing.
+    /// </summary>
+    public long DroppedFrameCount => InputFrameCount - ExposedFrameCount;
+
     public double LastPaintMs { get; private set; }
 
     public (long Input, long Painted, double LastPaintMs) Snapshot()
     {
         lock (_renderLock)
         {
-            return (InputFrameCount, PresentSubmissionCount, LastPaintMs);
+            return (InputFrameCount, ExposedFrameCount, LastPaintMs);
         }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        _paintLoop.Start();
         RefreshActiveFrameSource();
-        // Subscribe on Loaded, not ctor, so we only tick while the
-        // element is actually part of a live tree.
-        CompositionTarget.Rendering += OnRendering;
+        if (!_wpfMetricsSubscribed)
+        {
+            WpfCompositionMetrics.Subscribe();
+            _wpfMetricsSubscribed = true;
+        }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        CompositionTarget.Rendering -= OnRendering;
+        if (_wpfMetricsSubscribed)
+        {
+            WpfCompositionMetrics.Unsubscribe();
+            _wpfMetricsSubscribed = false;
+        }
         TeardownD3D();
     }
 
     private void TeardownD3D()
     {
-        try { _pulseTimer?.Dispose(); } catch { }
+        // Stop the paint thread BEFORE tearing D3D state. Dispose joins
+        // (500 ms timeout).
+        _paintLoop.Dispose();
+        try { _pulseTimer?.Dispose(); } catch (Exception) { }
         _pulseTimer = null;
+        _playoutQueue.Clear();
 
         lock (_renderLock)
         {
@@ -310,51 +389,46 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             DetachReceiver();
             DetachLocalSource();
 
-            // Detach the D3DImage from whatever slot it's bound to
-            // before we dispose the slot — SetBackBuffer must run on
-            // the UI thread, which is exactly where Unloaded fires.
+            // Best-effort detach — if the D3DImage is already in a bad
+            // state, we're still winding down and there's nothing useful
+            // to do with the exception.
             try
             {
                 _d3dImage.Lock();
                 _d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero);
             }
-            catch { }
+            catch (Exception) { }
             finally
             {
-                try { _d3dImage.Unlock(); } catch { }
+                try { _d3dImage.Unlock(); } catch (Exception) { }
             }
 
-            _attachedSlotIndex = -1;
-            _pendingSlotIndex = -1;
-            _lastPaintedTexture = null;
-            _lastPaintedSourceWidth = 0;
-            _lastPaintedSourceHeight = 0;
+            _slotAttached = false;
+            _hasPendingFrame = false;
+            _exposeQueued = false;
 
-            _scaler?.Dispose(); _scaler = null;
-            _uploadTexture?.Dispose(); _uploadTexture = null;
-            _uploadWidth = 0;
-            _uploadHeight = 0;
-            for (var i = 0; i < _slots.Length; i++)
-            {
-                _slots[i]?.Dispose();
-                _slots[i] = null;
-            }
+            _slot?.Dispose(); _slot = null;
             _slotWidth = 0;
             _slotHeight = 0;
+            if (_textureRing is not null)
+            {
+                for (var i = 0; i < _textureRing.Length; i++)
+                {
+                    _textureRing[i]?.Dispose();
+                    _textureRing[i] = null;
+                }
+                _textureRing = null;
+                _ringSlotWidth = null;
+                _ringSlotHeight = null;
+                _ringSlotInUse = null;
+            }
             _bridge?.Dispose(); _bridge = null;
 
-            // _device/_context are borrowed from App.SharedDevices; the
-            // App exit path owns their lifetime.
             _context = null;
             _device = null;
         }
     }
 
-    /// <summary>
-    /// Lazy initialization: first frame wakes this up once WPF has laid
-    /// us out AND the shared D3D11 device is ready. Called under
-    /// <see cref="_renderLock"/>.
-    /// </summary>
     private bool InitD3DLocked()
     {
         if (_bridge is not null && _device is not null)
@@ -365,7 +439,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         var sharedDevices = App.SharedDevices;
         if (sharedDevices is null)
         {
-            VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+            DebugLog.Write(
                 "[renderer] App.SharedDevices is null — cannot init D3D");
             return false;
         }
@@ -375,88 +449,16 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         try
         {
             _bridge ??= new D3D9ExBridge();
-            VicoScreenShare.Client.Diagnostics.DebugLog.Write("[renderer] D3D9Ex bridge created");
+            DebugLog.Write("[renderer] D3D9Ex bridge created");
             return true;
         }
         catch (Exception ex)
         {
-            VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+            DebugLog.Write(
                 $"[renderer] D3D9Ex bridge create threw: {ex.Message}");
             _device = null;
             _context = null;
             return false;
-        }
-    }
-
-    private void ResizeSlotsIfNeeded()
-    {
-        lock (_renderLock)
-        {
-            if (_disposed || _bridge is null || _device is null)
-            {
-                return;
-            }
-
-            var newW = Math.Max(1, (int)ActualWidth);
-            var newH = Math.Max(1, (int)ActualHeight);
-            if (newW == _slotWidth && newH == _slotHeight)
-            {
-                return;
-            }
-
-            // Detach D3DImage's back buffer and release the old slot
-            // textures. Both the D3D11 and D3D9 sides point at shared
-            // GPU memory; WPF may still hold a last reference via
-            // composition, but the underlying ComPtr refcount sorts
-            // that out. The key correctness bit is clearing
-            // SetBackBuffer first so WPF stops sampling the old
-            // surface before its COM ref drops.
-            try
-            {
-                _d3dImage.Lock();
-                _d3dImage.SetBackBuffer(D3DResourceType.IDirect3DSurface9, IntPtr.Zero);
-            }
-            catch { }
-            finally
-            {
-                try { _d3dImage.Unlock(); } catch { }
-            }
-
-            for (var i = 0; i < _slots.Length; i++)
-            {
-                _slots[i]?.Dispose();
-                _slots[i] = null;
-            }
-            _attachedSlotIndex = -1;
-            _pendingSlotIndex = -1;
-            _slotWidth = newW;
-            _slotHeight = newH;
-
-            // Kill the cached scaler: its output view holds a
-            // reference to whichever slot texture we passed in last,
-            // which we just disposed.
-            _scaler?.Dispose();
-            _scaler = null;
-
-            // Re-scale the last painted content into a fresh slot so a
-            // static source doesn't show a blank frame after resize.
-            if (_lastPaintedTexture is not null
-                && _lastPaintedSourceWidth > 0
-                && _lastPaintedSourceHeight > 0)
-            {
-                try
-                {
-                    PaintSourceToSlotLocked(
-                        _lastPaintedTexture,
-                        _lastPaintedSourceWidth,
-                        _lastPaintedSourceHeight);
-                }
-                catch (Exception ex)
-                {
-                    VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-                        $"[renderer] post-resize repaint threw: {ex.Message}");
-                }
-            }
         }
     }
 
@@ -476,19 +478,12 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         }
     }
 
-    /// <summary>
-    /// Picks which frame source feeds the renderer: local capture
-    /// takes precedence, remote receiver otherwise. Detaches first so
-    /// we never have both pumping <see cref="OnFrameArrived"/>.
-    /// </summary>
     private void RefreshActiveFrameSource()
     {
         DetachReceiver();
         DetachLocalSource();
         if (!IsLoaded)
         {
-            // OnLoaded will call us again with both DP values already
-            // in place.
             return;
         }
         if (LocalPreviewSource is { } local)
@@ -507,7 +502,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _attachedReceiver = receiver;
         receiver.FrameArrived += OnFrameArrived;
         receiver.TextureArrived += OnTextureArrived;
-        VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+        DebugLog.Write(
             $"[renderer] subscribed to FrameArrived + TextureArrived (receiver={receiver.GetType().Name})");
     }
 
@@ -518,10 +513,11 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             return;
         }
 
-        try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch { }
-        try { _attachedReceiver.TextureArrived -= OnTextureArrived; } catch { }
+        try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch (Exception) { }
+        try { _attachedReceiver.TextureArrived -= OnTextureArrived; } catch (Exception) { }
         _attachedReceiver = null;
-        VicoScreenShare.Client.Diagnostics.DebugLog.Write("[renderer] unsubscribed FrameArrived + TextureArrived");
+        _playoutQueue.Clear();
+        DebugLog.Write("[renderer] unsubscribed FrameArrived + TextureArrived");
     }
 
     private void AttachLocalSource(ICaptureSource source)
@@ -529,7 +525,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _attachedLocalSource = source;
         source.FrameArrived += OnFrameArrived;
         source.TextureArrived += OnTextureArrived;
-        VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+        DebugLog.Write(
             "[renderer] subscribed to ICaptureSource.FrameArrived + TextureArrived (local preview)");
     }
 
@@ -540,10 +536,10 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             return;
         }
 
-        try { _attachedLocalSource.FrameArrived -= OnFrameArrived; } catch { }
-        try { _attachedLocalSource.TextureArrived -= OnTextureArrived; } catch { }
+        try { _attachedLocalSource.FrameArrived -= OnFrameArrived; } catch (Exception) { }
+        try { _attachedLocalSource.TextureArrived -= OnTextureArrived; } catch (Exception) { }
         _attachedLocalSource = null;
-        VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+        DebugLog.Write(
             "[renderer] unsubscribed ICaptureSource.FrameArrived + TextureArrived (local preview)");
     }
 
@@ -554,7 +550,6 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             return;
         }
 
-        var paintStart = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             lock (_renderLock)
@@ -563,53 +558,30 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                 {
                     return;
                 }
-                if (!InitD3DLocked())
-                {
-                    return;
-                }
-
                 InputFrameCount++;
+            }
 
-                var width = frame.Width;
-                var height = frame.Height;
-                if (width <= 0 || height <= 0)
-                {
-                    return;
-                }
-
-                EnsureUploadTextureLocked(width, height);
-
-                unsafe
-                {
-                    fixed (byte* src = frame.Pixels)
-                    {
-                        _context!.UpdateSubresource(
-                            _uploadTexture!,
-                            0,
-                            null,
-                            (IntPtr)src,
-                            (uint)frame.StrideBytes,
-                            (uint)(frame.StrideBytes * height));
-                    }
-                }
-
-                PaintSourceToSlotLocked(_uploadTexture!, width, height);
+            if (_attachedReceiver is not null)
+            {
+                // Receiver path: copy bytes into a DecodedVideoFrame,
+                // push onto the playout queue. PaintLoop pops on the
+                // content-timestamp schedule and calls PaintFromQueue.
+                var bgraSize = frame.Height * frame.StrideBytes;
+                var bytes = new byte[bgraSize];
+                frame.Pixels.Slice(0, bgraSize).CopyTo(bytes);
+                var decoded = new DecodedVideoFrame(bytes, frame.Width, frame.Height, frame.Timestamp);
+                _playoutQueue.Push(in decoded);
+            }
+            else
+            {
+                // Self-preview: paint inline on the capture thread.
+                OnFrameArrivedCore(in frame);
             }
         }
         catch (Exception ex)
         {
-            var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
-            if (count <= 5 || count % 60 == 0)
-            {
-                VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-                    $"[renderer] OnFrameArrived threw (#{count}): {ex.GetType().Name}: {ex.Message}");
-            }
+            LogFrameFailure("OnFrameArrived", ex);
         }
-        var paintEnd = System.Diagnostics.Stopwatch.GetTimestamp();
-        // Include the scaler+flush in the CPU-path paint measurement.
-        // UI-thread expose timing is measured separately in
-        // OnRendering.
-        LastPaintMs = (paintEnd - paintStart) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     }
 
     private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
@@ -619,6 +591,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             return;
         }
 
+        int slot;
         try
         {
             lock (_renderLock)
@@ -634,128 +607,364 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
 
                 InputFrameCount++;
 
-                // GPU-copy the decoder's texture into our owned
-                // upload texture so the decoder can safely reuse its
-                // texture on the next decode cycle. CopyResource is a
-                // GPU-side DMA: no CPU stall, no PCIe traffic.
-                EnsureUploadTextureLocked(width, height);
-                using var sourceTexture = new ID3D11Texture2D(nativeTexture);
-                _context!.CopyResource(_uploadTexture!, sourceTexture);
+                // Self-preview fast path: no queue, paint inline.
+                if (_attachedReceiver is null)
+                {
+                    EnsureSlotLocked(width, height);
+                    if (_slot is null)
+                    {
+                        return;
+                    }
+                    using var previewSource = new ID3D11Texture2D(nativeTexture);
+                    _context!.CopyResource(_slot.D3D11Texture, previewSource);
+                    _context.Flush();
+                    _hasPendingFrame = true;
+                    ScaledFrameCount++;
+                    ScheduleExposeLocked();
+                    return;
+                }
 
-                PaintSourceToSlotLocked(_uploadTexture!, width, height);
+                // Receiver path: GPU-copy into an owned ring slot, then
+                // push onto the playout queue.
+                slot = AcquireRingSlotLocked();
+                if (slot < 0)
+                {
+                    return;
+                }
+
+                EnsureRingSlotTextureLocked(slot, width, height);
+
+                using var sourceTexture = new ID3D11Texture2D(nativeTexture);
+                _context!.CopyResource(_textureRing![slot]!, sourceTexture);
             }
         }
         catch (Exception ex)
         {
-            var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
-            if (count <= 5 || count % 60 == 0)
+            LogFrameFailure("OnTextureArrived", ex);
+            return;
+        }
+
+        // Push OUTSIDE the render lock (OnDropped re-enters).
+        var capturedSlot = slot;
+        var queuedFrame = new DecodedVideoFrame(
+            Bgra: Array.Empty<byte>(),
+            Width: width,
+            Height: height,
+            Timestamp: timestamp,
+            TextureSlot: capturedSlot,
+            OnDropped: () => ReleaseRingSlot(capturedSlot));
+        _playoutQueue.Push(in queuedFrame);
+    }
+
+    /// <summary>
+    /// PaintLoop callback. Runs on the paint thread after the loop has
+    /// slept to the next frame's due time.
+    /// </summary>
+    private void PaintFromQueue(in DecodedVideoFrame frame)
+    {
+        if (frame.Width <= 0 || frame.Height <= 0)
+        {
+            return;
+        }
+
+        if (frame.TextureSlot >= 0)
+        {
+            var slot = frame.TextureSlot;
+            try
             {
-                VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-                    $"[renderer] OnTextureArrived threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+                lock (_renderLock)
+                {
+                    if (_disposed || _textureRing is null || _textureRing[slot] is null)
+                    {
+                        return;
+                    }
+                    if (!InitD3DLocked())
+                    {
+                        return;
+                    }
+                    EnsureSlotLocked(frame.Width, frame.Height);
+                    if (_slot is null)
+                    {
+                        return;
+                    }
+                    _context!.CopyResource(_slot.D3D11Texture, _textureRing[slot]!);
+                    _context.Flush();
+                    _hasPendingFrame = true;
+                    ScaledFrameCount++;
+                    ScheduleExposeLocked();
+                }
             }
+            catch (Exception ex)
+            {
+                LogFrameFailure("PaintFromQueue (gpu)", ex);
+            }
+            finally
+            {
+                ReleaseRingSlot(slot);
+            }
+            return;
+        }
+
+        if (frame.Bgra is null || frame.Bgra.Length == 0)
+        {
+            return;
+        }
+
+        // CPU path.
+        var strideBytes = frame.Width * 4;
+        var data = new CaptureFrameData(
+            frame.Bgra.AsSpan(0, frame.Height * strideBytes),
+            frame.Width,
+            frame.Height,
+            strideBytes,
+            CaptureFramePixelFormat.Bgra8,
+            frame.Timestamp);
+        try
+        {
+            OnFrameArrivedCore(in data);
+        }
+        catch (Exception ex)
+        {
+            LogFrameFailure("PaintFromQueue (cpu)", ex);
         }
     }
 
     /// <summary>
-    /// Scale the source texture into the next free display slot and
-    /// publish the slot index. Called under <see cref="_renderLock"/>.
+    /// Shared CPU-upload + paint sequence. Uploads BGRA bytes directly
+    /// into the shared slot's D3D11 texture — no intermediate upload
+    /// texture, since the slot is at source-content size.
     /// </summary>
-    private void PaintSourceToSlotLocked(ID3D11Texture2D source, int srcW, int srcH)
+    private void OnFrameArrivedCore(in CaptureFrameData frame)
     {
-        if (_bridge is null || _device is null || _context is null)
+        lock (_renderLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            if (!InitD3DLocked())
+            {
+                return;
+            }
+
+            var width = frame.Width;
+            var height = frame.Height;
+            if (width <= 0 || height <= 0)
+            {
+                return;
+            }
+
+            EnsureSlotLocked(width, height);
+            if (_slot is null)
+            {
+                return;
+            }
+
+            unsafe
+            {
+                fixed (byte* src = frame.Pixels)
+                {
+                    _context!.UpdateSubresource(
+                        _slot.D3D11Texture,
+                        0,
+                        null,
+                        (IntPtr)src,
+                        (uint)frame.StrideBytes,
+                        (uint)(frame.StrideBytes * height));
+                }
+            }
+            _context!.Flush();
+
+            _hasPendingFrame = true;
+            ScaledFrameCount++;
+            ScheduleExposeLocked();
+        }
+    }
+
+    /// <summary>
+    /// Ensure the display slot matches the source-content dimensions.
+    /// A dimension change disposes the old slot and creates a new one;
+    /// the next expose rebinds <see cref="D3DImage"/> via
+    /// <c>SetBackBuffer</c>. Dimension changes are rare (stream restart
+    /// or resolution renegotiation) — NOT every display-size change.
+    /// </summary>
+    private void EnsureSlotLocked(int srcW, int srcH)
+    {
+        if (_slot is not null && _slotWidth == srcW && _slotHeight == srcH)
         {
             return;
         }
 
-        // If we haven't been laid out yet, pick a provisional slot
-        // size so the first frame doesn't sit gated behind an arrange
-        // pass. OnRenderSizeChanged will rebuild slots at the real
-        // display pixel size once WPF arranges us.
-        if (_slotWidth <= 0 || _slotHeight <= 0)
+        _slot?.Dispose();
+        _slot = null;
+        _slotAttached = false;
+        _slotWidth = srcW;
+        _slotHeight = srcH;
+
+        try
         {
-            _slotWidth = Math.Max(1, (int)ActualWidth);
-            _slotHeight = Math.Max(1, (int)ActualHeight);
-            if (_slotWidth <= 1 || _slotHeight <= 1)
+            _slot = new SharedTextureSlot(_device!, _bridge!, srcW, srcH);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write(
+                $"[renderer] slot create threw: {ex.Message}");
+            _slot = null;
+        }
+    }
+
+    /// <summary>
+    /// Marshal the expose onto the UI thread. Coalesced via
+    /// <see cref="_exposeQueued"/>: if an expose is already pending,
+    /// just flag the latest write as "up next" and return; the running
+    /// dispatcher call picks up whichever frame is freshest when it
+    /// actually runs. Called under <see cref="_renderLock"/>.
+    /// </summary>
+    private void ScheduleExposeLocked()
+    {
+        if (_exposeQueued)
+        {
+            return;
+        }
+        _exposeQueued = true;
+        // Render priority is WPF's "the visual tree has changed,
+        // paint on the next tick" tier — the right level for a
+        // video frame exposure. Send (which preempts Input and
+        // Render) would starve layout and input handling.
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(ExposePendingFrame));
+    }
+
+    private void ExposePendingFrame()
+    {
+        lock (_renderLock)
+        {
+            _exposeQueued = false;
+            if (_disposed || !_hasPendingFrame || _slot is null)
             {
-                _slotWidth = 1280;
-                _slotHeight = 720;
+                return;
+            }
+            if (!_d3dImage.IsFrontBufferAvailable)
+            {
+                _hasPendingFrame = false;
+                return;
+            }
+            _hasPendingFrame = false;
+
+            var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                _d3dImage.Lock();
+                if (!_slotAttached)
+                {
+                    _d3dImage.SetBackBuffer(
+                        D3DResourceType.IDirect3DSurface9,
+                        _slot.D3D9Surface.NativePointer);
+                    _slotAttached = true;
+                }
+                _d3dImage.AddDirtyRect(new Int32Rect(0, 0, _slot.Width, _slot.Height));
+                ExposedFrameCount++;
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write(
+                    $"[renderer] D3DImage expose threw: {ex.Message}");
+                _slotAttached = false;
+            }
+            finally
+            {
+                try { _d3dImage.Unlock(); } catch (Exception) { }
+            }
+            LastPaintMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0
+                / System.Diagnostics.Stopwatch.Frequency;
+        }
+    }
+
+    // --- Ring slot management ---
+
+    private int AcquireRingSlotLocked()
+    {
+        if (_textureRing is null)
+        {
+            var size = _playoutQueue.MaxCapacity;
+            _textureRing = new ID3D11Texture2D?[size];
+            _ringSlotWidth = new int[size];
+            _ringSlotHeight = new int[size];
+            _ringSlotInUse = new bool[size];
+        }
+
+        for (var i = 0; i < _textureRing.Length; i++)
+        {
+            if (!_ringSlotInUse![i])
+            {
+                _ringSlotInUse[i] = true;
+                return i;
             }
         }
 
-        // Pick a write slot that is not currently attached to D3DImage.
-        // Two slots + this rule means the WPF composition thread is
-        // always sampling a surface we're not writing to. If nothing is
-        // attached yet (first frame), slot 0 is free.
-        var writeSlot = _attachedSlotIndex == -1 ? 0 : _attachedSlotIndex ^ 1;
-        EnsureSlotLocked(writeSlot);
-        if (_slots[writeSlot] is null)
-        {
-            return;
-        }
-
-        EnsureScalerLocked(srcW, srcH, _slotWidth, _slotHeight);
-        var destRect = ComputeLetterboxRect(srcW, srcH, _slotWidth, _slotHeight);
+        // Every slot is in flight. Force the queue to evict its oldest
+        // entry; its OnDropped hook releases a slot back to us.
+        //
+        // IMPORTANT: we must drop _renderLock while SkipToLatest runs,
+        // because its OnDropped callback re-enters this renderer via
+        // ReleaseRingSlot which takes _renderLock. Without the drop
+        // we self-deadlock. The callers of this method hold the lock
+        // at depth exactly 1 (guaranteed because the only call sites
+        // are the two branches of OnTextureArrived, neither of which
+        // is re-entrant), so Exit + Enter restores the same state.
+        // If the call graph ever changes to allow nested acquisitions,
+        // this trick breaks.
+        System.Threading.Monitor.Exit(_renderLock);
         try
         {
-            _scaler!.Process(source, _slots[writeSlot]!.D3D11Texture, destRect);
+            _playoutQueue.SkipToLatest(_playoutQueue.MaxCapacity - 1);
         }
-        catch (Exception ex)
+        finally
         {
-            VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-                $"[renderer] scaler.Process threw: {ex.Message}");
-            return;
+            System.Threading.Monitor.Enter(_renderLock);
         }
 
-        // Flush the D3D11 command queue so writes land in GPU memory
-        // before the UI thread AddDirtyRects WPF into sampling this
-        // surface. Without Flush the scaler's commands might still be
-        // queued when WPF reads.
-        _context.Flush();
-
-        _pendingSlotIndex = writeSlot;
-        _lastPaintedTexture = source;
-        _lastPaintedSourceWidth = srcW;
-        _lastPaintedSourceHeight = srcH;
+        for (var i = 0; i < _textureRing.Length; i++)
+        {
+            if (!_ringSlotInUse![i])
+            {
+                _ringSlotInUse[i] = true;
+                return i;
+            }
+        }
+        return -1;
     }
 
-    private void EnsureSlotLocked(int slotIndex)
+    private void ReleaseRingSlot(int slot)
     {
-        if (_slots[slotIndex] is not null
-            && _slots[slotIndex]!.Width == _slotWidth
-            && _slots[slotIndex]!.Height == _slotHeight)
+        if (slot < 0)
         {
             return;
         }
-        _slots[slotIndex]?.Dispose();
-        try
+        lock (_renderLock)
         {
-            _slots[slotIndex] = new SharedTextureSlot(_device!, _bridge!, _slotWidth, _slotHeight);
-        }
-        catch (Exception ex)
-        {
-            VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-                $"[renderer] slot create threw: {ex.Message}");
-            _slots[slotIndex] = null;
+            if (_ringSlotInUse is null || slot >= _ringSlotInUse.Length)
+            {
+                return;
+            }
+            _ringSlotInUse[slot] = false;
         }
     }
 
-    private void EnsureUploadTextureLocked(int width, int height)
+    private void EnsureRingSlotTextureLocked(int slot, int width, int height)
     {
-        if (_uploadTexture is not null && _uploadWidth == width && _uploadHeight == height)
+        if (_textureRing is null || _ringSlotWidth is null || _ringSlotHeight is null)
         {
             return;
         }
 
-        if (ReferenceEquals(_lastPaintedTexture, _uploadTexture))
+        if (_textureRing[slot] is not null
+            && _ringSlotWidth[slot] == width
+            && _ringSlotHeight[slot] == height)
         {
-            _lastPaintedTexture = null;
+            return;
         }
-        _uploadTexture?.Dispose();
-        // DEFAULT usage + ShaderResource + RenderTarget. D3D11 Video
-        // Processor rejects input with E_INVALIDARG unless the source
-        // texture has RenderTarget bind (even though we never actually
-        // use the view, the runtime validates the bind-flag
-        // combination before creating the input view).
+
+        _textureRing[slot]?.Dispose();
         var desc = new Texture2DDescription
         {
             Width = (uint)width,
@@ -765,114 +974,19 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+            BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
             CPUAccessFlags = CpuAccessFlags.None,
             MiscFlags = ResourceOptionFlags.None,
         };
-        _uploadTexture = _device!.CreateTexture2D(desc);
-        _uploadWidth = width;
-        _uploadHeight = height;
-        _scaler?.Dispose();
-        _scaler = null;
-    }
-
-    private void EnsureScalerLocked(int srcW, int srcH, int dstW, int dstH)
-    {
-        if (_scaler is not null
-            && _scaler.SourceWidth == srcW
-            && _scaler.SourceHeight == srcH
-            && _scaler.DestWidth == dstW
-            && _scaler.DestHeight == dstH)
-        {
-            return;
-        }
-        _scaler?.Dispose();
-        _scaler = new D3D11VideoScaler(_device!, srcW, srcH, dstW, dstH);
-    }
-
-    private static RawRect ComputeLetterboxRect(int srcW, int srcH, int dstW, int dstH)
-    {
-        if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0)
-        {
-            return new RawRect(0, 0, Math.Max(1, dstW), Math.Max(1, dstH));
-        }
-
-        var srcAspect = (double)srcW / srcH;
-        var dstAspect = (double)dstW / dstH;
-
-        if (srcAspect > dstAspect)
-        {
-            var h = (int)Math.Round(dstW / srcAspect);
-            var y = (dstH - h) / 2;
-            return new RawRect(0, y, dstW, y + h);
-        }
-        else
-        {
-            var w = (int)Math.Round(dstH * srcAspect);
-            var x = (dstW - w) / 2;
-            return new RawRect(x, 0, x + w, dstH);
-        }
-    }
-
-    /// <summary>
-    /// UI-thread composition tick. If the decoder thread has written a
-    /// fresh slot since last tick, bind it to D3DImage. WPF composition
-    /// samples the new surface on this same refresh.
-    /// </summary>
-    private void OnRendering(object? sender, EventArgs e)
-    {
-        if (!_d3dImage.IsFrontBufferAvailable)
-        {
-            return;
-        }
-
-        SharedTextureSlot? slot = null;
-        int slotToExpose;
-        lock (_renderLock)
-        {
-            if (_disposed || _pendingSlotIndex < 0)
-            {
-                return;
-            }
-            slotToExpose = _pendingSlotIndex;
-            _pendingSlotIndex = -1;
-            slot = _slots[slotToExpose];
-            if (slot is null)
-            {
-                return;
-            }
-
-            var paintStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            try
-            {
-                _d3dImage.Lock();
-                _d3dImage.SetBackBuffer(
-                    D3DResourceType.IDirect3DSurface9,
-                    slot.D3D9Surface.NativePointer);
-                _d3dImage.AddDirtyRect(new Int32Rect(0, 0, slot.Width, slot.Height));
-                _attachedSlotIndex = slotToExpose;
-                PresentSubmissionCount++;
-            }
-            catch (Exception ex)
-            {
-                VicoScreenShare.Client.Diagnostics.DebugLog.Write(
-                    $"[renderer] D3DImage expose threw: {ex.Message}");
-            }
-            finally
-            {
-                try { _d3dImage.Unlock(); } catch { }
-            }
-            var paintEnd = System.Diagnostics.Stopwatch.GetTimestamp();
-            LastPaintMs = (paintEnd - paintStart) * 1000.0
-                / System.Diagnostics.Stopwatch.Frequency;
-        }
+        _textureRing[slot] = _device!.CreateTexture2D(desc);
+        _ringSlotWidth[slot] = width;
+        _ringSlotHeight[slot] = height;
     }
 
     /// <summary>
     /// When the OS suspends GPU composition (lock screen, remote
     /// session, DWM restart) the D3DImage drops its front buffer. On
-    /// the recovery edge we re-attach the current slot; there's no
-    /// useful work to do on the loss edge.
+    /// the recovery edge we force a reattach of the slot.
     /// </summary>
     private void OnFrontBufferAvailableChanged(object? sender, DependencyPropertyChangedEventArgs e)
     {
@@ -883,12 +997,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
 
         lock (_renderLock)
         {
-            if (_disposed || _attachedSlotIndex < 0)
-            {
-                return;
-            }
-            var slot = _slots[_attachedSlotIndex];
-            if (slot is null)
+            if (_disposed || _slot is null)
             {
                 return;
             }
@@ -897,17 +1006,19 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                 _d3dImage.Lock();
                 _d3dImage.SetBackBuffer(
                     D3DResourceType.IDirect3DSurface9,
-                    slot.D3D9Surface.NativePointer);
-                _d3dImage.AddDirtyRect(new Int32Rect(0, 0, slot.Width, slot.Height));
+                    _slot.D3D9Surface.NativePointer);
+                _d3dImage.AddDirtyRect(new Int32Rect(0, 0, _slot.Width, _slot.Height));
+                _slotAttached = true;
             }
             catch (Exception ex)
             {
-                VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+                DebugLog.Write(
                     $"[renderer] front-buffer reattach threw: {ex.Message}");
+                _slotAttached = false;
             }
             finally
             {
-                try { _d3dImage.Unlock(); } catch { }
+                try { _d3dImage.Unlock(); } catch (Exception) { }
             }
         }
     }
