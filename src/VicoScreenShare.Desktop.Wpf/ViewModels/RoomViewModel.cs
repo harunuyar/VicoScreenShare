@@ -633,8 +633,13 @@ public sealed partial class RoomViewModel : ViewModelBase
         // level so a quiet room stays quiet when a new publisher joins.
         // Tile-local changes propagate back to _lastTileVolume /
         // _lastTileMuted via PropertyChanged below.
+        // The PeerViewModel is forwarded so the tile can observe
+        // signaling-level liveness (peer.IsConnected) for its
+        // Reconnecting overlay, distinct from the WebRTC transport state.
+        var peer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
         var tile = new PublisherTileViewModel(
             session, displayName, nominalFps, _navigation.UiDispatcher,
+            peer: peer,
             initialVolume: _lastTileVolume,
             initialMuted: _lastTileMuted);
         tile.PropertyChanged += OnPublisherTileAudioChanged;

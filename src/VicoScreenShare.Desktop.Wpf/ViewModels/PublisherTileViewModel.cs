@@ -1,8 +1,8 @@
 namespace VicoScreenShare.Desktop.App.ViewModels;
 
 using System;
+using System.ComponentModel;
 using System.Threading.Tasks;
-using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using VicoScreenShare.Client.Media;
@@ -12,30 +12,31 @@ using VicoScreenShare.Desktop.App.Services;
 
 /// <summary>
 /// One tile in the Room's publisher grid. Wraps a <see cref="SubscriberSession"/>
-/// (the per-publisher RecvOnly WebRTC PC) and owns its own stall state machine +
-/// stats counters, so N publisher tiles don't share state and one stalling
-/// peer can't confuse another peer's tile.
+/// (the per-publisher RecvOnly WebRTC PC) and owns its own per-tile state.
 ///
-/// Stall state machine (same semantics as the pre-multi-publisher single tile):
+/// Tile state is driven by the transport layer, NOT by frame arrival. A
+/// publisher legitimately stops sending video when its captured content
+/// doesn't change (a still editor, a paused video) — the receiver must keep
+/// painting the last decoded frame indefinitely while the connection is
+/// healthy. The tile flips into a non-Live state only when:
 /// <list type="bullet">
-/// <item><b>Empty</b> — no frames yet. Tile shows "Waiting for frames…".</item>
-/// <item><b>Active</b> — frames flowing. Render normally.</item>
-/// <item><b>Paused</b> — no frames for <see cref="PauseAfter"/>. Freeze on last frame, badge.</item>
-/// <item><b>Idle</b> — no frames for <see cref="PauseAfter"/>+<see cref="IdleAfter"/>. Go back to Empty.</item>
+/// <item>ICE goes <c>disconnected</c> → <see cref="IsReconnecting"/> (transient).</item>
+/// <item>The server signals the publisher's WebSocket dropped (<see cref="PeerViewModel.IsConnected"/>=false) → <see cref="IsReconnecting"/>.</item>
+/// <item>ICE goes <c>failed</c> or <c>closed</c> → <see cref="IsLost"/> (terminal). The tile is normally unmounted by <c>RoomViewModel</c> on <c>PeerLeft</c> first; this is the fallback when ICE dies before signaling.</item>
 /// </list>
 /// </summary>
 public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDisposable
 {
-    private static readonly TimeSpan PauseAfter = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan IdleAfter = TimeSpan.FromSeconds(5);
-
     private readonly SubscriberSession _session;
     private readonly IUiDispatcher _uiDispatcher;
-    private readonly DispatcherTimer _staleTimer;
+    private readonly PeerViewModel? _peer;
     private readonly FrameArrivedHandler _frameHandler;
     private readonly TextureArrivedHandler _textureHandler;
+    private readonly Action _onDisconnected;
+    private readonly Action _onReconnected;
+    private readonly Action _onClosed;
+    private readonly PropertyChangedEventHandler? _onPeerPropertyChanged;
 
-    private DateTime _lastFrameUtc = DateTime.MinValue;
     private long _statsPrevFrames;
     private long _statsPrevBytes;
     private DateTime _statsPrevTickUtc = DateTime.MinValue;
@@ -46,11 +47,13 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
         string displayName,
         int nominalFrameRate,
         IUiDispatcher uiDispatcher,
+        PeerViewModel? peer,
         double initialVolume = 1.0,
         bool initialMuted = false)
     {
         _session = session;
         _uiDispatcher = uiDispatcher ?? throw new ArgumentNullException(nameof(uiDispatcher));
+        _peer = peer;
         _displayName = displayName;
         _nominalFrameRate = nominalFrameRate > 0 ? nominalFrameRate : 60;
         _volume = Math.Clamp(initialVolume, 0.0, 1.0);
@@ -60,6 +63,31 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
         _textureHandler = OnTextureArrived;
         _session.Receiver.FrameArrived += _frameHandler;
         _session.Receiver.TextureArrived += _textureHandler;
+
+        // Transport-state events from SIPSorcery's RTCPeerConnection,
+        // surfaced through StreamReceiver. ICE 'disconnected' is transient
+        // (recoverable); 'failed'/'closed' is terminal.
+        _onDisconnected = () => _uiDispatcher.Post(() => RecomputeReconnecting(transportDisconnected: true));
+        _onReconnected = () => _uiDispatcher.Post(() => RecomputeReconnecting(transportDisconnected: false));
+        _onClosed = () => _uiDispatcher.Post(() => IsLost = true);
+        _session.Receiver.Disconnected += _onDisconnected;
+        _session.Receiver.Reconnected += _onReconnected;
+        _session.Receiver.Closed += _onClosed;
+
+        // Signaling-level liveness: the server tells us when the publisher's
+        // WebSocket dropped (grace window before PeerLeft). Already mirrored
+        // onto PeerViewModel.IsConnected by RoomViewModel — we just observe.
+        if (_peer is not null)
+        {
+            _onPeerPropertyChanged = (_, args) =>
+            {
+                if (args.PropertyName == nameof(PeerViewModel.IsConnected))
+                {
+                    _uiDispatcher.Post(() => RecomputeReconnecting(transportDisconnected: _transportDisconnected));
+                }
+            };
+            _peer.PropertyChanged += _onPeerPropertyChanged;
+        }
 
         // Propagate the initial volume/mute into the audio receiver so
         // the first decoded frame already plays at the right level. A
@@ -71,20 +99,6 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
             audio.Volume = _volume;
             audio.IsMuted = _isMuted;
         }
-
-        // DispatcherTimer needs a WPF Dispatcher instance — WpfUiDispatcher
-        // is the single place that owns one, so reach in there for the
-        // timer constructor. Every other dispatcher concern in this VM
-        // goes through IUiDispatcher, independent of WPF specifics.
-        var wpfDispatcher = (uiDispatcher as WpfUiDispatcher)?.Dispatcher
-            ?? throw new InvalidOperationException(
-                "PublisherTileViewModel requires a WpfUiDispatcher to construct its DispatcherTimer.");
-        _staleTimer = new DispatcherTimer(DispatcherPriority.Background, wpfDispatcher)
-        {
-            Interval = TimeSpan.FromMilliseconds(500),
-        };
-        _staleTimer.Tick += (_, _) => OnStaleTick();
-        _staleTimer.Start();
     }
 
     public Guid PublisherPeerId => _session.PublisherPeerId;
@@ -104,15 +118,26 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
 
     /// <summary>
     /// True once at least one frame has decoded. Before this, the tile shows a
-    /// "Connecting…" placeholder instead of a black rectangle.
+    /// "Connecting…" placeholder instead of a black rectangle. Once true, it
+    /// stays true for the lifetime of the tile — the renderer keeps painting
+    /// the last decoded frame regardless of new arrivals.
     /// </summary>
     [ObservableProperty] private bool _hasFirstFrame;
 
     /// <summary>
-    /// True when frames have stopped but we haven't given up yet. Tile freezes on
-    /// the last frame and overlays a Paused badge.
+    /// Transient connectivity blip — ICE disconnected or the publisher's
+    /// WebSocket is in its server-side grace window. Last frame stays
+    /// painted; UI overlays a "Reconnecting…" badge.
     /// </summary>
-    [ObservableProperty] private bool _isPaused;
+    [ObservableProperty] private bool _isReconnecting;
+
+    /// <summary>
+    /// Terminal connection failure — ICE went <c>failed</c> or <c>closed</c>
+    /// without a graceful <c>PeerLeft</c>. Last frame stays painted; UI
+    /// overlays a "Connection lost" badge. RoomViewModel typically unmounts
+    /// the tile shortly after via <c>PeerLeft</c>.
+    /// </summary>
+    [ObservableProperty] private bool _isLost;
 
     /// <summary>Stats line for this tile's incoming stream. Updated on each Tick().</summary>
     [ObservableProperty] private string _stats = "—";
@@ -164,6 +189,8 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
     /// </summary>
     [ObservableProperty] private string? _renderStatsLine;
 
+    private bool _transportDisconnected;
+
     private void OnFrameArrived(in CaptureFrameData frame) => NotifyFrameObserved();
 
     private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
@@ -171,42 +198,32 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
 
     private void NotifyFrameObserved()
     {
-        _lastFrameUtc = DateTime.UtcNow;
-
-        // Fast path — already Active, nothing to flip.
-        if (HasFirstFrame && !IsPaused)
+        // Fast path — already past first frame, nothing to flip.
+        if (HasFirstFrame)
         {
             return;
         }
 
-        _uiDispatcher.Post(EnterActive);
+        _uiDispatcher.Post(() => HasFirstFrame = true);
     }
 
-    private void EnterActive()
+    /// <summary>
+    /// Combines the two transient signals (ICE disconnected, signaling-level
+    /// peer.IsConnected=false) into the single <see cref="IsReconnecting"/>
+    /// flag. Either being unhealthy shows the overlay; both must clear for
+    /// the overlay to go away. <see cref="IsLost"/> takes priority — once
+    /// terminal, we no longer flip back.
+    /// </summary>
+    private void RecomputeReconnecting(bool transportDisconnected)
     {
-        HasFirstFrame = true;
-        IsPaused = false;
-    }
-
-    private void OnStaleTick()
-    {
-        if (_lastFrameUtc == DateTime.MinValue)
+        _transportDisconnected = transportDisconnected;
+        if (IsLost)
         {
             return;
         }
 
-        var gap = DateTime.UtcNow - _lastFrameUtc;
-        if (HasFirstFrame && !IsPaused && gap >= PauseAfter)
-        {
-            IsPaused = true;
-            return;
-        }
-        if (IsPaused && gap >= PauseAfter + IdleAfter)
-        {
-            // Give up. Tile goes back to "Connecting…" until frames resume.
-            IsPaused = false;
-            HasFirstFrame = false;
-        }
+        var signalingDown = _peer is not null && !_peer.IsConnected;
+        IsReconnecting = transportDisconnected || signalingDown;
     }
 
     /// <summary>
@@ -269,9 +286,15 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
 
         _disposed = true;
 
-        _staleTimer.Stop();
         try { _session.Receiver.FrameArrived -= _frameHandler; } catch { }
         try { _session.Receiver.TextureArrived -= _textureHandler; } catch { }
+        try { _session.Receiver.Disconnected -= _onDisconnected; } catch { }
+        try { _session.Receiver.Reconnected -= _onReconnected; } catch { }
+        try { _session.Receiver.Closed -= _onClosed; } catch { }
+        if (_peer is not null && _onPeerPropertyChanged is not null)
+        {
+            try { _peer.PropertyChanged -= _onPeerPropertyChanged; } catch { }
+        }
 
         try { await _session.DisposeAsync().ConfigureAwait(false); } catch { }
     }

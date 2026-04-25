@@ -82,16 +82,36 @@
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                Visibility="{Binding HasFirstFrame, Converter={StaticResource InvertBoolToVisibility}}" />
 
-                    <!-- Paused overlay — stalled stream, last frame frozen. -->
+                    <!-- Reconnecting overlay — transient: ICE went disconnected,
+                         or the publisher's WebSocket is in its server-side grace
+                         window. Last decoded frame stays painted underneath. -->
                     <Grid Background="#80000000"
-                          Visibility="{Binding IsPaused, Converter={StaticResource BoolToVisibility}}"
+                          Visibility="{Binding IsReconnecting, Converter={StaticResource BoolToVisibility}}"
                           IsHitTestVisible="False">
                         <Border HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Background="#CC1E1E1E" CornerRadius="14" Padding="16,8">
                             <StackPanel Orientation="Horizontal">
-                                <ui:SymbolIcon Symbol="Pause24" FontSize="16" Foreground="White"
+                                <ui:SymbolIcon Symbol="ArrowSync24" FontSize="16" Foreground="White"
                                                VerticalAlignment="Center" />
-                                <TextBlock Text="Paused" Foreground="White"
+                                <TextBlock Text="Reconnecting…" Foreground="White"
+                                           FontWeight="SemiBold" FontSize="13"
+                                           VerticalAlignment="Center" Margin="8,0,0,0" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <!-- Connection lost overlay — terminal: ICE failed/closed
+                         without a graceful PeerLeft. Tile is normally unmounted
+                         shortly after by RoomViewModel; this is the fallback. -->
+                    <Grid Background="#80000000"
+                          Visibility="{Binding IsLost, Converter={StaticResource BoolToVisibility}}"
+                          IsHitTestVisible="False">
+                        <Border HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Background="#CC1E1E1E" CornerRadius="14" Padding="16,8">
+                            <StackPanel Orientation="Horizontal">
+                                <ui:SymbolIcon Symbol="PlugDisconnected24" FontSize="16" Foreground="White"
+                                               VerticalAlignment="Center" />
+                                <TextBlock Text="Connection lost" Foreground="White"
                                            FontWeight="SemiBold" FontSize="13"
                                            VerticalAlignment="Center" Margin="8,0,0,0" />
                             </StackPanel>

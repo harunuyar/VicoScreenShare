@@ -178,7 +178,26 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         remove => FrameArrived -= value;
     }
 
+    /// <summary>
+    /// Terminal state — <see cref="RTCPeerConnectionState.closed"/> or
+    /// <see cref="RTCPeerConnectionState.failed"/>. The peer connection
+    /// will not recover; callers should tear the receiver down.
+    /// </summary>
     public event Action? Closed;
+
+    /// <summary>
+    /// Transient state — <see cref="RTCPeerConnectionState.disconnected"/>.
+    /// ICE has stopped exchanging keepalives but the connection may still
+    /// recover. Pairs with <see cref="Reconnected"/>.
+    /// </summary>
+    public event Action? Disconnected;
+
+    /// <summary>
+    /// Fires when ICE returns to <see cref="RTCPeerConnectionState.connected"/>.
+    /// Lets callers clear any "Reconnecting…" UI shown after a previous
+    /// <see cref="Disconnected"/>.
+    /// </summary>
+    public event Action? Reconnected;
 
     public System.Threading.Tasks.Task StartAsync()
     {
@@ -374,11 +393,18 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
 
     private void OnConnectionStateChange(RTCPeerConnectionState state)
     {
-        if (state is RTCPeerConnectionState.closed
-                  or RTCPeerConnectionState.failed
-                  or RTCPeerConnectionState.disconnected)
+        switch (state)
         {
-            Closed?.Invoke();
+            case RTCPeerConnectionState.disconnected:
+                Disconnected?.Invoke();
+                break;
+            case RTCPeerConnectionState.connected:
+                Reconnected?.Invoke();
+                break;
+            case RTCPeerConnectionState.closed:
+            case RTCPeerConnectionState.failed:
+                Closed?.Invoke();
+                break;
         }
     }
 
