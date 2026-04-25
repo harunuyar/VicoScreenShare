@@ -58,6 +58,13 @@ public sealed partial class SettingsViewModel : ViewModelBase
         // a couple of bandwidth-saving low values for slow links.
         FrameRateOptions = new[] { 5, 15, 24, 30, 48, 60, 72, 90, 120, 144, 165, 240 };
 
+        // Send-pacer rate cap as a multiplier on the encoder's
+        // target bitrate. ×1 = pace at exactly the encoder's rate
+        // (smoothest, highest one-time keyframe latency). Higher
+        // multipliers shorten the keyframe-burst transit at the
+        // cost of letting more of it onto the wire at once.
+        SendPacingMultiplierOptions = new[] { 1, 2, 3, 4, 5 };
+
         // Presets named "widthP@fps" — unambiguous and matches how OBS /
         // Twitch / YouTube display quality options, which is what users
         // already know. Bitrates are H.264 screen-content targets roughly
@@ -102,7 +109,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 240);
         _enableAdaptiveBitrate = _settings.Video.EnableAdaptiveBitrate;
         _enableSendPacing = _settings.Video.EnableSendPacing;
-        _sendPacingMaxBitrateMbps = Math.Clamp(_settings.Video.SendPacingMaxBitrateMbps, 0, 1000);
+        _sendPacingBitrateMultiplier = Math.Clamp(_settings.Video.SendPacingBitrateMultiplier, 1, 5);
 
         // Audio settings. Bitrate combo is fixed-set so the UI stays
         // simple; people who want to experiment with 160 kbps Opus can
@@ -142,6 +149,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     public IReadOnlyList<QualityPreset> QualityPresets { get; }
     public IReadOnlyList<CodecOption> CodecOptions { get; }
     public IReadOnlyList<int> FrameRateOptions { get; }
+    public IReadOnlyList<int> SendPacingMultiplierOptions { get; }
 
     private int SnapToFrameRateOption(int requested)
     {
@@ -190,7 +198,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
     private bool _enableSendPacing;
 
     [ObservableProperty]
-    private int _sendPacingMaxBitrateMbps;
+    private int _sendPacingBitrateMultiplier;
 
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
@@ -256,7 +264,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.ReceiveBufferFrames = ReceiveBufferFrames;
         _settings.Video.EnableAdaptiveBitrate = EnableAdaptiveBitrate;
         _settings.Video.EnableSendPacing = EnableSendPacing;
-        _settings.Video.SendPacingMaxBitrateMbps = Math.Clamp(SendPacingMaxBitrateMbps, 0, 1000);
+        _settings.Video.SendPacingBitrateMultiplier = Math.Clamp(SendPacingBitrateMultiplier, 1, 5);
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;

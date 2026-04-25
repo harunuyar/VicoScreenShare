@@ -198,7 +198,11 @@ public sealed class LoopbackMediaE2ETests
                 displayName: "Alice",
                 iceServers: null,
                 audioDecoderFactory: codecs,
-                audioRenderer: fakeRenderer);
+                audioRenderer: fakeRenderer,
+                // Audio-only loopback test — there's no video renderer
+                // to publish the MediaClock anchor, so disable sync
+                // gating or audio piles up forever.
+                enableAvSync: false);
             _ = subscriber.AcceptOfferAsync(offer.Sdp);
             subscriberReady.TrySetResult(subscriber);
         };

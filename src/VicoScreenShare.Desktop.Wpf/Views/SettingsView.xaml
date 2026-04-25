@@ -264,16 +264,15 @@
                         <StackPanel Margin="0,12,0,0"
                                     Visibility="{Binding EnableSendPacing, Converter={StaticResource BoolToVisibility}}">
                             <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="Pace rate cap (Mbps)" Style="{StaticResource FieldLabel}" />
+                                <TextBlock Text="Pace rate" Style="{StaticResource FieldLabel}" />
                                 <ui:SymbolIcon Style="{StaticResource InfoIcon}"
-                                               ToolTip="0 means the pacer follows your encoder's target bitrate (recommended) — turns the encoder's bursty output into a steady stream at the same average rate. Set a non-zero value to cap the wire bitrate below the encoder's target — useful if you know a viewer's downlink is slower than your share's bitrate. Range 0 – 1000.&#10;&#10;Applies on your next share." />
+                                               ToolTip="Multiplier on your encoder's target bitrate. ×1 paces wire packets at exactly the encoder's rate — smoothest output, longest one-time keyframe latency. Higher multipliers let the pacer release packets faster, shortening the keyframe transit at the cost of larger wire bursts.&#10;&#10;Applies on your next share." />
                             </StackPanel>
-                            <ui:NumberBox Value="{Binding SendPacingMaxBitrateMbps, Mode=TwoWay}"
-                                          Minimum="0"
-                                          Maximum="1000"
-                                          SpinButtonPlacementMode="Inline"
-                                          Margin="0,4,0,0"
-                                          HorizontalAlignment="Stretch" />
+                            <ComboBox ItemsSource="{Binding SendPacingMultiplierOptions}"
+                                      SelectedItem="{Binding SendPacingBitrateMultiplier}"
+                                      ItemStringFormat="×{0}"
+                                      HorizontalAlignment="Stretch"
+                                      Margin="0,4,0,0" />
                         </StackPanel>
                     </StackPanel>
                 </ui:Card>

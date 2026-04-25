@@ -966,21 +966,19 @@ public sealed partial class RoomViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Resolve the pace bitrate for a given encoder bitrate. When
-    /// <see cref="VideoSettings.SendPacingMaxBitrateMbps"/> is non-zero,
-    /// it caps the pacer regardless of encoder rate (useful for staying
-    /// safely under a known-slow viewer's downlink). When zero (the
-    /// default), the pacer follows the encoder's current target rate so
-    /// the wire pace matches the mean rate the receiver expects.
+    /// Resolve the pace bitrate for a given encoder bitrate. The
+    /// pacer's wire-rate cap is <c>encoder × multiplier</c> where
+    /// the multiplier is read from
+    /// <see cref="VideoSettings.SendPacingBitrateMultiplier"/>. ×1
+    /// (the default) means "match the encoder's target rate" — the
+    /// most aggressive smoothing, highest one-time keyframe latency.
+    /// Higher multipliers let the pacer release packets faster,
+    /// reducing keyframe latency at the cost of larger wire bursts.
     /// </summary>
     private static int ResolvePacingBitrate(VideoSettings settings, int encoderBps)
     {
-        var override_ = settings.SendPacingMaxBitrateMbps;
-        if (override_ > 0)
-        {
-            return override_ * 1_000_000;
-        }
-        return Math.Max(500_000, encoderBps);
+        var multiplier = Math.Clamp(settings.SendPacingBitrateMultiplier, 1, 5);
+        return Math.Max(500_000, encoderBps * multiplier);
     }
 
     /// <summary>

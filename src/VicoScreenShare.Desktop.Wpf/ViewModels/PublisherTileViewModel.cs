@@ -274,6 +274,24 @@ public sealed partial class PublisherTileViewModel : ObservableObject, IAsyncDis
         };
 
         var body = core + health;
+
+        // A/V sync line: only rendered once the MediaClock is locked
+        // (publisher SR + anchor latched) AND the tile actually has
+        // an AudioReceiver. Positive offset = audio plays late vs
+        // the wall clock target (we skip samples to catch up);
+        // negative = audio is early (we silence-pad). Steady state
+        // should be |offset| < 30 ms (the drift threshold).
+        var audio = _session.AudioReceiver;
+        if (audio is not null)
+        {
+            var offsetMicros = audio.LastOffsetMicros;
+            if (offsetMicros != 0 || audio.SamplesPadded > 0 || audio.SamplesSkipped > 0)
+            {
+                var offsetMs = offsetMicros / 1000.0;
+                body += $"\nav-sync: {offsetMs:+0.0;-0.0;0.0} ms";
+            }
+        }
+
         Stats = string.IsNullOrEmpty(RenderStatsLine) ? body : body + "\n" + RenderStatsLine;
     }
 

@@ -31,6 +31,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="VicoScreenShare.Tests" />
     <InternalsVisibleTo Include="VicoScreenShare.Desktop.WinUI" />
+    <InternalsVisibleTo Include="VicoScreenShare.MediaHarness" />
   </ItemGroup>
 
 </Project>

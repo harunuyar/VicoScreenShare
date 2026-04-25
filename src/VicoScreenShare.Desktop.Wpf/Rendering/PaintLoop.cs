@@ -42,6 +42,7 @@ public sealed class PaintLoop : IDisposable
 
     private readonly TimestampedFrameQueue _queue;
     private readonly PaintCallback _paint;
+    private MediaClock? _mediaClock;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cts = new();
     private readonly AutoResetEvent _wake = new(false);
@@ -59,6 +60,25 @@ public sealed class PaintLoop : IDisposable
             Name = "PaintLoop",
             Priority = ThreadPriority.AboveNormal,
         };
+    }
+
+    /// <summary>
+    /// Attach a shared <see cref="MediaClock"/> for A/V sync. The
+    /// loop latches the clock's anchor at the moment of every
+    /// (re-)anchor — first paint and any drift-induced re-anchor —
+    /// so audio playout always knows the wall time of the video
+    /// stream's *current* schedule, no matter what the playout
+    /// buffer depth is or how long the publisher's pacer / network
+    /// jitter delays a frame.
+    ///
+    /// Settable rather than ctor-bound because the renderer creates
+    /// PaintLoop before its <c>Receiver</c> dependency property is
+    /// bound; the receiver carries the per-session MediaClock and
+    /// we attach it once the receiver is known.
+    /// </summary>
+    public void SetMediaClock(MediaClock? mediaClock)
+    {
+        _mediaClock = mediaClock;
     }
 
     public void Start() => _thread.Start();
@@ -91,6 +111,15 @@ public sealed class PaintLoop : IDisposable
             var haveAnchor = false;
             long anchorWallTicks = 0;
             TimeSpan anchorPts = default;
+            // Tracks whether we've successfully pushed an anchor into
+            // the shared MediaClock yet. Decoupled from haveAnchor
+            // because PaintLoop's anchor is set on first paint, but
+            // the MediaClock anchor requires the video Sender Report
+            // to be present so it can translate the per-stream
+            // content time into the publisher NTP domain. SR can
+            // arrive seconds after first paint — we retry every
+            // paint until it lands.
+            var avSyncAnchored = false;
 
             // Drift threshold for the catch-up guard. 100 ms is ~6 frames
             // at 60 fps — enough headroom for normal PTS jitter but
@@ -139,6 +168,19 @@ public sealed class PaintLoop : IDisposable
                         StopwatchTicksFromTimespanTicks(ptsOffset);
                 }
 
+                // Push the current PaintLoop anchor into the shared
+                // MediaClock. Retried every paint until SR arrives —
+                // typically lands seconds AFTER first paint, well
+                // after PaintLoop has its own anchor. Translate the
+                // CURRENT frame's content time into the wall time
+                // PaintLoop is about to paint at, so audio sees the
+                // SAME (wall, contentTime) pair PaintLoop uses for
+                // video scheduling.
+                if (!avSyncAnchored && _mediaClock is not null)
+                {
+                    avSyncAnchored = TryPublishAnchor(current.Timestamp, scheduledWallTicks);
+                }
+
                 // 3. Drift guard + latency catch-up. If the schedule
                 //    drifted behind the wall clock by more than a small
                 //    threshold, skip ahead in the queue to near-latest
@@ -168,6 +210,17 @@ public sealed class PaintLoop : IDisposable
                         anchorWallTicks = nowTicks;
                         anchorPts = current.Timestamp;
                         scheduledWallTicks = nowTicks;
+                        // Re-anchor the shared MediaClock too. Audio's
+                        // playout follows wherever video re-anchors so
+                        // a paused/resumed source or a long GC keeps
+                        // the streams aligned. Idempotent if SR isn't
+                        // there yet — the per-paint retry above will
+                        // pick it up once it arrives.
+                        if (_mediaClock is not null)
+                        {
+                            avSyncAnchored = TryPublishAnchor(current.Timestamp, anchorWallTicks)
+                                || avSyncAnchored;
+                        }
                     }
                 }
 
@@ -238,5 +291,34 @@ public sealed class PaintLoop : IDisposable
     private static long StopwatchTicksFromTimespanTicks(long timespanTicks)
     {
         return (long)(timespanTicks * (Stopwatch.Frequency / 10_000_000.0));
+    }
+
+    /// <summary>
+    /// Push the freshly-set <c>(anchorPts, anchorWall)</c> pair into
+    /// the shared <see cref="MediaClock"/>. Returns <c>true</c> when
+    /// the clock latched, <c>false</c> when the video Sender Report
+    /// hasn't arrived yet — caller retries on the next paint until
+    /// the SR lands. <see cref="MediaClock"/> translates the
+    /// per-stream content time through the video SR to publisher NTP
+    /// and uses that as its anchor; audio queries the same clock and
+    /// lands on the same wall-clock line. Returns false when the
+    /// session has no MediaClock (self-preview, harness) so caller
+    /// stops retrying.
+    /// </summary>
+    private bool TryPublishAnchor(TimeSpan contentTime, long localStopwatchTicks)
+    {
+        if (_mediaClock is null)
+        {
+            return false;
+        }
+        try
+        {
+            return _mediaClock.SetVideoAnchorFromContentTime(contentTime, localStopwatchTicks);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[paint] TryPublishAnchor threw: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
     }
 }

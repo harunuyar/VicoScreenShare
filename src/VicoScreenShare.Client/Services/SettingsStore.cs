@@ -128,7 +128,7 @@ public sealed class SettingsStore
         public bool EnableAdaptiveBitrate { get; set; } = true;
         public int MinAdaptiveBitrate { get; set; } = 500_000;
         public bool EnableSendPacing { get; set; } = false;
-        public int SendPacingMaxBitrateMbps { get; set; } = 0;
+        public int SendPacingBitrateMultiplier { get; set; } = 1;
 
         // Audio (shared-content loopback). Separate fields rather than a
         // nested object so existing settings.json files still load cleanly
@@ -172,7 +172,7 @@ public sealed class SettingsStore
             EnableAdaptiveBitrate = source.Video.EnableAdaptiveBitrate,
             MinAdaptiveBitrate = source.Video.MinAdaptiveBitrate,
             EnableSendPacing = source.Video.EnableSendPacing,
-            SendPacingMaxBitrateMbps = source.Video.SendPacingMaxBitrateMbps,
+            SendPacingBitrateMultiplier = source.Video.SendPacingBitrateMultiplier,
             AudioForceSystemAudio = source.Audio.ForceSystemAudio,
             AudioTargetBitrate = source.Audio.TargetBitrate,
             AudioStereo = source.Audio.Stereo,
@@ -197,7 +197,7 @@ public sealed class SettingsStore
                     EnableAdaptiveBitrate = EnableAdaptiveBitrate,
                     MinAdaptiveBitrate = MinAdaptiveBitrate > 0 && MinAdaptiveBitrate <= 50_000_000 ? MinAdaptiveBitrate : 500_000,
                     EnableSendPacing = EnableSendPacing,
-                    SendPacingMaxBitrateMbps = SendPacingMaxBitrateMbps >= 0 && SendPacingMaxBitrateMbps <= 1000 ? SendPacingMaxBitrateMbps : 0,
+                    SendPacingBitrateMultiplier = SendPacingBitrateMultiplier >= 1 && SendPacingBitrateMultiplier <= 5 ? SendPacingBitrateMultiplier : 1,
                 },
                 Audio = new AudioSettings
                 {

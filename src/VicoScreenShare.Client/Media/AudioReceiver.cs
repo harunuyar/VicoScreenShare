@@ -2,6 +2,7 @@ namespace VicoScreenShare.Client.Media;
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,14 +37,24 @@ using VicoScreenShare.Client.Platform;
 /// </summary>
 public sealed class AudioReceiver : IAsyncDisposable
 {
-    // Jitter buffer depth in packets. 3 × 20 ms = 60 ms — about half a
-    // video frame's worth of latency, covering typical Wi-Fi reorder
-    // windows without meaningfully lagging the video track.
+    // Steady-state jitter buffer depth in packets. 3 × 20 ms = 60 ms
+    // is enough to cover typical Wi-Fi reorder windows once the
+    // stream is locked to video; we only drain once the buffer
+    // exceeds this depth.
     private const int JitterBufferMaxPackets = 3;
+
+    // Hard cap on the buffer overall. Pre-MediaClock-anchor we
+    // accumulate every audio frame so nothing is lost while video's
+    // playout buffer fills (largest reasonable setting: 240 frames
+    // at 60 fps = 4 s of pre-paint audio). 500 packets = 10 s of
+    // 20 ms Opus framing — comfortable for any user-visible buffer
+    // setting, hard-capped so a stuck stream can't OOM.
+    private const int JitterBufferHardCap = 500;
 
     private readonly RTCPeerConnection _pc;
     private readonly IAudioDecoderFactory _decoderFactory;
     private readonly IAudioRenderer _renderer;
+    private readonly MediaClock? _mediaClock;
     private readonly string _displayName;
     private readonly object _decodeLock = new();
     private readonly SortedList<uint, DecodedAudioFrame> _jitterBuffer = new(JitterBufferMaxPackets + 2);
@@ -51,10 +62,47 @@ public sealed class AudioReceiver : IAsyncDisposable
     private IAudioDecoder? _decoder;
     private uint _lastDrainedRtpTimestamp;
     private bool _hasDrained;
+    // Audio-SR fallback: when the video anchor latches but audio
+    // SR hasn't arrived yet (SIPSorcery's RTCP cadence is ~5 s,
+    // so this is the common case at session start), we synthesize
+    // a local audio anchor: the oldest queued audio packet at the
+    // moment of video anchor is treated as if its publisher capture
+    // time matches the video anchor's. From there audio plays at
+    // 48 kHz against the same wall clock the video render uses.
+    // Once a real audio SR arrives, MediaClock takes over and the
+    // fallback is retired — the two anchors agree to within a few
+    // ms because audio capture starts within ms of video capture
+    // on the publisher.
+    private bool _fallbackActive;
+    private uint _fallbackAnchorRtp;
+    private long _fallbackAnchorLocalTicks;
+    // Sync re-check throttle. Once the audio stream is locked to the
+    // video clock (within tolerance), we don't run the alignment
+    // logic again for SyncReCheckInterval. This avoids the
+    // micro-correction churn that produced the brief noise + silence
+    // glitches we used to hear: WASAPI is happy to play continuous
+    // audio at the device's nominal rate; the only times we MUST
+    // re-align are after big stalls (publisher pause, GC, network
+    // burst) which are rare.
+    private long _nextSyncCheckTicks;
+    private static readonly TimeSpan SyncReCheckInterval = TimeSpan.FromSeconds(5);
+    // |error| <= this is considered "in sync" — we just submit the
+    // frame as-is and skip alignment work.
+    private const long SyncToleranceMicros = 60_000; // 60 ms
+    private System.Threading.Timer? _pulseTimer;
+    private long _pulseLastReceived;
+    private long _pulseLastDecoded;
+    private long _pulseLastSubmitted;
+    private long _pulseLastDropped;
+    private long _pulseLastPadded;
+    private long _pulseLastSkipped;
     private long _packetsReceived;
     private long _framesDecoded;
     private long _framesSubmitted;
     private long _framesDropped;
+    private long _samplesPaddedTotal;
+    private long _samplesSkippedTotal;
+    private long _lastOffsetMicros;
     private int _state; // 0 = idle, 1 = running, 2 = disposed
 
     public AudioReceiver(
@@ -62,6 +110,16 @@ public sealed class AudioReceiver : IAsyncDisposable
         IAudioDecoderFactory decoderFactory,
         IAudioRenderer renderer,
         string displayName)
+        : this(pc, decoderFactory, renderer, displayName, mediaClock: null)
+    {
+    }
+
+    public AudioReceiver(
+        RTCPeerConnection pc,
+        IAudioDecoderFactory decoderFactory,
+        IAudioRenderer renderer,
+        string displayName,
+        MediaClock? mediaClock)
     {
         ArgumentNullException.ThrowIfNull(pc);
         ArgumentNullException.ThrowIfNull(decoderFactory);
@@ -70,6 +128,7 @@ public sealed class AudioReceiver : IAsyncDisposable
         _pc = pc;
         _decoderFactory = decoderFactory;
         _renderer = renderer;
+        _mediaClock = mediaClock;
         _displayName = displayName ?? string.Empty;
     }
 
@@ -89,6 +148,33 @@ public sealed class AudioReceiver : IAsyncDisposable
     /// already past the drain cursor, or jitter-buffer overflow drops.
     /// </summary>
     public long FramesDropped => Interlocked.Read(ref _framesDropped);
+
+    /// <summary>
+    /// Cumulative count of zero-PCM samples prepended by the
+    /// MediaClock-driven A/V sync alignment. Non-zero only on stream
+    /// start / re-anchor: once the first audio frame is aligned to
+    /// video's wall-clock schedule, subsequent frames flow without
+    /// padding.
+    /// </summary>
+    public long SamplesPadded => Interlocked.Read(ref _samplesPaddedTotal);
+
+    /// <summary>
+    /// Cumulative count of PCM samples discarded from the head of an
+    /// incoming frame because audio was running ahead of the
+    /// MediaClock-derived target wall-clock.
+    /// </summary>
+    public long SamplesSkipped => Interlocked.Read(ref _samplesSkippedTotal);
+
+    /// <summary>
+    /// Last observed offset between the audio frame's MediaClock
+    /// target wall-clock and the moment we actually submitted it,
+    /// in microseconds. Positive = audio is late (we played it late
+    /// or skipped some samples to catch up); negative = audio is
+    /// early (we silence-padded). Zero (or null) until both an audio
+    /// SR and the shared anchor are present. Drives the av-sync
+    /// stats line.
+    /// </summary>
+    public long LastOffsetMicros => Interlocked.Read(ref _lastOffsetMicros);
 
     /// <summary>
     /// When true, incoming audio RTP packets are dropped at the socket
@@ -146,6 +232,41 @@ public sealed class AudioReceiver : IAsyncDisposable
         await _renderer.StartAsync(_decoder.SampleRate, _decoder.Channels).ConfigureAwait(false);
 
         _pc.OnRtpPacketReceived += OnRtpPacketReceived;
+        _pulseTimer = new System.Threading.Timer(_ => EmitPulse(), null,
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+    }
+
+    private void EmitPulse()
+    {
+        if (_state != 1)
+        {
+            return;
+        }
+        var received = Interlocked.Read(ref _packetsReceived);
+        var decoded = Interlocked.Read(ref _framesDecoded);
+        var submitted = Interlocked.Read(ref _framesSubmitted);
+        var dropped = Interlocked.Read(ref _framesDropped);
+        var padded = Interlocked.Read(ref _samplesPaddedTotal);
+        var skipped = Interlocked.Read(ref _samplesSkippedTotal);
+        var offset = Interlocked.Read(ref _lastOffsetMicros);
+        var dRcv = received - _pulseLastReceived; _pulseLastReceived = received;
+        var dDec = decoded - _pulseLastDecoded; _pulseLastDecoded = decoded;
+        var dSub = submitted - _pulseLastSubmitted; _pulseLastSubmitted = submitted;
+        var dDrop = dropped - _pulseLastDropped; _pulseLastDropped = dropped;
+        var dPad = padded - _pulseLastPadded; _pulseLastPadded = padded;
+        var dSkip = skipped - _pulseLastSkipped; _pulseLastSkipped = skipped;
+        if (dRcv == 0 && dDec == 0 && dSub == 0 && dDrop == 0 && dPad == 0 && dSkip == 0)
+        {
+            return;
+        }
+        int qDepth;
+        lock (_decodeLock)
+        {
+            qDepth = _jitterBuffer.Count;
+        }
+        DebugLog.Write(
+            $"[audio-rx-pulse {_displayName}] 2s: rcvd=+{dRcv} dec=+{dDec} sub=+{dSub} drop=+{dDrop} "
+            + $"pad=+{dPad} skip=+{dSkip} q={qDepth} offsetMs={offset / 1000.0:F1}");
     }
 
     public async Task StopAsync()
@@ -155,6 +276,8 @@ public sealed class AudioReceiver : IAsyncDisposable
             return;
         }
         _pc.OnRtpPacketReceived -= OnRtpPacketReceived;
+        try { _pulseTimer?.Dispose(); } catch { }
+        _pulseTimer = null;
         await _renderer.StopAsync().ConfigureAwait(false);
     }
 
@@ -165,6 +288,8 @@ public sealed class AudioReceiver : IAsyncDisposable
             return;
         }
         try { _pc.OnRtpPacketReceived -= OnRtpPacketReceived; } catch { }
+        try { _pulseTimer?.Dispose(); } catch { }
+        _pulseTimer = null;
         // Take the decode lock before freeing the decoder so a racing
         // OnRtpPacketReceived callback can't feed bytes into a freed
         // native state. Managed Opus is safer than libvpx here, but the
@@ -248,11 +373,14 @@ public sealed class AudioReceiver : IAsyncDisposable
             }
             _jitterBuffer.Add(rtpTimestamp, decoded);
 
-            // Overflow: drop oldest so the buffer never grows past its
-            // bound. Prefer a single-frame audio glitch over allowing a
-            // sustained latency buildup that would permanently desync
-            // with video.
-            while (_jitterBuffer.Count > JitterBufferMaxPackets + 1)
+            // Overflow: hard-cap. Pre-anchor we hold every audio
+            // frame so we don't lose audio while video's playout
+            // buffer fills (the user's ReceiveBufferFrames may delay
+            // first paint by seconds). Once the anchor lands we
+            // drain at the steady-state cadence below. Drop oldest
+            // only when we exceed the absolute hard-cap — covers a
+            // permanently-stalled stream OOM.
+            while (_jitterBuffer.Count > JitterBufferHardCap)
             {
                 _jitterBuffer.RemoveAt(0);
                 Interlocked.Increment(ref _framesDropped);
@@ -270,30 +398,259 @@ public sealed class AudioReceiver : IAsyncDisposable
 
     private void DrainReadyFrames()
     {
-        DecodedAudioFrame? toSubmit;
-        lock (_decodeLock)
+        // Drain rule when the clock is locked: keep popping while
+        // the FRONT of the queue is past its wall-clock target by
+        // more than the tolerance — those frames are too late to
+        // play in sync, drop them silently here so SubmitAligned
+        // never sees them. As soon as the front frame's target is
+        // within the tolerance window, hand it to SubmitAligned.
+        // Stop when the front frame is too far in the future (the
+        // wait gate). This collapses the catchup phase into a
+        // single drain call — no more "drop one frame per arriving
+        // packet" stutter that produced the 5 s silent opening.
+        //
+        // Sessions without a MediaClock (tests, audio-only) keep
+        // the original count-based jitter rule.
+        var clock = _mediaClock;
+        const long readyToleranceMicros = 50_000; // 50 ms
+
+        if (clock is null)
         {
-            if (_jitterBuffer.Count <= JitterBufferMaxPackets)
+            // No-sync path: original behaviour — hold a 3-slot
+            // jitter window, drain on overflow.
+            while (true)
             {
-                return;
+                DecodedAudioFrame toSubmit;
+                lock (_decodeLock)
+                {
+                    if (_jitterBuffer.Count <= JitterBufferMaxPackets)
+                    {
+                        return;
+                    }
+                    var earliestKey = _jitterBuffer.Keys[0];
+                    toSubmit = _jitterBuffer.Values[0];
+                    _jitterBuffer.RemoveAt(0);
+                    _hasDrained = true;
+                    _lastDrainedRtpTimestamp = earliestKey;
+                }
+                try
+                {
+                    SubmitAligned(toSubmit);
+                    Interlocked.Increment(ref _framesSubmitted);
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Write($"[audio-rx {_displayName}] renderer submit threw: {ex.Message}");
+                }
             }
-            var key = _jitterBuffer.Keys[0];
-            toSubmit = _jitterBuffer.Values[0];
-            _jitterBuffer.RemoveAt(0);
-            _hasDrained = true;
-            _lastDrainedRtpTimestamp = key;
         }
 
-        try
+        // Sync path. We have a MediaClock; check whether MediaClock
+        // can already give us SR-based wall targets (precise path),
+        // and otherwise activate a fallback anchor as soon as
+        // PaintLoop has set the paint-anchor — that's the moment
+        // video starts on the screen, and we want audio to start
+        // there too. The fallback uses the oldest queued audio
+        // packet at the moment of paint as a proxy for "audio
+        // captured at the same publisher instant as the painted
+        // video frame" — accurate to within the audio/video
+        // capture-start skew on the publisher (typically tens of
+        // ms).
+        if (!_fallbackActive)
         {
-            _renderer.Submit(toSubmit.Value.Pcm, TimeSpan.FromTicks(
-                (long)toSubmit.Value.RtpTimestamp * TimeSpan.TicksPerMillisecond / 48));
-            Interlocked.Increment(ref _framesSubmitted);
+            var paint = clock.GetPaintAnchor();
+            if (paint is { } p)
+            {
+                lock (_decodeLock)
+                {
+                    if (_jitterBuffer.Count > 0)
+                    {
+                        _fallbackAnchorRtp = _jitterBuffer.Keys[0];
+                        _fallbackAnchorLocalTicks = p.LocalStopwatchTicks;
+                        _fallbackActive = true;
+                        DebugLog.Write(
+                            $"[audio-rx {_displayName}] fallback anchor active: rtpTs={_fallbackAnchorRtp} "
+                            + $"localAnchor={_fallbackAnchorLocalTicks} videoContent={p.VideoContentTime.TotalMilliseconds:F0}ms");
+                    }
+                }
+            }
         }
-        catch (Exception ex)
+
+        while (true)
         {
-            DebugLog.Write($"[audio-rx {_displayName}] renderer submit threw: {ex.Message}");
+            DecodedAudioFrame toSubmit;
+            lock (_decodeLock)
+            {
+                if (_jitterBuffer.Count == 0)
+                {
+                    return;
+                }
+                var earliestKey = _jitterBuffer.Keys[0];
+                var targetTicks = clock.AudioRtpToLocalWallTicks(earliestKey);
+                if (targetTicks is null && _fallbackActive)
+                {
+                    // Compute target from the fallback anchor.
+                    // delta in seconds = (rtpTs − fallback_rtp) / 48000.
+                    var deltaSamples = (long)(int)(earliestKey - _fallbackAnchorRtp);
+                    var deltaTicks = deltaSamples * Stopwatch.Frequency / 48_000L;
+                    targetTicks = _fallbackAnchorLocalTicks + deltaTicks;
+                }
+                if (targetTicks is null)
+                {
+                    // Pre-anchor — accumulate.
+                    return;
+                }
+                var nowTicks = Stopwatch.GetTimestamp();
+                var deltaMicros = (targetTicks.Value - nowTicks)
+                    * 1_000_000L / Stopwatch.Frequency;
+
+                if (deltaMicros > readyToleranceMicros)
+                {
+                    // Front is in the future — wait for time to
+                    // catch up. Next audio packet wakes us.
+                    return;
+                }
+
+                if (deltaMicros < -readyToleranceMicros)
+                {
+                    // Front is too late — drop it without going
+                    // through SubmitAligned, then check the next.
+                    // This is the catchup-burst path: a 5 s
+                    // backlog of frames whose targets were all in
+                    // the past becomes a single tight loop here,
+                    // not 5 s of one-drop-per-arriving-packet.
+                    Interlocked.Add(ref _samplesSkippedTotal, _jitterBuffer.Values[0].Samples);
+                    Interlocked.Increment(ref _framesDropped);
+                    _jitterBuffer.RemoveAt(0);
+                    _hasDrained = true;
+                    _lastDrainedRtpTimestamp = earliestKey;
+                    continue;
+                }
+
+                // Front is within ±50 ms of now — playable.
+                toSubmit = _jitterBuffer.Values[0];
+                _jitterBuffer.RemoveAt(0);
+                _hasDrained = true;
+                _lastDrainedRtpTimestamp = earliestKey;
+            }
+
+            try
+            {
+                SubmitAligned(toSubmit);
+                Interlocked.Increment(ref _framesSubmitted);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[audio-rx {_displayName}] renderer submit threw: {ex.Message}");
+            }
         }
+    }
+
+    /// <summary>
+    /// Push PCM into the renderer, aligned to the MediaClock-derived
+    /// target wall time when the anchor has latched.
+    ///
+    /// Strategy is deliberately simple to avoid the micro-correction
+    /// churn earlier iterations produced (brief noise + silence
+    /// glitches as we trimmed/padded every frame):
+    /// <list type="bullet">
+    /// <item>Sessions without a MediaClock or pre-anchor frames pass
+    /// through to the renderer immediately. The drain-time gate
+    /// already prevents pre-anchor frames from reaching here.</item>
+    /// <item>Right after the anchor (or on a periodic re-check), we
+    /// look at the front of the queue: if the front's target is in
+    /// the past beyond the tolerance, drop frames until the front is
+    /// no longer late; if the front's target is in the future beyond
+    /// the tolerance, the drain-time gate is already holding it.
+    /// Either way the very next submit lands within tolerance.</item>
+    /// <item>Once aligned, submit pcm as-is for the next
+    /// <see cref="SyncReCheckInterval"/>. The publisher and receiver
+    /// audio device clocks are both nominally 48 kHz; tens-of-ppm
+    /// drift over 5 s is &lt; 1 ms — well below the tolerance — so
+    /// re-alignment isn't needed more often.</item>
+    /// </list>
+    /// </summary>
+    private void SubmitAligned(DecodedAudioFrame frame)
+    {
+        var pcm = frame.Pcm;
+        var pcmTimestamp = TimeSpan.FromTicks((long)frame.RtpTimestamp * TimeSpan.TicksPerMillisecond / 48);
+
+        if (_mediaClock is null)
+        {
+            _renderer.Submit(pcm, pcmTimestamp);
+            return;
+        }
+
+        var targetTicks = _mediaClock.AudioRtpToLocalWallTicks(frame.RtpTimestamp);
+        if (targetTicks is null && _fallbackActive)
+        {
+            var deltaSamples = (long)(int)(frame.RtpTimestamp - _fallbackAnchorRtp);
+            var deltaTicks = deltaSamples * Stopwatch.Frequency / 48_000L;
+            targetTicks = _fallbackAnchorLocalTicks + deltaTicks;
+        }
+        if (targetTicks is null)
+        {
+            _renderer.Submit(pcm, pcmTimestamp);
+            return;
+        }
+
+        var nowTicks = Stopwatch.GetTimestamp();
+        var offsetMicros = (nowTicks - targetTicks.Value) * 1_000_000L / Stopwatch.Frequency;
+        Interlocked.Exchange(ref _lastOffsetMicros, offsetMicros);
+
+        var inSyncWindow = nowTicks < _nextSyncCheckTicks;
+        var withinTolerance = offsetMicros >= -SyncToleranceMicros
+                           && offsetMicros <= SyncToleranceMicros;
+
+        if (inSyncWindow && withinTolerance)
+        {
+            // Steady-state: just play. No correction, no glitches.
+            _renderer.Submit(pcm, pcmTimestamp);
+            return;
+        }
+
+        // Either we're at a re-check tick OR we've drifted out of
+        // tolerance. Re-align now.
+        var sampleRate = frame.SampleRate > 0 ? frame.SampleRate : MediaClock.AudioRtpClockRate;
+        var channels = frame.Channels > 0 ? frame.Channels : 2;
+
+        if (offsetMicros > SyncToleranceMicros)
+        {
+            // Audio is late beyond tolerance. Drop this frame; drain
+            // will pop the next one until the front of the queue is
+            // close enough to "now" to play in sync.
+            Interlocked.Add(ref _samplesSkippedTotal, frame.Samples);
+            return;
+        }
+
+        if (offsetMicros < -SyncToleranceMicros)
+        {
+            // Audio is early beyond tolerance. Drain has already
+            // gated us until target was within readyTolerance of
+            // now, so being substantially early shouldn't normally
+            // happen — the drain gate's tolerance is wider than this
+            // tolerance only in rare cases (clock jump). Pad up to
+            // 500 ms so we land back on the line, then submit.
+            var aheadMicros = -offsetMicros;
+            var gapMicrosCapped = Math.Min(aheadMicros, 500_000L);
+            var silentFrames = (int)(gapMicrosCapped * sampleRate / 1_000_000L);
+            if (silentFrames > 0)
+            {
+                var silentInterleaved = new short[silentFrames * channels];
+                _renderer.Submit(silentInterleaved, pcmTimestamp);
+                Interlocked.Add(ref _samplesPaddedTotal, silentFrames);
+            }
+            _renderer.Submit(pcm, pcmTimestamp);
+            _nextSyncCheckTicks = nowTicks
+                + (long)(SyncReCheckInterval.TotalSeconds * Stopwatch.Frequency);
+            return;
+        }
+
+        // Within tolerance, just past a re-check tick: submit and
+        // schedule the next check.
+        _renderer.Submit(pcm, pcmTimestamp);
+        _nextSyncCheckTicks = nowTicks
+            + (long)(SyncReCheckInterval.TotalSeconds * Stopwatch.Frequency);
     }
 
     /// <summary>

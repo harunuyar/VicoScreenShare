@@ -4,8 +4,10 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Net;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
@@ -45,6 +47,15 @@ public sealed class SubscriberSession : IAsyncDisposable
     /// </summary>
     public AudioReceiver? AudioReceiver { get; }
 
+    /// <summary>
+    /// Per-publisher A/V sync clock when sync is enabled. Both
+    /// <see cref="Receiver"/> and <see cref="AudioReceiver"/>
+    /// reference the same instance so audio playout aligns to
+    /// video's effective wall-clock schedule. Null when the session
+    /// was constructed with <c>enableAvSync: false</c>.
+    /// </summary>
+    public MediaClock? MediaClock { get; }
+
     public RTCPeerConnection PeerConnection => _pc;
 
     public SubscriberSession(
@@ -52,7 +63,7 @@ public sealed class SubscriberSession : IAsyncDisposable
         Guid publisherPeerId,
         IVideoDecoderFactory decoderFactory,
         string displayName)
-        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers: null, audioDecoderFactory: null, audioRenderer: null)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers: null, audioDecoderFactory: null, audioRenderer: null, enableAvSync: true)
     {
     }
 
@@ -62,7 +73,7 @@ public sealed class SubscriberSession : IAsyncDisposable
         IVideoDecoderFactory decoderFactory,
         string displayName,
         IReadOnlyList<RTCIceServer>? iceServers)
-        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers, audioDecoderFactory: null, audioRenderer: null)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers, audioDecoderFactory: null, audioRenderer: null, enableAvSync: true)
     {
     }
 
@@ -74,6 +85,29 @@ public sealed class SubscriberSession : IAsyncDisposable
         IReadOnlyList<RTCIceServer>? iceServers,
         IAudioDecoderFactory? audioDecoderFactory,
         IAudioRenderer? audioRenderer)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers, audioDecoderFactory, audioRenderer, enableAvSync: true)
+    {
+    }
+
+    /// <summary>
+    /// Build a subscriber session with explicit control over the
+    /// MediaClock-based A/V sync. Set <paramref name="enableAvSync"/>
+    /// to <see langword="false"/> for sessions that won't have a
+    /// video stream attached (audio-only loopback, headless tests),
+    /// which would otherwise hold audio forever waiting for a video
+    /// paint that never comes. Production callers always pass
+    /// <see langword="true"/> — there is a real renderer attached
+    /// that will publish the anchor.
+    /// </summary>
+    public SubscriberSession(
+        SignalingClient signaling,
+        Guid publisherPeerId,
+        IVideoDecoderFactory decoderFactory,
+        string displayName,
+        IReadOnlyList<RTCIceServer>? iceServers,
+        IAudioDecoderFactory? audioDecoderFactory,
+        IAudioRenderer? audioRenderer,
+        bool enableAvSync)
     {
         _signaling = signaling;
         PublisherPeerId = publisherPeerId;
@@ -120,7 +154,15 @@ public sealed class SubscriberSession : IAsyncDisposable
         _pc.onicecandidate += OnLocalIceCandidate;
         _signaling.IceCandidateReceived += OnRemoteIceCandidate;
 
-        Receiver = new StreamReceiver(_pc, decoderFactory, displayName);
+        // Per-subscriber A/V sync clock. Owned here so both
+        // StreamReceiver and AudioReceiver hold the same instance —
+        // they latch and query through it to keep audio playout
+        // aligned with video's content-PTS pacer (PaintLoop).
+        // Disabled (null) for sessions that don't have a real video
+        // renderer to set the anchor (audio-only, tests).
+        MediaClock = enableAvSync ? new MediaClock(displayName) : null;
+
+        Receiver = new StreamReceiver(_pc, decoderFactory, displayName, MediaClock);
 
         // AudioReceiver is a sibling (not a layer inside StreamReceiver)
         // so the video receiver's bounded-channel / drop-to-IDR / GPU
@@ -131,7 +173,50 @@ public sealed class SubscriberSession : IAsyncDisposable
         // packets (StreamReceiver filters by mediaType == video).
         if (audioDecoderFactory is not null && audioRenderer is not null)
         {
-            AudioReceiver = new AudioReceiver(_pc, audioDecoderFactory, audioRenderer, displayName);
+            AudioReceiver = new AudioReceiver(_pc, audioDecoderFactory, audioRenderer, displayName, MediaClock);
+        }
+
+        // Route incoming RTCP Sender Reports into the shared media
+        // clock. SIPSorcery raises OnReceiveReport for every compound
+        // packet (RR or SR) on the matching media type; we only care
+        // about SRs because they carry the (NTP, RTP) pair we need
+        // for cross-stream timestamp translation.
+        if (MediaClock is not null)
+        {
+            _pc.OnReceiveReport += OnReceiveReport;
+        }
+    }
+
+    private void OnReceiveReport(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTCPCompoundPacket report)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        var sr = report?.SenderReport;
+        if (sr is null)
+        {
+            return;
+        }
+        var clock = MediaClock;
+        if (clock is null)
+        {
+            return;
+        }
+        try
+        {
+            if (mediaType == SDPMediaTypesEnum.audio)
+            {
+                clock.OnAudioSenderReport(sr.NtpTimestamp, sr.RtpTimestamp);
+            }
+            else if (mediaType == SDPMediaTypesEnum.video)
+            {
+                clock.OnVideoSenderReport(sr.NtpTimestamp, sr.RtpTimestamp);
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[subscriber] OnReceiveReport handler threw: {ex.Message}");
         }
     }
 
@@ -260,6 +345,7 @@ public sealed class SubscriberSession : IAsyncDisposable
 
         _signaling.IceCandidateReceived -= OnRemoteIceCandidate;
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }
+        try { _pc.OnReceiveReport -= OnReceiveReport; } catch { }
 
         try { await Receiver.DisposeAsync().ConfigureAwait(false); } catch { }
         if (AudioReceiver is not null)

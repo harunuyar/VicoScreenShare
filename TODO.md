@@ -12,11 +12,6 @@ Users can currently pick a resolution and a bitrate independently. Bad combinati
 
 ## Audio
 
-## Send path
-
-### Packet-level pacing
-Keyframe RTP packets still leave the socket in a tight burst. A frame-level pacer was attempted — it held back subsequent frames while the keyframe was "draining" — but the keyframe itself remained a single opaque `SendVideo` call (SIPSorcery's API packetizes and dumps to the socket atomically), so the actual wire burst was unchanged and the held-back frames just caused a visible lag-then-burst on the receiver. Real packet pacing requires either reaching into SIPSorcery's lower-level RTP API (`RTPSession.SendRtpRaw` or equivalent) or forking the library so we can interleave sleeps between the individual 1200-byte chunks of a keyframe. Gate this until we have time to audit what SIPSorcery actually exposes or accept the dependency change.
-
 ## Encoder backend
 
 ### Direct NVENC SDK path (bypass Media Foundation for NVIDIA)
@@ -29,7 +24,7 @@ On the most common hardware (NVIDIA GPUs) the `NVIDIA H.264 Encoder MFT` is the 
 
 The fix is the same one OBS, ffmpeg, and vMix use: call `NvEncodeAPI64.dll` directly. Wrap `NvEncodeAPICreateInstance`, manage `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`, configure `NV_ENC_RC_PARAMS` (where `vbvBufferSize`, `vbvInitialDelay`, and `intraRefreshPeriod` actually take effect), shuttle BGRA / NV12 frames in via `NvEncMapInputResource`, and pull encoded bitstreams out of `NvEncLockBitstream`. Roughly 1500–2500 lines of P/Invoke + session lifecycle + per-frame buffer marshalling, gated behind a runtime probe so non-NVIDIA users keep the MFT path.
 
-When this lands, re-add `bench-vbv` and `bench-intra-refresh` against the new NVENC encoder factory and wire the user-facing knobs back into Settings. Until then, NVENC users get neither knob, and the only available burst-prevention mechanism is application-level packet pacing (see "Send path → Packet-level pacing").
+When this lands, re-add `bench-vbv` and `bench-intra-refresh` against the new NVENC encoder factory and wire the user-facing knobs back into Settings. Until then, NVENC users get neither knob, and the only available burst-prevention mechanism is the send-side packet pacer (`PacingRtpSender`, exposed in Settings as "Smooth keyframe sends").
 
 ## Encoder quality
 

@@ -75,15 +75,27 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
     private readonly RtpSequenceStats _rtpStats = new();
     private uint _lastLoggedSsrc;
 
+    private readonly MediaClock? _mediaClock;
+
     public StreamReceiver(RTCPeerConnection pc, string displayName = "remote")
-        : this(pc, new VpxDecoderFactory(), displayName)
+        : this(pc, new VpxDecoderFactory(), displayName, mediaClock: null)
     {
     }
 
     public StreamReceiver(RTCPeerConnection pc, IVideoDecoderFactory decoderFactory, string displayName = "remote")
+        : this(pc, decoderFactory, displayName, mediaClock: null)
+    {
+    }
+
+    public StreamReceiver(
+        RTCPeerConnection pc,
+        IVideoDecoderFactory decoderFactory,
+        string displayName,
+        MediaClock? mediaClock)
     {
         _pc = pc;
         DisplayName = displayName;
+        _mediaClock = mediaClock;
         _decoder = decoderFactory.CreateDecoder();
         // Opt the decoder into GPU-resident output. Decoders that don't
         // support it (VPX, and MF decoders with no shared D3D device) use
@@ -92,6 +104,16 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         // per-frame BGRA readback + upload round-trip.
         _decoder.GpuOutputHandler = OnDecoderGpuFrame;
     }
+
+    /// <summary>
+    /// Shared A/V sync clock for this receiver's session, when the
+    /// owning <see cref="Services.SubscriberSession"/> built one.
+    /// The video renderer reads this through and latches the anchor
+    /// at the first-paint moment — that's what ties audio playout to
+    /// video's effective wall-clock schedule, regardless of any
+    /// buffering or delay between the network and the screen.
+    /// </summary>
+    public MediaClock? MediaClock => _mediaClock;
 
     public string DisplayName { get; }
 

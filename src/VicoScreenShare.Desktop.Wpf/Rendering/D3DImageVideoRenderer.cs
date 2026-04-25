@@ -502,6 +502,15 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _attachedReceiver = receiver;
         receiver.FrameArrived += OnFrameArrived;
         receiver.TextureArrived += OnTextureArrived;
+        // Wire the session's shared MediaClock through to the paint
+        // loop so A/V sync anchors at the actual first-paint moment.
+        // Self-preview ICaptureSources don't carry one — that's fine,
+        // the paint loop just doesn't publish anchors and audio uses
+        // its pre-MediaClock fallback.
+        if (receiver is StreamReceiver streamReceiver)
+        {
+            _paintLoop.SetMediaClock(streamReceiver.MediaClock);
+        }
         DebugLog.Write(
             $"[renderer] subscribed to FrameArrived + TextureArrived (receiver={receiver.GetType().Name})");
     }
@@ -516,6 +525,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         try { _attachedReceiver.FrameArrived -= OnFrameArrived; } catch (Exception) { }
         try { _attachedReceiver.TextureArrived -= OnTextureArrived; } catch (Exception) { }
         _attachedReceiver = null;
+        _paintLoop.SetMediaClock(null);
         _playoutQueue.Clear();
         DebugLog.Write("[renderer] unsubscribed FrameArrived + TextureArrived");
     }

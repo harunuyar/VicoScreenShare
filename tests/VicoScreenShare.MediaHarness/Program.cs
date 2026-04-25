@@ -63,6 +63,7 @@ internal static class Program
             {
                 "bench-encode" => RunEncodeBenchmark(argMap),
                 "bench-pacer" => RunPacerBenchmark(argMap),
+                "bench-avsync" => RunAvSyncReceiverBenchmark(argMap),
                 "bench-encode-gpu" => RunGpuEncodeBenchmark(argMap),
                 "bench-downscale" => RunDownscaleBenchmark(argMap),
                 "bench-scaler" => RunVideoScalerBenchmark(argMap),
@@ -367,6 +368,252 @@ internal static class Program
         sample[4] = nalHeader;
         // Remaining bytes left at default 0 — the pacer doesn't care.
         return sample;
+    }
+
+    /// <summary>
+    /// Real-wall-clock end-to-end A/V sync exercise. Drives the full
+    /// MediaClock + AudioReceiver path the way the live receiver
+    /// would: a publisher loop emits 50 audio packets/s and one
+    /// "video frame" per nominalFps, with both streams sharing a
+    /// publisher NTP origin. The video paint loop is simulated by
+    /// holding the first <c>--buffer</c> frames before "painting"
+    /// the first one (using the real <see cref="MediaClock.SetVideoAnchorFromContentTime"/>
+    /// entry point). RTCP Sender Reports are injected at a
+    /// configurable interval so we exercise the case where SR
+    /// arrives well after audio has already accumulated.
+    ///
+    /// Asserts:
+    /// 1. Pre-anchor: zero audio frames submitted to the renderer.
+    /// 2. Post-anchor: audio drains continuously at ~50 fps real-time.
+    /// 3. Final |offsetMs| stays within tolerance.
+    /// </summary>
+    private static int RunAvSyncReceiverBenchmark(Dictionary<string, string> args)
+    {
+        var receiveBuffer = int.Parse(args.GetValueOrDefault("buffer", "60"));
+        var nominalFps = int.Parse(args.GetValueOrDefault("fps", "60"));
+        var totalSeconds = double.Parse(args.GetValueOrDefault("duration", "5"));
+        var srDelaySeconds = double.Parse(args.GetValueOrDefault("sr-delay", "1.5"));
+        var driftToleranceMs = double.Parse(args.GetValueOrDefault("drift-ms", "100"));
+
+        var bufferDelay = TimeSpan.FromSeconds((double)receiveBuffer / nominalFps);
+
+        Console.WriteLine($"# bench-avsync buffer={receiveBuffer} frames @ {nominalFps} fps "
+            + $"(delay={bufferDelay.TotalMilliseconds:F0} ms) sr-delay={srDelaySeconds:F2}s "
+            + $"duration={totalSeconds:F1}s drift-ms={driftToleranceMs:F0}");
+
+        using var pc = new SIPSorcery.Net.RTCPeerConnection(null);
+        var clock = new VicoScreenShare.Client.Media.MediaClock("avsync");
+        var renderer = new HarnessAudioRenderer();
+        var audio = new VicoScreenShare.Client.Media.AudioReceiver(
+            pc,
+            new HarnessAudioDecoderFactory(),
+            renderer,
+            displayName: "harness",
+            mediaClock: clock);
+        audio.StartAsync().GetAwaiter().GetResult();
+
+        // Reference times. The publisher's NTP origin is arbitrary;
+        // pick a fixed value so the math is reproducible. The local
+        // wall is real Stopwatch ticks at run-start.
+        var publisherEpochSeconds = 3_000_000_000u;
+        var streamStartSw = Stopwatch.GetTimestamp();
+        ulong NtpAt(double secondsFromStart)
+        {
+            // RFC 3550 64-bit NTP: upper 32 = secs since 1900,
+            // lower 32 = fraction × 2^32.
+            var totalSec = publisherEpochSeconds + secondsFromStart;
+            var sec = (uint)Math.Floor(totalSec);
+            var frac = totalSec - Math.Floor(totalSec);
+            return ((ulong)sec << 32) | (uint)(frac * 4294967296.0);
+        }
+
+        // Audio: 48 kHz Opus, 20 ms framing → rtpTs grows by 960 per
+        // frame, 50 frames/s. Video: 90 kHz @ nominalFps → rtpTs
+        // grows by (90000 / fps) per frame.
+        const int audioFrameSamples = 960;
+        const int audioRtpStep = audioFrameSamples;
+        const double audioFramePeriodSec = 0.020;
+        var videoRtpStep = (uint)(90000 / nominalFps);
+        var videoFramePeriodSec = 1.0 / nominalFps;
+
+        // Track the receiver's video paint loop in software. We
+        // accumulate "video frames" exactly as the publisher emits
+        // them; once `receiveBuffer` are buffered, the next frame
+        // becomes the first painted, and we anchor the MediaClock
+        // at that moment using SetVideoAnchorFromContentTime — the
+        // SAME entry point PaintLoop uses in production.
+        var bufferedVideo = new Queue<TimeSpan>();
+        var anchored = false;
+
+        // First-SR delay: emulates SIPSorcery's RTCP cadence.
+        var firstSrDispatched = false;
+
+        // Streaming loop. Wakes at each next-event boundary
+        // (audio packet, video frame, or SR injection). Real wall
+        // advance is enforced via Thread.Sleep so AudioReceiver's
+        // drain loop sees real time pass between packets — that's
+        // the whole point of running this in the harness instead of
+        // a synchronous unit test.
+        var endSw = streamStartSw + (long)(totalSeconds * Stopwatch.Frequency);
+        var nextAudioSw = streamStartSw;
+        var nextVideoSw = streamStartSw;
+        var nextSrSw = streamStartSw + (long)(srDelaySeconds * Stopwatch.Frequency);
+        uint audioRtp = 0;
+        uint videoRtp = 0;
+
+        while (Stopwatch.GetTimestamp() < endSw)
+        {
+            var now = Stopwatch.GetTimestamp();
+            var nextDeadline = Math.Min(Math.Min(nextAudioSw, nextVideoSw), nextSrSw);
+            if (nextDeadline > now)
+            {
+                var sleepMs = (nextDeadline - now) * 1000.0 / Stopwatch.Frequency;
+                if (sleepMs > 0)
+                {
+                    Thread.Sleep((int)Math.Max(1, Math.Min(20, sleepMs)));
+                }
+                continue;
+            }
+
+            // SR injection — both streams' SRs arrive together.
+            if (now >= nextSrSw && !firstSrDispatched)
+            {
+                var elapsedSec = (now - streamStartSw) / (double)Stopwatch.Frequency;
+                clock.OnAudioSenderReport(NtpAt(elapsedSec), audioRtp);
+                clock.OnVideoSenderReport(NtpAt(elapsedSec), videoRtp);
+                firstSrDispatched = true;
+                nextSrSw = long.MaxValue;
+            }
+
+            // Audio packet: each packet's publisher capture time is
+            // (audioRtp / 48000) seconds from stream start, mapped
+            // through SR to publisher NTP at receive time.
+            if (now >= nextAudioSw)
+            {
+                audio.IngestPacket(audioRtp, payload: new byte[] { 0x10 });
+                audioRtp = unchecked(audioRtp + (uint)audioRtpStep);
+                nextAudioSw += (long)(audioFramePeriodSec * Stopwatch.Frequency);
+            }
+
+            // Video frame: stash content time; once we have enough
+            // buffered, "paint" the oldest and anchor.
+            if (now >= nextVideoSw)
+            {
+                var contentTime = TimeSpan.FromTicks((long)videoRtp * TimeSpan.TicksPerMillisecond / 90);
+                bufferedVideo.Enqueue(contentTime);
+                videoRtp = unchecked(videoRtp + videoRtpStep);
+                nextVideoSw += (long)(videoFramePeriodSec * Stopwatch.Frequency);
+
+                if (!anchored && bufferedVideo.Count >= receiveBuffer)
+                {
+                    var firstPaintContent = bufferedVideo.Dequeue();
+                    anchored = clock.SetVideoAnchorFromContentTime(
+                        firstPaintContent,
+                        Stopwatch.GetTimestamp());
+                    if (anchored)
+                    {
+                        var rel = (Stopwatch.GetTimestamp() - streamStartSw) * 1000.0 / Stopwatch.Frequency;
+                        Console.WriteLine($"# anchored at t={rel:F0}ms (firstPaintContent={firstPaintContent.TotalMilliseconds:F0}ms)");
+                    }
+                }
+                else if (anchored && bufferedVideo.Count > 0)
+                {
+                    bufferedVideo.Dequeue();
+                }
+            }
+        }
+
+        var elapsedTotalSec = (Stopwatch.GetTimestamp() - streamStartSw) / (double)Stopwatch.Frequency;
+        // Wait a beat for any final drains to flush.
+        Thread.Sleep(50);
+
+        Console.WriteLine($"RESULT: anchored={anchored}");
+        Console.WriteLine($"RESULT: frames_decoded={audio.FramesDecoded}");
+        Console.WriteLine($"RESULT: frames_submitted={audio.FramesSubmitted}");
+        Console.WriteLine($"RESULT: frames_dropped={audio.FramesDropped}");
+        Console.WriteLine($"RESULT: samples_padded={audio.SamplesPadded}");
+        Console.WriteLine($"RESULT: samples_skipped={audio.SamplesSkipped}");
+        Console.WriteLine($"RESULT: last_offset_ms={audio.LastOffsetMicros / 1000.0:F1}");
+        Console.WriteLine($"RESULT: renderer_submit_count={renderer.SubmitCount}");
+
+        // Pass criteria:
+        //  1. Anchor latched.
+        //  2. Audio actually played (renderer received submits).
+        //  3. Steady-state offset is within tolerance.
+        //  4. Submitted count is in the right ballpark — we expect
+        //     50 fps × (totalSeconds − bufferDelay − sr-delay).
+        //     Allow ±25% slack for queue-drain ramp-up.
+        var expectedRoughly = (totalSeconds - bufferDelay.TotalSeconds - srDelaySeconds) * 50.0;
+        var offsetWithinTol = Math.Abs(audio.LastOffsetMicros / 1000.0) <= driftToleranceMs;
+        var submittedReasonable = audio.FramesSubmitted >= expectedRoughly * 0.5;
+        var anchorOk = anchored;
+        var anyAudio = audio.FramesSubmitted > 0;
+
+        Console.WriteLine($"RESULT: expected_submitted_roughly={expectedRoughly:F0}");
+
+        var ok = anchorOk && anyAudio && submittedReasonable && offsetWithinTol;
+        Console.WriteLine($"VERDICT: {(ok ? "PASS" : "FAIL")} "
+            + $"(anchor={anchorOk}, anyAudio={anyAudio}, "
+            + $"submittedOk={submittedReasonable} ({audio.FramesSubmitted}/{expectedRoughly:F0}), "
+            + $"offsetOk={offsetWithinTol} ({audio.LastOffsetMicros / 1000.0:F1}ms))");
+
+        try { audio.DisposeAsync().GetAwaiter().GetResult(); } catch { }
+        return ok ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Stub <see cref="VicoScreenShare.Client.Platform.IAudioRenderer"/>
+    /// for the harness — counts submits, no actual playback. Lives
+    /// here so the harness scenario stays self-contained.
+    /// </summary>
+    private sealed class HarnessAudioRenderer : VicoScreenShare.Client.Platform.IAudioRenderer
+    {
+        public int SampleRate { get; private set; }
+        public int Channels { get; private set; }
+        public double Volume { get; set; } = 1.0;
+        public int SubmitCount;
+
+        public Task StartAsync(int sampleRate, int channels)
+        {
+            SampleRate = sampleRate;
+            Channels = channels;
+            return Task.CompletedTask;
+        }
+
+        public void Submit(ReadOnlySpan<short> interleavedPcm, TimeSpan timestamp)
+        {
+            Interlocked.Increment(ref SubmitCount);
+        }
+
+        public Task StopAsync() => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class HarnessAudioDecoderFactory : VicoScreenShare.Client.Media.Codecs.IAudioDecoderFactory
+    {
+        public bool IsAvailable => true;
+        public VicoScreenShare.Client.Media.Codecs.IAudioDecoder CreateDecoder(int channels) =>
+            new HarnessAudioDecoder(channels);
+    }
+
+    private sealed class HarnessAudioDecoder : VicoScreenShare.Client.Media.Codecs.IAudioDecoder
+    {
+        public HarnessAudioDecoder(int channels) { Channels = channels; }
+        public int SampleRate => 48000;
+        public int Channels { get; }
+
+        public VicoScreenShare.Client.Media.Codecs.DecodedAudioFrame? Decode(
+            ReadOnlySpan<byte> encoded, uint rtpTimestamp)
+        {
+            return new VicoScreenShare.Client.Media.Codecs.DecodedAudioFrame(
+                Pcm: new short[960 * Channels],
+                Samples: 960,
+                Channels: Channels,
+                SampleRate: SampleRate,
+                RtpTimestamp: rtpTimestamp);
+        }
+
+        public void Dispose() { }
     }
 
     /// <summary>

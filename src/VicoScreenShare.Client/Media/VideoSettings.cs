@@ -98,7 +98,8 @@ public sealed class VideoSettings
     /// <summary>
     /// Master switch for the send-side packet pacer. When on, encoded
     /// frames are queued and their RTP packets are released to the wire
-    /// at <see cref="SendPacingMaxBitrateMbps"/> instead of being dumped
+    /// at a rate of <see cref="TargetBitrate"/> ×
+    /// <see cref="SendPacingBitrateMultiplier"/> instead of being dumped
     /// in a back-to-back burst. Smooths the keyframe spike — a 1 MB IDR
     /// stops overrunning a viewer's downlink router queue, at the cost
     /// of one-time per-keyframe latency proportional to (keyframe size /
@@ -110,16 +111,15 @@ public sealed class VideoSettings
     public bool EnableSendPacing { get; set; } = false;
 
     /// <summary>
-    /// Maximum on-the-wire bitrate the pacer is allowed to release. 0
-    /// means "follow <see cref="TargetBitrate"/>" — the most common
-    /// setting, which converts the encoder's "burst above target during
-    /// a keyframe, idle afterwards" pattern into a steady stream at
-    /// target. Set a non-zero value (Mbps) to override — e.g. 25 to
-    /// stay safely under a 30 Mbit viewer's downlink. Range
-    /// <c>[1, 1000]</c> when non-zero. Ignored when
-    /// <see cref="EnableSendPacing"/> is false.
+    /// Multiplier on <see cref="TargetBitrate"/> that sets the pacer's
+    /// wire-rate cap. <c>1</c> = pace exactly at the encoder's target
+    /// bitrate (smoothest, highest one-time keyframe latency).
+    /// Higher values let the pacer release packets faster, reducing
+    /// keyframe latency at the cost of larger wire bursts. Range
+    /// <c>[1, 5]</c>. Ignored when <see cref="EnableSendPacing"/> is
+    /// off.
     /// </summary>
-    public int SendPacingMaxBitrateMbps { get; set; } = 0;
+    public int SendPacingBitrateMultiplier { get; set; } = 1;
 }
 
 /// <summary>
