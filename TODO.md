@@ -47,11 +47,40 @@ Add forward error correction so brief losses heal without any round trip.
 
 ## Congestion awareness
 
-### Proactive congestion control
-Adaptive bitrate today only reacts once loss is already happening. Add an estimator that watches packet arrival timing so we can scale down before the link starts dropping.
+### Per-subscriber server-side pacing
+Server forwards RTP byte-for-byte through `SfuPeer.SendForwardedRtp` → `_pc.SendRtpRaw`, so a paced burst from the publisher gets re-bursted on each viewer's egress. Add a `PacingRtpSender` per `SfuSubscriberPeer` (the class is already codec-agnostic — move it from `VicoScreenShare.Client/Media/` into a shared assembly so the server can reference it). Each subscriber's pacer rate is configured per-viewer, so a fast viewer doesn't eat latency for a slow one. Keep the client-side pacer too — it's the right layer when the *publisher's uplink* is the bottleneck (mobile, hotel WiFi); server-side handles every viewer's downlink. Set each layer's rate so it kicks in only when its leg is the actual bottleneck and the latencies don't stack on healthy paths.
 
-### Resolution and frame-rate adaptation
-Adaptive bitrate only changes bitrate. On sustained poor links we should step resolution and / or frame rate down too, not just starve the same pixel count.
+### TWCC + GCC bandwidth estimation (the right thing)
+Adaptive bitrate today only reacts once loss is already happening (`LossBasedBitrateController` reads RTCP-RR fraction-lost). That's the loss-based half of Google Congestion Control. The delay-based half watches per-packet arrival timing via TWCC (Transport-Wide Congestion Control) and detects queueing buildup *before* loss starts — which is what every modern WebRTC stack (libwebrtc / browsers, Pion, Mediasoup, LiveKit) uses.
+
+What we have:
+- `LossBasedBitrateController` (loss-based half — already shipped on the publisher).
+- `TransportWideCCExtension` is auto-applied to outbound RTP packets by SIPSorcery's `MediaStream.SendRtpRaw`, so the wire-level seq numbers are present on every paced packet.
+
+What's missing:
+- **Receiver-side TWCC feedback emission**: parse incoming TWCC seq numbers, accumulate per-packet arrival timestamps, emit RTCP TWCC feedback messages on a 50 ms cadence (RFC draft `draft-holmer-rmcat-transport-wide-cc-extensions`).
+- **Sender-side TWCC feedback parsing + delay-based estimator**: GCC's arrival-time-filter / overuse-detector / rate-controller pipeline. Reference implementations: libwebrtc's `goog_cc_factory.cc` (canonical, C++), Pion's `pion/interceptor` (Go, more readable).
+
+The estimator is the same algorithm in three places — only the input source differs:
+- **Publisher → SFU path**: publisher-side estimator (sender role) consumes TWCC feedback from the SFU. Drives the publisher's adaptive bitrate / unified rate-res-fps controller.
+- **Each subscriber's downlink**: server-side estimator (sender role) consumes TWCC feedback from each viewer's `SubscriberSession`. Drives that viewer's per-subscriber server pacer (separate entry above).
+- **Subscriber session**: receiver-side TWCC feedback emitter that *produces* the data the two sender-side estimators consume. Emits on the inbound path, not just at the publisher.
+
+So the work is: build the algorithm once, wire the receiver-side emitter on every RTP-receiving path (publisher's RTCP-feedback handler from server, each viewer's `SubscriberSession`), and instantiate the sender-side estimator at every RTP-sending path (publisher → server, server → each subscriber). One implementation, three call sites.
+
+End game: every paced layer (client pacer + per-subscriber server pacer) drives its rate from a TWCC-backed bandwidth estimate per RTP path. Manual "My downlink (Mbps)" Settings hint can ship as a stopgap until the estimator lands; REMB (older, simpler RTCP-feedback message — single bps number, no per-packet bookkeeping) is a defensible middle stop. Multi-week work; gate on whether the manual-hint stopgap actually proves insufficient in real use first.
+
+### Unified rate / resolution / fps controller (depends on TWCC + GCC)
+Once a real bandwidth estimate exists, *all three* current adaptation knobs collapse into one consumer. The libwebrtc shape:
+1. Bandwidth estimator (loss + delay-based via TWCC + GCC) produces a single `target_send_bps`.
+2. An adaptation-policy layer maps `target_send_bps` → `(bitrate, resolution, fps)`. Threshold-driven with hysteresis so we don't bounce between 1080p30 and 720p60 every couple seconds. Drop fps first, then resolution, then keep starving bitrate as the last resort.
+3. Encoder applies the tuple — bitrate is hot-reconfigurable today (`streamer.UpdateBitrate`), resolution/fps require encoder restart, which is expensive and is the reason hysteresis matters.
+
+Two concrete fixes this unblocks:
+- **Faster recovery**: today's `LossBasedBitrateController` climbs back to target slowly because it only probes up when loss has been zero for a sustained window — afraid of re-triggering loss. A delay-based estimator sees the queue draining and probes proactively, fixing the "minute to recover" issue (separate TODO entry above).
+- **Resolution + fps adaptation**: today we starve the same pixel count with fewer bits, which produces blurry output. With the policy layer above, sustained-poor links step the pixel count and frame rate down to match the available rate.
+
+Land this AFTER the TWCC + GCC estimator — without a real bandwidth signal, any rate/res/fps controller is guessing. With it, this is a few hundred lines of policy + threshold tuning.
 
 ## Multi-viewer scalability
 
