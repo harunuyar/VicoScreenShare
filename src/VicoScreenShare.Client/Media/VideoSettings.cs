@@ -94,28 +94,6 @@ public sealed class VideoSettings
     /// bad links. Bits per second. Default 500 kbps.
     /// </summary>
     public int MinAdaptiveBitrate { get; set; } = 500_000;
-
-    /// <summary>
-    /// Opt-in: switch the H.264 encoder from periodic IDR keyframes to
-    /// cyclic intra-refresh. Eliminates the ~250 Mbit/s keyframe packet
-    /// burst (which drops the tail of the send queue on constrained links
-    /// and causes sustained distortion) by spreading intra-coded macroblocks
-    /// across <see cref="IntraRefreshPeriodFrames"/> frames. Tradeoff: new
-    /// viewers need ~1 refresh period (≈1 s at default) to converge to a
-    /// clean picture instead of seeing a correct first frame immediately.
-    /// Default off; recommended when friends on weaker links report
-    /// sustained video distortion. Only the Media Foundation H.264 encoder
-    /// honors this — VP8 and software fallbacks ignore it.
-    /// </summary>
-    public bool EnableIntraRefresh { get; set; } = false;
-
-    /// <summary>
-    /// Number of frames per full intra-refresh cycle when
-    /// <see cref="EnableIntraRefresh"/> is on. Default is the target frame
-    /// rate (60 → 1-second refresh), range <c>[6, 600]</c>. Shorter =
-    /// faster new-viewer convergence but more per-frame intra overhead.
-    /// </summary>
-    public int IntraRefreshPeriodFrames { get; set; } = 60;
 }
 
 /// <summary>

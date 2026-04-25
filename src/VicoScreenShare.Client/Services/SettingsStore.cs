@@ -127,8 +127,6 @@ public sealed class SettingsStore
         public int ReceiveBufferFrames { get; set; } = 5;
         public bool EnableAdaptiveBitrate { get; set; } = true;
         public int MinAdaptiveBitrate { get; set; } = 500_000;
-        public bool EnableIntraRefresh { get; set; } = false;
-        public int IntraRefreshPeriodFrames { get; set; } = 60;
 
         // Audio (shared-content loopback). Separate fields rather than a
         // nested object so existing settings.json files still load cleanly
@@ -171,8 +169,6 @@ public sealed class SettingsStore
             ReceiveBufferFrames = source.Video.ReceiveBufferFrames,
             EnableAdaptiveBitrate = source.Video.EnableAdaptiveBitrate,
             MinAdaptiveBitrate = source.Video.MinAdaptiveBitrate,
-            EnableIntraRefresh = source.Video.EnableIntraRefresh,
-            IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
             AudioForceSystemAudio = source.Audio.ForceSystemAudio,
             AudioTargetBitrate = source.Audio.TargetBitrate,
             AudioStereo = source.Audio.Stereo,
@@ -196,8 +192,6 @@ public sealed class SettingsStore
                     ReceiveBufferFrames = ReceiveBufferFrames > 0 && ReceiveBufferFrames <= 240 ? ReceiveBufferFrames : 5,
                     EnableAdaptiveBitrate = EnableAdaptiveBitrate,
                     MinAdaptiveBitrate = MinAdaptiveBitrate > 0 && MinAdaptiveBitrate <= 50_000_000 ? MinAdaptiveBitrate : 500_000,
-                    EnableIntraRefresh = EnableIntraRefresh,
-                    IntraRefreshPeriodFrames = IntraRefreshPeriodFrames >= 6 && IntraRefreshPeriodFrames <= 600 ? IntraRefreshPeriodFrames : 60,
                 },
                 Audio = new AudioSettings
                 {

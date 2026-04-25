@@ -44,7 +44,6 @@ public sealed class CaptureStreamer : IDisposable
     private readonly int _targetFps;
     private readonly int _targetBitrate;
     private readonly int _gopFrames;
-    private readonly IntraRefreshOptions _intraRefresh;
     private readonly long _frameGapTicks;
     private readonly long _frameGapToleranceTicks;
     private long _nextDeadlineTicks;
@@ -87,9 +86,6 @@ public sealed class CaptureStreamer : IDisposable
         // mid-stream viewer has a decodable starting point.
         var keyframeSec = settings.KeyframeIntervalSeconds <= 0 ? 2.0 : settings.KeyframeIntervalSeconds;
         _gopFrames = Math.Max(1, (int)Math.Round(keyframeSec * _targetFps));
-        _intraRefresh = new IntraRefreshOptions(
-            settings.EnableIntraRefresh,
-            Math.Clamp(settings.IntraRefreshPeriodFrames, 6, 600));
         var fps = _targetFps;
         // Phase-locked throttle: we keep a monotonic deadline and accept any
         // frame whose timestamp (+ a small tolerance for jitter) reaches the
@@ -112,6 +108,12 @@ public sealed class CaptureStreamer : IDisposable
     /// bitrate as the delta between two reads divided by the elapsed wall
     /// time, so we don't have to keep a sliding window here.</summary>
     public long EncodedByteCount { get; private set; }
+
+    private void NoteEncodedFrame(int bytes)
+    {
+        EncodedFrameCount++;
+        EncodedByteCount += bytes;
+    }
 
     /// <summary>Source frame dimensions as they come out of the capture
     /// provider, before the aspect-preserving downscale. Exposed for the
@@ -349,8 +351,7 @@ public sealed class CaptureStreamer : IDisposable
                 return;
             }
 
-            EncodedFrameCount++;
-            EncodedByteCount += encoded.Value.Bytes.Length;
+            NoteEncodedFrame(encoded.Value.Bytes.Length);
         }
 
         // Use the timestamp the encoder propagated through its pipeline,
@@ -544,8 +545,7 @@ public sealed class CaptureStreamer : IDisposable
                 return;
             }
 
-            EncodedFrameCount++;
-            EncodedByteCount += encoded.Value.Bytes.Length;
+            NoteEncodedFrame(encoded.Value.Bytes.Length);
         }
 
         var contentTs = encoded.Value.Timestamp;
@@ -600,7 +600,7 @@ public sealed class CaptureStreamer : IDisposable
         }
         try { _encoder?.Dispose(); } catch { }
 
-        _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate, _gopFrames, _intraRefresh);
+        _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate, _gopFrames);
         _encoderWidth = width;
         _encoderHeight = height;
 
@@ -631,8 +631,7 @@ public sealed class CaptureStreamer : IDisposable
                 continue;
             }
 
-            EncodedFrameCount++;
-            EncodedByteCount += frame.Bytes.Length;
+            NoteEncodedFrame(frame.Bytes.Length);
 
             var duration = ComputeDurationRtpUnits(frame.Timestamp);
             _onEncoded(duration, frame.Bytes, frame.Timestamp);

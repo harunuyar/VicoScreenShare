@@ -65,7 +65,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     private readonly IMFDXGIDeviceManager? _dxgiManager;
     private readonly bool _ownsD3dDevice;
     private readonly bool _useLanczos;
-    private readonly IntraRefreshOptions _intraRefresh;
     private ITextureScaler? _textureScaler;
     private ID3D11Texture2D? _encoderInputTexture;
     private int _textureScalerSrcWidth;
@@ -89,15 +88,9 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     {
     }
 
-    public MediaFoundationH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, bool useLanczos, ID3D11Device? externalDevice)
-        : this(width, height, fps, bitrate, gopFrames, useLanczos, externalDevice, intraRefresh: default)
-    {
-    }
-
     public MediaFoundationH264Encoder(
         int width, int height, int fps, long bitrate, int gopFrames,
-        bool useLanczos, ID3D11Device? externalDevice,
-        IntraRefreshOptions intraRefresh)
+        bool useLanczos, ID3D11Device? externalDevice)
     {
         _width = width;
         _height = height;
@@ -105,7 +98,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         _bitrate = Math.Max(500_000, bitrate);
         _gopFrames = Math.Max(1, gopFrames);
         _useLanczos = useLanczos;
-        _intraRefresh = intraRefresh;
 
         // Create (or wrap) a D3D11 device and DXGI device manager for the
         // encoder MFT BEFORE we hand it any media types. NVENC's MFT routes
@@ -124,7 +116,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
             _ownsD3dDevice = true;
         }
 
-        var (transform, isAsync, pickedLabel, inputIsBgra) = CreateEncoder(width, height, _fps, _bitrate, _gopFrames, _dxgiManager, _intraRefresh);
+        var (transform, isAsync, pickedLabel, inputIsBgra) = CreateEncoder(width, height, _fps, _bitrate, _gopFrames, _dxgiManager);
         _transform = transform;
         _isAsync = isAsync;
         _inputIsBgra = inputIsBgra;
@@ -188,16 +180,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     /// </summary>
     public void RequestKeyframe()
     {
-        // When cyclic intra-refresh is active, forcing an IDR would emit
-        // exactly the ~250 Mbit burst the refresh mode is designed to avoid.
-        // New subscribers converge within one refresh period (≈1 s at
-        // default) without an IDR — the spread intra macroblocks repaint
-        // the picture progressively. So this call becomes a no-op.
-        if (_intraRefresh.Enabled)
-        {
-            return;
-        }
-
         lock (_processLock)
         {
             if (_disposed)
@@ -242,7 +224,6 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
             {
                 _transform.Attributes.Set(CodecApiAVEncCommonMeanBitRate, clamped);
                 _transform.Attributes.Set(CodecApiAVEncCommonMaxBitRate, clamped);
-                _transform.Attributes.Set(CodecApiAVEncCommonBufferSize, clamped);
                 DebugLog.Write($"[mf] H264 encoder bitrate → {bitsPerSecond / 1000} kbps");
             }
             catch (Exception ex)
@@ -959,14 +940,14 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
 
     // --- Encoder enumeration + type negotiation ---
 
-    private static (IMFTransform transform, bool isAsync, string label, bool inputIsBgra) CreateEncoder(int width, int height, int fps, long bitrate, int gopFrames, IMFDXGIDeviceManager? dxgiManager, IntraRefreshOptions intraRefresh)
+    private static (IMFTransform transform, bool isAsync, string label, bool inputIsBgra) CreateEncoder(int width, int height, int fps, long bitrate, int gopFrames, IMFDXGIDeviceManager? dxgiManager)
     {
         // Try async hardware MFTs first — NVENC / QSV / VCE. Passing both
         // HARDWARE and ASYNCMFT flags returns async hardware encoders, which
         // we unlock individually before touching them.
         var async = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagAsyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, gopFrames, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager, intraRefresh);
+            width, height, fps, bitrate, gopFrames, tryAsync: true, tryHardware: true, label: "hardware async", dxgiManager);
         if (async.transform is not null)
         {
             return (async.transform, true, "hardware async", async.inputIsBgra);
@@ -976,18 +957,17 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         // exist (e.g. older Intel QSV builds).
         var sync = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagHardware | EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager, intraRefresh);
+            width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: true, label: "hardware sync", dxgiManager);
         if (sync.transform is not null)
         {
             return (sync.transform, false, "hardware sync", sync.inputIsBgra);
         }
 
         // Last resort: Microsoft's software H.264 encoder. Always available.
-        // Software encoder doesn't need the D3D manager, pass null. Intra-refresh
-        // is ignored in software mode (MS SW encoder doesn't honor the attribute).
+        // Software encoder doesn't need the D3D manager, pass null.
         var software = TryCreateEncoder(
             (uint)(EnumFlag.EnumFlagSyncmft | EnumFlag.EnumFlagSortandfilter),
-            width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null, intraRefresh: intraRefresh);
+            width, height, fps, bitrate, gopFrames, tryAsync: false, tryHardware: false, label: "software", dxgiManager: null);
         if (software.transform is not null)
         {
             return (software.transform, false, "software", software.inputIsBgra);
@@ -1079,8 +1059,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         bool tryAsync,
         bool tryHardware,
         string label,
-        IMFDXGIDeviceManager? dxgiManager,
-        IntraRefreshOptions intraRefresh)
+        IMFDXGIDeviceManager? dxgiManager)
     {
         var outputFilter = new RegisterTypeInfo
         {
@@ -1148,7 +1127,7 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
                 // NVENC uses its quality preset with B-frames and lookahead,
                 // which adds 2-3 seconds of encode latency — unusable for
                 // realtime streaming.
-                ApplyCodecApiAttributes(transform, bitrate, gopFrames, friendlyName, intraRefresh);
+                ApplyCodecApiAttributes(transform, bitrate, gopFrames, friendlyName);
 
                 var (typesOk, inputIsBgra) = TrySetTypes(transform, width, height, fps, bitrate, $"{label} [{friendlyName}]");
                 if (!typesOk)
@@ -1247,43 +1226,31 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
     private static readonly Guid CodecApiAVEncCommonRateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
     private static readonly Guid CodecApiAVEncCommonMeanBitRate = new("f7222374-2144-4815-b550-a37f8e1b1083");
     private static readonly Guid CodecApiAVEncCommonMaxBitRate = new("9651632c-a5ea-4830-88a0-5e64f2e66fe1");
-    private static readonly Guid CodecApiAVEncCommonBufferSize = new("0db96574-b6a4-4c8b-8106-3773de0313cd");
     private static readonly Guid CodecApiAVEncCommonQualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
     private static readonly Guid CodecApiAVEncCommonLowLatency = new("9c27891a-ed7a-40e1-88e8-b22727a024ee");
     private static readonly Guid CodecApiAVEncMPVGOPSize = new("95f31b26-95a4-4f58-9ba5-4c1eb9e1f04b");
     private static readonly Guid CodecApiAVEncVideoForceKeyFrame = new("398C1B98-8353-475A-9EF2-8F265D2C8E14");
-    private static readonly Guid CodecApiAVEncVideoIntraRefreshMode = new("D23F8D97-807C-4CB3-9C7E-1B55FB866341");
-    private static readonly Guid CodecApiAVEncVideoIntraRefreshPeriod = new("B1B64802-E44A-42A2-8D25-56030BEA1EB0");
-    private const uint IntraRefreshCyclic = 1;
     private const uint RateControlModeCbr = 0;
 
     /// <summary>
     /// Writes realtime-streaming CODECAPI attributes onto the encoder
     /// transform. All of these are advisory — if the MFT doesn't recognize
     /// a particular key, <see cref="IMFAttributes.Set(Guid, uint)"/> either
-    /// silently succeeds or throws, which we swallow. NVENC is the main
-    /// consumer of LowLatency + the full CBR triple (MeanBitRate +
-    /// MaxBitRate + BufferSize); the Microsoft software encoder honors
-    /// MeanBitRate + RateControlMode + GopSize.
+    /// silently succeeds or throws, which we swallow.
     ///
     /// LowLatency=1 is load-bearing: without it the encoder runs its
     /// quality preset with B-frames and lookahead, adding 2-3 seconds of
     /// pipeline lag and unusable for real-time streaming.
     ///
-    /// Full CBR triple (MeanBitRate / MaxBitRate / BufferSize) is required
-    /// for NVENC to actually hit the target bitrate in CBR mode. Without
-    /// MaxBitRate + a one-second VBV, NVENC undershoots by 40-60% on
-    /// low-motion content and produces visible chroma artifacts on
-    /// solid backgrounds.
-    ///
-    /// QualityVsSpeed=70 is well inside NVENC's real-time budget and
-    /// avoids the aggressive speed default that also contributes to the
-    /// undershoot.
+    /// MeanBitRate + MaxBitRate is the CBR rate-control input NVENC and the
+    /// Microsoft software encoder both honor. QualityVsSpeed=70 is well
+    /// inside NVENC's real-time budget and avoids the aggressive speed
+    /// default that produces undershoot on low-motion content.
     ///
     /// GopSize comes from VideoSettings.KeyframeIntervalSeconds * fps so
     /// the user can trade off keyframe bitrate vs mid-stream join latency.
     /// </summary>
-    private static void ApplyCodecApiAttributes(IMFTransform transform, long bitrate, int gopFrames, string friendlyName, IntraRefreshOptions intraRefresh)
+    private static void ApplyCodecApiAttributes(IMFTransform transform, long bitrate, int gopFrames, string friendlyName)
     {
         void TrySet(Guid key, uint value, string name)
         {
@@ -1300,28 +1267,8 @@ public sealed unsafe class MediaFoundationH264Encoder : IVideoEncoder, IAsyncEnc
         var clamped = (uint)Math.Min(bitrate, uint.MaxValue);
         TrySet(CodecApiAVEncCommonMeanBitRate, clamped, "MeanBitRate");
         TrySet(CodecApiAVEncCommonMaxBitRate, clamped, "MaxBitRate");
-        TrySet(CodecApiAVEncCommonBufferSize, clamped, "VBVBufferSize=1s");
         TrySet(CodecApiAVEncCommonQualityVsSpeed, 70u, "QualityVsSpeed");
-
-        if (intraRefresh.Enabled && intraRefresh.PeriodFrames > 0)
-        {
-            // Cyclic intra-refresh: encoder spreads intra-coded macroblocks
-            // across PeriodFrames frames instead of emitting a single big
-            // IDR every GopSize frames. Eliminates the ~250 Mbit/s keyframe
-            // spike that drowns a constrained link's tail queue. Hardware
-            // NVENC / QSV / AMD MFTs honor this; MS SW encoder ignores.
-            //
-            // GopSize MUST be 0 in refresh mode — the encoder owns frame
-            // type scheduling and a non-zero GopSize conflicts with the
-            // cyclic refresh.
-            TrySet(CodecApiAVEncVideoIntraRefreshMode, IntraRefreshCyclic, "IntraRefreshMode=Cyclic");
-            TrySet(CodecApiAVEncVideoIntraRefreshPeriod, (uint)intraRefresh.PeriodFrames, "IntraRefreshPeriod");
-            TrySet(CodecApiAVEncMPVGOPSize, 0u, "GopSize=0 (intra-refresh owns frame types)");
-        }
-        else
-        {
-            TrySet(CodecApiAVEncMPVGOPSize, (uint)Math.Max(1, gopFrames), "GopSize");
-        }
+        TrySet(CodecApiAVEncMPVGOPSize, (uint)Math.Max(1, gopFrames), "GopSize");
     }
 
     private static string TryGetFriendlyName(IMFActivate activate)

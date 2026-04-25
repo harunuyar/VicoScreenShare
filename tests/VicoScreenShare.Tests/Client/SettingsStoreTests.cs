@@ -287,40 +287,4 @@ public class SettingsStoreTests : IDisposable
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
         loaded.Video.MinAdaptiveBitrate.Should().Be(500_000);
     }
-
-    [Fact]
-    public void Intra_refresh_knobs_round_trip_through_save_and_load()
-    {
-        var store = new SettingsStore(_settingsPath);
-        var original = new ClientSettings
-        {
-            Video = new VideoSettings
-            {
-                EnableIntraRefresh = true,
-                IntraRefreshPeriodFrames = 120,
-            },
-        };
-        store.Save(original);
-
-        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
-
-        loaded.Video.EnableIntraRefresh.Should().BeTrue();
-        loaded.Video.IntraRefreshPeriodFrames.Should().Be(120);
-    }
-
-    [Fact]
-    public void Intra_refresh_period_out_of_range_snaps_to_default()
-    {
-        var store = new SettingsStore(_settingsPath);
-        store.Save(new ClientSettings
-        {
-            Video = new VideoSettings
-            {
-                IntraRefreshPeriodFrames = 10_000,
-            },
-        });
-
-        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
-        loaded.Video.IntraRefreshPeriodFrames.Should().Be(60);
-    }
 }

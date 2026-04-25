@@ -14,11 +14,22 @@ Users can currently pick a resolution and a bitrate independently. Bad combinati
 
 ## Send path
 
-### Packet pacing
-Encoder output is written to the socket back-to-back in tight bursts. Route it through a pacer that drains at a smooth rate so a keyframe doesn't flood the link and blow through router / Wi-Fi buffers.
+### Packet-level pacing
+Keyframe RTP packets still leave the socket in a tight burst. A frame-level pacer was attempted — it held back subsequent frames while the keyframe was "draining" — but the keyframe itself remained a single opaque `SendVideo` call (SIPSorcery's API packetizes and dumps to the socket atomically), so the actual wire burst was unchanged and the held-back frames just caused a visible lag-then-burst on the receiver. Real packet pacing requires either reaching into SIPSorcery's lower-level RTP API (`RTPSession.SendRtpRaw` or equivalent) or forking the library so we can interleave sleeps between the individual 1200-byte chunks of a keyframe. Gate this until we have time to audit what SIPSorcery actually exposes or accept the dependency change.
 
-### Tighter rate-control buffer
-Encoder rate control is configured with a one-second VBV, which lets complex scenes and keyframes spike well above target. Shorten it so the encoder is forced to drop quality instead of burst.
+## Encoder backend
+
+### Direct NVENC SDK path (bypass Media Foundation for NVIDIA)
+On the most common hardware (NVIDIA GPUs) the `NVIDIA H.264 Encoder MFT` is the Media Foundation shim NVIDIA ships, and it silently no-ops several CODECAPI properties Microsoft's API contract says it should honor. Two harness scenarios proved it before they were removed as part of cleaning up the dead user-facing settings they were tied to:
+
+- `bench-vbv` swept `VbvFraction` 0.10 → 2.00 (a 20× range). IDR keyframe sizes were identical at every value (ratio 1.00). `CODECAPI_AVEncCommonBufferSize` is a no-op on NVENC's MFT shim.
+- `bench-intra-refresh` enabled cyclic intra-refresh on a fresh encoder vs a baseline. Both produced the same number of IDRs at the same cadence and the same peak frame size (e.g. 5 IDRs / 911 KB peak in both runs over 5 s). `CODECAPI_AVEncVideoIntraRefreshMode` and `CODECAPI_AVEncVideoIntraRefreshPeriod` are also no-ops on the MFT shim.
+
+`TrySet` did not log a rejection in either case — the attribute Set call succeeds, the encoder simply doesn't apply it. Microsoft's software H.264 MFT and AMD/Intel MFTs may behave differently; never tested. The MFT shim is the broken layer and we cannot patch it from outside.
+
+The fix is the same one OBS, ffmpeg, and vMix use: call `NvEncodeAPI64.dll` directly. Wrap `NvEncodeAPICreateInstance`, manage `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`, configure `NV_ENC_RC_PARAMS` (where `vbvBufferSize`, `vbvInitialDelay`, and `intraRefreshPeriod` actually take effect), shuttle BGRA / NV12 frames in via `NvEncMapInputResource`, and pull encoded bitstreams out of `NvEncLockBitstream`. Roughly 1500–2500 lines of P/Invoke + session lifecycle + per-frame buffer marshalling, gated behind a runtime probe so non-NVIDIA users keep the MFT path.
+
+When this lands, re-add `bench-vbv` and `bench-intra-refresh` against the new NVENC encoder factory and wire the user-facing knobs back into Settings. Until then, NVENC users get neither knob, and the only available burst-prevention mechanism is application-level packet pacing (see "Send path → Packet-level pacing").
 
 ## Encoder quality
 

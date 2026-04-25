@@ -39,16 +39,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
         {
             new TargetHeightOption("Source (no downscale)", 0),
             new TargetHeightOption("2160p (4K)", 2160),
-            new TargetHeightOption("1800p", 1800),
-            new TargetHeightOption("1600p", 1600),
             new TargetHeightOption("1440p", 1440),
-            new TargetHeightOption("1200p", 1200),
             new TargetHeightOption("1080p", 1080),
-            new TargetHeightOption("900p", 900),
-            new TargetHeightOption("864p", 864),
-            new TargetHeightOption("768p", 768),
             new TargetHeightOption("720p", 720),
-            new TargetHeightOption("600p", 600),
             new TargetHeightOption("540p", 540),
             new TargetHeightOption("480p", 480),
             new TargetHeightOption("360p", 360),
@@ -59,6 +52,11 @@ public sealed partial class SettingsViewModel : ViewModelBase
             new ScalerModeOption("Bilinear (fast, recommended)", ScalerMode.Bilinear),
             new ScalerModeOption("Lanczos (sharp text, slower)", ScalerMode.Lanczos),
         };
+
+        // Discrete frame-rate choices the dropdown offers. Cinema (24/48),
+        // standard video (30/60), high-refresh gaming (120/144/240), with
+        // a couple of bandwidth-saving low values for slow links.
+        FrameRateOptions = new[] { 5, 15, 24, 30, 48, 60, 72, 90, 120, 144, 165, 240 };
 
         // Presets named "widthP@fps" — unambiguous and matches how OBS /
         // Twitch / YouTube display quality options, which is what users
@@ -93,7 +91,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
         _selectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == _settings.Video.TargetHeight)
             ?? TargetHeightOptions.First(o => o.Height == 1080);
-        _frameRate = Math.Clamp(_settings.Video.TargetFrameRate, 10, 240);
+        _frameRate = SnapToFrameRateOption(_settings.Video.TargetFrameRate);
         _bitrate = Math.Clamp(_settings.Video.TargetBitrate, MinBitrateBps, MaxBitrateBps);
         _bitrateSliderValue = BpsToSliderValue(_bitrate);
         _keyframeIntervalSeconds = Math.Clamp(_settings.Video.KeyframeIntervalSeconds, 0.5, 10.0);
@@ -103,8 +101,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
             ?? CodecOptions.First(c => c.IsAvailable);
         _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 240);
         _enableAdaptiveBitrate = _settings.Video.EnableAdaptiveBitrate;
-        _enableIntraRefresh = _settings.Video.EnableIntraRefresh;
-        _intraRefreshPeriodFrames = Math.Clamp(_settings.Video.IntraRefreshPeriodFrames, 6, 600);
 
         // Audio settings. Bitrate combo is fixed-set so the UI stays
         // simple; people who want to experiment with 160 kbps Opus can
@@ -143,6 +139,23 @@ public sealed partial class SettingsViewModel : ViewModelBase
     public IReadOnlyList<ScalerModeOption> ScalerModeOptions { get; }
     public IReadOnlyList<QualityPreset> QualityPresets { get; }
     public IReadOnlyList<CodecOption> CodecOptions { get; }
+    public IReadOnlyList<int> FrameRateOptions { get; }
+
+    private int SnapToFrameRateOption(int requested)
+    {
+        var nearest = FrameRateOptions[0];
+        var bestDelta = Math.Abs(requested - nearest);
+        foreach (var option in FrameRateOptions)
+        {
+            var delta = Math.Abs(requested - option);
+            if (delta < bestDelta)
+            {
+                nearest = option;
+                bestDelta = delta;
+            }
+        }
+        return nearest;
+    }
 
     [ObservableProperty]
     private TargetHeightOption _selectedTargetHeight;
@@ -170,12 +183,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _enableAdaptiveBitrate;
-
-    [ObservableProperty]
-    private bool _enableIntraRefresh;
-
-    [ObservableProperty]
-    private int _intraRefreshPeriodFrames;
 
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
@@ -240,8 +247,6 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.Codec = SelectedCodec.Codec;
         _settings.Video.ReceiveBufferFrames = ReceiveBufferFrames;
         _settings.Video.EnableAdaptiveBitrate = EnableAdaptiveBitrate;
-        _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
-        _settings.Video.IntraRefreshPeriodFrames = Math.Clamp(IntraRefreshPeriodFrames, 6, 600);
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;
