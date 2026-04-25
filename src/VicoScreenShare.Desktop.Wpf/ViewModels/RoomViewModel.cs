@@ -44,6 +44,13 @@ public sealed partial class RoomViewModel : ViewModelBase
     private WebRtcSession? _webRtc;
     private ICaptureSource? _localCaptureSource;
     private CaptureStreamer? _captureStreamer;
+    // Optional send-side packet pacer. Allocated when
+    // VideoSettings.EnableSendPacing is true; routes the encoder's
+    // onEncoded callback through PacingRtpSender.Enqueue so RTP packets
+    // hit the wire at a configurable bitrate instead of all at line rate.
+    // Null when pacing is off (the default), in which case the callback
+    // goes straight to PeerConnection.SendVideo as before.
+    private PacingRtpSender? _pacer;
     // Shared-content audio (opt-in per AudioSettings.Enabled). Allocated
     // in ShareScreenAsync when audio is enabled, torn down in
     // StopSharingInternalAsync. Reuses the same WebRtcSession as the
@@ -720,9 +727,10 @@ public sealed partial class RoomViewModel : ViewModelBase
             source.Closed += OnLocalCaptureClosed;
 
             var session = _webRtc;
+            var sendCallback = BuildVideoSendCallback(session, pick.EffectiveSettings);
             var streamer = new CaptureStreamer(
                 source,
-                (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload),
+                sendCallback,
                 pick.EffectiveSettings,
                 _encoderFactory);
             _captureStreamer = streamer;
@@ -885,6 +893,16 @@ public sealed partial class RoomViewModel : ViewModelBase
             try
             {
                 streamer.UpdateBitrate(bps);
+                // Update the pacer in lock-step so the wire pace tracks
+                // the new encoder mean. Without this the pacer keeps
+                // releasing packets at the original (higher) rate while
+                // the encoder produces fewer bits, eventually starving
+                // the queue.
+                if (_pacer is not null)
+                {
+                    var paceBps = ResolvePacingBitrate(_settings.Video, bps);
+                    _pacer.TargetBitsPerSecond = paceBps;
+                }
                 DebugLog.Write($"[room] adaptive bitrate → {bps / 1000} kbps");
             }
             catch { /* encoder tearing down */ }
@@ -920,6 +938,115 @@ public sealed partial class RoomViewModel : ViewModelBase
         session.PeerConnection.OnReceiveReport += handler;
         _bitrateController = controller;
         _rtcpReportHandler = handler;
+    }
+
+    /// <summary>
+    /// Map the SDP-negotiated sending format onto our app's
+    /// <see cref="VideoCodec"/> enum. The format's <c>Codec</c> field is
+    /// SIPSorcery's <c>VideoCodecsEnum</c>; we read by name so unknown
+    /// or empty formats fall back to the encoder's own codec rather
+    /// than crashing the pacer at the first frame.
+    /// </summary>
+    private static VideoCodec ResolveFramingCodec(SDPAudioVideoMediaFormat? sendingFormat, VideoCodec fallback)
+    {
+        if (sendingFormat is null)
+        {
+            return fallback;
+        }
+        var name = sendingFormat.Value.Name();
+        if (string.Equals(name, "VP8", StringComparison.OrdinalIgnoreCase))
+        {
+            return VideoCodec.Vp8;
+        }
+        if (string.Equals(name, "H264", StringComparison.OrdinalIgnoreCase))
+        {
+            return VideoCodec.H264;
+        }
+        return fallback;
+    }
+
+    /// <summary>
+    /// Resolve the pace bitrate for a given encoder bitrate. When
+    /// <see cref="VideoSettings.SendPacingMaxBitrateMbps"/> is non-zero,
+    /// it caps the pacer regardless of encoder rate (useful for staying
+    /// safely under a known-slow viewer's downlink). When zero (the
+    /// default), the pacer follows the encoder's current target rate so
+    /// the wire pace matches the mean rate the receiver expects.
+    /// </summary>
+    private static int ResolvePacingBitrate(VideoSettings settings, int encoderBps)
+    {
+        var override_ = settings.SendPacingMaxBitrateMbps;
+        if (override_ > 0)
+        {
+            return override_ * 1_000_000;
+        }
+        return Math.Max(500_000, encoderBps);
+    }
+
+    /// <summary>
+    /// Build the encoder-to-wire callback for a fresh share session.
+    /// Returns the callback (consumed by <see cref="CaptureStreamer"/>)
+    /// and assigns the pacer (or null when pacing is disabled) to
+    /// <see cref="_pacer"/>. The pacer's lifetime is owned by the
+    /// RoomViewModel and disposed alongside the streamer at stop time.
+    /// </summary>
+    private Action<uint, byte[], TimeSpan> BuildVideoSendCallback(WebRtcSession session, VideoSettings settings)
+    {
+        DisposePacer();
+
+        if (!settings.EnableSendPacing)
+        {
+            return (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload);
+        }
+
+        var pc = session.PeerConnection;
+        // Initial RTP timestamp: read SIPSorcery's value from the local
+        // video track. We never call SendVideo when pacing is on, so this
+        // initial value is also the only value the track ever sees from
+        // outside — our pacer maintains the running counter.
+        var initialTs = pc.VideoStream?.LocalTrack?.Timestamp ?? 0u;
+
+        // Resolve the negotiated payload type and the framing codec it
+        // dictates, the way SIPSorcery's own SendVideo does. Two notes
+        // about how this differs from "just use the encoder's codec":
+        //   1. Our SDP advertises [VP8=96, H264=102] on both peers and
+        //      the SFU answers VP8-first. So GetSendingFormat returns
+        //      VP8 even when the encoder is actually H264. SendVideo
+        //      rolls with that — it wraps H264 bytes in VP8's 1-byte
+        //      RTP framing and the receiver's matching VP8 framer
+        //      strips the byte back out, leaving raw H264 for the
+        //      decoder. The mismatch is invisible because framing is
+        //      symmetric.
+        //   2. The pacer must mimic the same trick. If we used H264
+        //      framing (FU-A) on a stream whose PT routes through the
+        //      receiver's VP8 framer, the framer eats one byte per
+        //      packet and the H264 stream comes out corrupt. That is
+        //      the bug the v1 pacer wiring shipped with — fixed here
+        //      by passing framingCodec separately from contentCodec.
+        var sendingFormat = pc.VideoStream?.GetSendingFormat();
+        var framingCodec = ResolveFramingCodec(sendingFormat, settings.Codec);
+        var payloadTypeId = sendingFormat?.ID ?? -1;
+
+        var pacer = new PacingRtpSender(
+            sendRtpRaw: (payload, ts, mb, pt) =>
+                pc.SendRtpRaw(SDPMediaTypesEnum.video, payload, ts, mb, pt),
+            getPayloadTypeId: () => payloadTypeId,
+            initialRtpTimestamp: initialTs,
+            contentCodec: settings.Codec,
+            framingCodec: framingCodec,
+            targetBitsPerSecond: ResolvePacingBitrate(settings, settings.TargetBitrate));
+        _pacer = pacer;
+        return (duration, payload, _) => pacer.Enqueue(duration, payload);
+    }
+
+    private void DisposePacer()
+    {
+        var pacer = _pacer;
+        _pacer = null;
+        if (pacer is not null)
+        {
+            try { pacer.Dispose(); } catch { }
+        }
     }
 
     private void StopAdaptiveBitrate()
@@ -1042,6 +1169,10 @@ public sealed partial class RoomViewModel : ViewModelBase
             streamer.Stop();
             streamer.Dispose();
         }
+        // Dispose AFTER the streamer so any in-flight encode callbacks
+        // hitting Enqueue have stopped firing. Pacer.Dispose joins its
+        // worker thread with a 500 ms timeout.
+        DisposePacer();
 
         if (audioStreamer is not null)
         {
@@ -1255,6 +1386,19 @@ public sealed partial class RoomViewModel : ViewModelBase
             $"loss:   up {FormatLoss(_latestUpstreamLoss, _latestUpstreamLossUtc)}  " +
             $"down {FormatLoss(_latestDownstreamLoss, _latestDownstreamLossUtc)}";
 
+        // Pacer line — only present when send-side pacing is on. Three
+        // numbers, kept compact to fit the panel width: live pace rate
+        // (adaptive-bitrate may have moved it below the configured
+        // target), current queue depth, and cumulative drop count. A
+        // non-zero drops counter means the encoder is consistently
+        // outpacing the wire and the queue is shedding old P-frames.
+        var pacer = _pacer;
+        if (pacer is not null)
+        {
+            var paceMbps = pacer.TargetBitsPerSecond / 1_000_000.0;
+            core += $"\npacer:  {paceMbps:F1} Mbps q={pacer.CurrentQueueDepth} drops={pacer.FramesDropped}";
+        }
+
         return string.IsNullOrEmpty(SelfRenderStatsLine)
             ? core
             : core + "\n" + SelfRenderStatsLine;
@@ -1336,6 +1480,10 @@ public sealed partial class RoomViewModel : ViewModelBase
                 try { _captureStreamer.Dispose(); } catch { }
                 _captureStreamer = null;
             }
+            // Joined to the streamer because it owned the encoder→pacer
+            // callback. The new PC's pacer is created fresh in
+            // RestoreSharingAfterResumeAsync.
+            DisposePacer();
 
             // Same for audio. The WASAPI loopback source stays open (it
             // has no association with the PeerConnection), but the
@@ -1656,9 +1804,10 @@ public sealed partial class RoomViewModel : ViewModelBase
             // the saved settings — the drop shouldn't silently change
             // quality.
             var effective = _effectiveVideoSettings ?? _settings.Video;
+            var sendCallback = BuildVideoSendCallback(session, effective);
             var streamer = new CaptureStreamer(
                 _localCaptureSource,
-                (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload),
+                sendCallback,
                 effective,
                 _encoderFactory);
             _captureStreamer = streamer;

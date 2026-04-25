@@ -101,6 +101,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
             ?? CodecOptions.First(c => c.IsAvailable);
         _receiveBufferFrames = Math.Clamp(_settings.Video.ReceiveBufferFrames, 1, 240);
         _enableAdaptiveBitrate = _settings.Video.EnableAdaptiveBitrate;
+        _enableSendPacing = _settings.Video.EnableSendPacing;
+        _sendPacingMaxBitrateMbps = Math.Clamp(_settings.Video.SendPacingMaxBitrateMbps, 0, 1000);
 
         // Audio settings. Bitrate combo is fixed-set so the UI stays
         // simple; people who want to experiment with 160 kbps Opus can
@@ -184,6 +186,12 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private bool _enableAdaptiveBitrate;
 
+    [ObservableProperty]
+    private bool _enableSendPacing;
+
+    [ObservableProperty]
+    private int _sendPacingMaxBitrateMbps;
+
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
     [ObservableProperty]
@@ -247,6 +255,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.Codec = SelectedCodec.Codec;
         _settings.Video.ReceiveBufferFrames = ReceiveBufferFrames;
         _settings.Video.EnableAdaptiveBitrate = EnableAdaptiveBitrate;
+        _settings.Video.EnableSendPacing = EnableSendPacing;
+        _settings.Video.SendPacingMaxBitrateMbps = Math.Clamp(SendPacingMaxBitrateMbps, 0, 1000);
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;

@@ -94,6 +94,32 @@ public sealed class VideoSettings
     /// bad links. Bits per second. Default 500 kbps.
     /// </summary>
     public int MinAdaptiveBitrate { get; set; } = 500_000;
+
+    /// <summary>
+    /// Master switch for the send-side packet pacer. When on, encoded
+    /// frames are queued and their RTP packets are released to the wire
+    /// at <see cref="SendPacingMaxBitrateMbps"/> instead of being dumped
+    /// in a back-to-back burst. Smooths the keyframe spike — a 1 MB IDR
+    /// stops overrunning a viewer's downlink router queue, at the cost
+    /// of one-time per-keyframe latency proportional to (keyframe size /
+    /// pace rate). The receiver's content-PTS pacer absorbs the latency
+    /// after the first keyframe, so steady-state cadence is unchanged.
+    /// Default off; flip on when a viewer on a slower link reports
+    /// blocky / dropped video on every keyframe.
+    /// </summary>
+    public bool EnableSendPacing { get; set; } = false;
+
+    /// <summary>
+    /// Maximum on-the-wire bitrate the pacer is allowed to release. 0
+    /// means "follow <see cref="TargetBitrate"/>" — the most common
+    /// setting, which converts the encoder's "burst above target during
+    /// a keyframe, idle afterwards" pattern into a steady stream at
+    /// target. Set a non-zero value (Mbps) to override — e.g. 25 to
+    /// stay safely under a 30 Mbit viewer's downlink. Range
+    /// <c>[1, 1000]</c> when non-zero. Ignored when
+    /// <see cref="EnableSendPacing"/> is false.
+    /// </summary>
+    public int SendPacingMaxBitrateMbps { get; set; } = 0;
 }
 
 /// <summary>

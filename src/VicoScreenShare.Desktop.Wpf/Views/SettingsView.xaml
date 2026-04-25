@@ -248,6 +248,36 @@
                     </StackPanel>
                 </ui:Card>
 
+                <!-- Send pacing -->
+                <ui:Card Margin="0,12,0,0" Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="Smooth keyframe sends" Style="{StaticResource CardHeader}" />
+                            <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                           ToolTip="Releases your encoded RTP packets at a steady bitrate instead of dumping each frame onto the wire as a burst. Stops a big keyframe from overrunning a viewer's downlink and dropping packets. Adds latency proportional to (keyframe size / pace rate) — typically a few hundred ms once at session start, absorbed by the receiver's content-time pacer.&#10;&#10;Applies on your next share." />
+                        </StackPanel>
+                        <ui:ToggleSwitch IsChecked="{Binding EnableSendPacing}"
+                                         OffContent="Off"
+                                         OnContent="On" />
+
+                        <StackPanel Margin="0,12,0,0"
+                                    Visibility="{Binding EnableSendPacing, Converter={StaticResource BoolToVisibility}}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Pace rate cap (Mbps)" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="0 means the pacer follows your encoder's target bitrate (recommended) — turns the encoder's bursty output into a steady stream at the same average rate. Set a non-zero value to cap the wire bitrate below the encoder's target — useful if you know a viewer's downlink is slower than your share's bitrate. Range 0 – 1000.&#10;&#10;Applies on your next share." />
+                            </StackPanel>
+                            <ui:NumberBox Value="{Binding SendPacingMaxBitrateMbps, Mode=TwoWay}"
+                                          Minimum="0"
+                                          Maximum="1000"
+                                          SpinButtonPlacementMode="Inline"
+                                          Margin="0,4,0,0"
+                                          HorizontalAlignment="Stretch" />
+                        </StackPanel>
+                    </StackPanel>
+                </ui:Card>
+
                 <!-- ═══════ AUDIO ═══════ -->
                 <TextBlock Text="Audio" Style="{StaticResource SectionHeader}" Margin="2,20,0,8" />
 
