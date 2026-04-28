@@ -1005,6 +1005,15 @@ internal static class Program
         // is true (Phase 2 default) and capabilities are present, otherwise
         // falls back to MFT — this is the production code path.
         var encoderFactory = new H264EncoderFactorySelector(sharedDevices.Device);
+        // Allow CLI to enable Phase 3 quality knobs so we can reproduce
+        // production behavior (intra-refresh + AQ are on by default in
+        // VideoSettings now).
+        encoderFactory.NvencOptions = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+        {
+            EnableAdaptiveQuantization = args.GetValueOrDefault("aq", "1") != "0",
+            EnableTemporalAq = args.GetValueOrDefault("aq", "1") != "0",
+            EnableIntraRefresh = args.GetValueOrDefault("intra-refresh", "1") != "0",
+        };
         var decoderFactory = new MediaFoundationH264DecoderFactory(sharedDevices.Device);
         var decoder = decoderFactory.CreateDecoder();
 

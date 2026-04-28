@@ -310,8 +310,19 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         var count = System.Threading.Interlocked.Increment(ref _frameFailureCount);
         if (count <= 5 || count % 60 == 0)
         {
-            DebugLog.Write(
-                $"[renderer] {context} threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+            // Include the stack trace on the first 3 occurrences so we can
+            // diagnose new failure modes; later events stay terse to avoid
+            // flooding the log.
+            if (count <= 3)
+            {
+                DebugLog.Write(
+                    $"[renderer] {context} threw (#{count}): {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+            }
+            else
+            {
+                DebugLog.Write(
+                    $"[renderer] {context} threw (#{count}): {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 
