@@ -77,6 +77,7 @@ internal static class Program
                 "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
                 "bench-mft-av1-decoder" => RunMftAv1DecoderProbeBenchmark(argMap),
+                "bench-av1-rtp-roundtrip" => RunAv1RtpRoundtripBenchmark(argMap),
                 "bench-nvenc-keyframe" => RunNvencKeyframeBenchmark(argMap),
                 "bench-vbv" => RunVbvBenchmark(argMap),
                 "bench-intra-refresh" => RunIntraRefreshBenchmark(argMap),
@@ -2227,6 +2228,10 @@ internal static class Program
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("  bench-nvenc-probe     run NVENC capability probe and print findings");
         Console.Error.WriteLine("  bench-mft-av1-decoder probe Media Foundation for an AV1 video decoder");
+        Console.Error.WriteLine("  bench-av1-rtp-roundtrip  encode N AV1 frames, packetize, depacketize, verify");
+        Console.Error.WriteLine("    --frames N           default 60");
+        Console.Error.WriteLine("    --mtu N              default 1200");
+        Console.Error.WriteLine("    --loss <0..0.5>      drop probability per packet, default 0");
         Console.Error.WriteLine("  bench-nvenc-keyframe  validate force-IDR + UpdateBitrate against the live encoder");
         Console.Error.WriteLine("  bench-vbv             sweep VBV buffer size, assert per-frame size variance shrinks");
         Console.Error.WriteLine("  bench-intra-refresh   validate intra-refresh produces no IDRs after frame 0");
@@ -2775,6 +2780,136 @@ internal static class Program
             Console.WriteLine($"RESULT: av1_mft_{label}_enum_threw={ex.GetType().Name}: {ex.Message}");
             return 0;
         }
+    }
+
+    /// <summary>
+    /// Phase-2 verification: end-to-end encoder → packetize → optional packet
+    /// loss → depacketize → byte-exact verify. With <c>--loss 0</c> every
+    /// frame round-trips byte-exact. With non-zero loss, frames whose RTP
+    /// packets all arrive should still round-trip; frames missing any
+    /// packet are lost (recovered via the encoder's PLI mechanism in a
+    /// real session, but this scenario only exercises the RTP layer).
+    /// </summary>
+    private static int RunAv1RtpRoundtripBenchmark(Dictionary<string, string> args)
+    {
+        const int width = 1280;
+        const int height = 720;
+        const int fps = 30;
+        const long bitrate = 4_000_000;
+        var totalFrames = int.Parse(args.GetValueOrDefault("frames", "60"));
+        var mtu = int.Parse(args.GetValueOrDefault("mtu", "1200"));
+        var lossRate = double.Parse(args.GetValueOrDefault("loss", "0"));
+        if (lossRate < 0 || lossRate > 0.5)
+        {
+            Console.Error.WriteLine("ERROR: --loss must be in [0, 0.5]");
+            return 2;
+        }
+
+        Console.WriteLine($"# bench-av1-rtp-roundtrip {width}x{height}@{fps} bitrate={bitrate} frames={totalFrames} mtu={mtu} loss={lossRate}");
+
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAv1Available)
+        {
+            Console.Error.WriteLine("NVENC AV1 unavailable on this hardware");
+            return 2;
+        }
+
+        using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1Encoder(
+            width, height, fps, bitrate, gopFrames: fps * 2, devices.Device);
+
+        var stride = width * 4;
+        var bgra = new byte[height * stride];
+        FillGradient(bgra, width, height);
+
+        var encoded = new List<byte[]>();
+        encoder.OutputAvailable += () =>
+        {
+            while (encoder.TryDequeueEncoded(out var ef))
+            {
+                lock (encoded) { encoded.Add(ef.Bytes); }
+            }
+        };
+
+        var clock = Stopwatch.StartNew();
+        for (var i = 0; i < totalFrames; i++)
+        {
+            MutatePattern(bgra, i * 7, width);
+            encoder.EncodeBgra(bgra, stride, clock.Elapsed);
+        }
+        Thread.Sleep(300);
+
+        // Roundtrip stats. With loss=0, every byte must match. With loss
+        // > 0, the frame is irrecoverable — we count those separately
+        // and don't expect byte-equality on them.
+        var rng = new Random(42);
+        var roundtripExact = 0;
+        var byteMismatch = 0;
+        var lostByDrop = 0;
+        var totalPackets = 0;
+        var droppedPackets = 0;
+
+        lock (encoded)
+        {
+            foreach (var frame in encoded)
+            {
+                var packets = VicoScreenShare.Client.Media.Codecs.Av1RtpPacketizer.Packetize(frame, mtu);
+                totalPackets += packets.Count;
+
+                List<byte[]> delivered;
+                var anyDropped = false;
+                if (lossRate > 0)
+                {
+                    delivered = new List<byte[]>(packets.Count);
+                    foreach (var p in packets)
+                    {
+                        if (rng.NextDouble() < lossRate)
+                        {
+                            droppedPackets++;
+                            anyDropped = true;
+                            continue;
+                        }
+                        delivered.Add(p);
+                    }
+                }
+                else
+                {
+                    delivered = packets.ToList();
+                }
+
+                if (anyDropped)
+                {
+                    lostByDrop++;
+                    continue;
+                }
+
+                var assembled = VicoScreenShare.Client.Media.Codecs.Av1RtpDepacketizer.Depacketize(delivered);
+                if (assembled is null || !assembled.SequenceEqual(frame))
+                {
+                    byteMismatch++;
+                }
+                else
+                {
+                    roundtripExact++;
+                }
+            }
+        }
+
+        Console.WriteLine($"RESULT: encoded_frames={encoded.Count}");
+        Console.WriteLine($"RESULT: total_packets={totalPackets}");
+        Console.WriteLine($"RESULT: dropped_packets={droppedPackets}");
+        Console.WriteLine($"RESULT: roundtrip_exact={roundtripExact}");
+        Console.WriteLine($"RESULT: byte_mismatch={byteMismatch}");
+        Console.WriteLine($"RESULT: lost_by_drop={lostByDrop}");
+
+        // Pass conditions:
+        //   loss=0: every frame must round-trip exactly.
+        //   loss>0: every NON-dropped frame must round-trip exactly
+        //          (the dropped ones are expected to fail).
+        var pass = byteMismatch == 0 && (roundtripExact + lostByDrop) == encoded.Count;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (byte_mismatch={byteMismatch})");
+        return pass ? 0 : 3;
     }
 
     private static int RunNvencProbeBenchmark(Dictionary<string, string> args)
