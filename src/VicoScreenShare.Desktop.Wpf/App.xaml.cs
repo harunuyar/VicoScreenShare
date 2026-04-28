@@ -95,8 +95,15 @@ public partial class App : Application
             // dominates for realistic setups (one viewer per machine).
             // A proper fix for the multi-viewer case is cross-device
             // shared textures; deferred as a focused follow-up.
+            // H264EncoderFactorySelector is the composite that prefers a
+            // direct NVENC SDK path on NVIDIA GPUs (when implemented) and
+            // falls back to the MFT path otherwise. During Phase 1 it
+            // unconditionally returns the MFT encoder; the wiring is here
+            // so the capability probe runs at startup and the diagnostic
+            // log already shows whether NVENC will be picked once Phase 2
+            // lands.
             ClientHost.VideoCodecCatalog.Register(
-                new MediaFoundationH264EncoderFactory(sharedDevices.Device),
+                new H264EncoderFactorySelector(sharedDevices.Device),
                 new MediaFoundationH264DecoderFactory(sharedDevices.Device));
         }
 

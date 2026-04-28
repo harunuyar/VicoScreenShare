@@ -75,6 +75,7 @@ internal static class Program
                 "bench-av-sync" => RunAvSyncBenchmark(argMap),
                 "list-targets" => RunListTargetsScenario(argMap).GetAwaiter().GetResult(),
                 "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
+                "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -2136,5 +2137,42 @@ internal static class Program
         Console.Error.WriteLine("  bench-process-audio   capture a process's audio via PROCESS_LOOPBACK");
         Console.Error.WriteLine("    --pid N             required, target process id");
         Console.Error.WriteLine("    --duration sec      default 5");
+        Console.Error.WriteLine("  bench-nvenc-probe     run NVENC capability probe and print findings");
+    }
+
+    /// <summary>
+    /// Phase-1 verification: open a transient NVENC session, query the
+    /// capability bits we care about, print them as machine-grep-able
+    /// RESULT lines. Confirms (a) the DLL loads, (b) struct version
+    /// arithmetic matches the driver's expectation, (c) the function
+    /// table populates with non-null entrypoints, (d) the H.264 codec
+    /// GUID is in the supported list, and (e) the cap query path works.
+    /// On a non-NVIDIA host this prints "available=0" with the reason.
+    /// </summary>
+    private static int RunNvencProbeBenchmark(Dictionary<string, string> args)
+    {
+        Console.WriteLine("# bench-nvenc-probe");
+
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+
+        VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.ResetForTesting();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+
+        Console.WriteLine($"RESULT: available={(caps.IsAvailable ? 1 : 0)}");
+        if (!caps.IsAvailable)
+        {
+            Console.WriteLine($"RESULT: reason={caps.UnavailableReason}");
+            return 0;
+        }
+
+        Console.WriteLine($"RESULT: temporal_aq={(caps.SupportsTemporalAq ? 1 : 0)}");
+        Console.WriteLine($"RESULT: lookahead={(caps.SupportsLookahead ? 1 : 0)}");
+        Console.WriteLine($"RESULT: intra_refresh={(caps.SupportsIntraRefresh ? 1 : 0)}");
+        Console.WriteLine($"RESULT: custom_vbv={(caps.SupportsCustomVbvBufferSize ? 1 : 0)}");
+        Console.WriteLine($"RESULT: async_encode={(caps.SupportsAsyncEncode ? 1 : 0)}");
+        Console.WriteLine($"RESULT: width_max={caps.MaxWidth}");
+        Console.WriteLine($"RESULT: height_max={caps.MaxHeight}");
+        return 0;
     }
 }
