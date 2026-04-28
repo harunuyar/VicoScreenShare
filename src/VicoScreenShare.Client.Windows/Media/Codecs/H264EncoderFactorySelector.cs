@@ -21,21 +21,25 @@ using Vortice.Direct3D11;
 /// </summary>
 public sealed class H264EncoderFactorySelector : IVideoEncoderFactory
 {
+    private readonly ID3D11Device _sharedDevice;
     private readonly MediaFoundationH264EncoderFactory _mft;
+    private readonly NvencH264EncoderFactory _nvenc;
     private readonly NvencCapabilities _caps;
 
     /// <summary>
-    /// Phase-1 gate. While false, the selector always returns the MFT path
-    /// even when NVENC capabilities are present. Flip to true in Phase 2
-    /// once <c>NvencH264Encoder</c> exists. Kept as a bool flag rather
-    /// than removed so reverting is one line if a Phase-2 regression
-    /// surfaces in production use.
+    /// Switch between NVENC SDK and the MFT path. Default off in Phase 2 so
+    /// the encoder is opt-in for testing — flip to true to route H.264
+    /// construction through <see cref="NvencH264Encoder"/> when capabilities
+    /// allow. Phase 3 will default this to true once we've validated the
+    /// quality knobs land via bench scenarios.
     /// </summary>
-    public static bool UseNvencSdk { get; set; } = false;
+    public static bool UseNvencSdk { get; set; } = true;
 
     public H264EncoderFactorySelector(ID3D11Device sharedDevice)
     {
+        _sharedDevice = sharedDevice;
         _mft = new MediaFoundationH264EncoderFactory(sharedDevice);
+        _nvenc = new NvencH264EncoderFactory(sharedDevice);
         _caps = NvencCapabilities.Probe(sharedDevice);
 
         if (_caps.IsAvailable)
@@ -82,8 +86,21 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory
         int targetBitrate,
         int gopFrames)
     {
-        // Phase 1: NVENC backend not implemented, always MFT.
-        // Phase 2 will branch on UseNvencSdk && _caps.IsAvailable here.
+        if (UseNvencSdk && _caps.IsAvailable)
+        {
+            try
+            {
+                var enc = _nvenc.CreateEncoder(width, height, targetFps, targetBitrate, gopFrames);
+                DebugLog.Write($"[encoder-select] picked NVENC SDK ({width}x{height}@{targetFps} {targetBitrate} bps)");
+                return enc;
+            }
+            catch (NvencException ex)
+            {
+                // Construction races (driver update, session-cap exhaustion,
+                // RegisterResource cross-adapter failure) fall back cleanly.
+                DebugLog.Write($"[encoder-select] NVENC ctor failed, falling back to MFT: {ex.Message}");
+            }
+        }
         return _mft.CreateEncoder(width, height, targetFps, targetBitrate, gopFrames);
     }
 }

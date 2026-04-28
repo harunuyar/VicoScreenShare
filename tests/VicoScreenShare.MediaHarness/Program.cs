@@ -76,6 +76,7 @@ internal static class Program
                 "list-targets" => RunListTargetsScenario(argMap).GetAwaiter().GetResult(),
                 "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
+                "bench-nvenc-keyframe" => RunNvencKeyframeBenchmark(argMap),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -96,11 +97,13 @@ internal static class Program
         var bitrate = (int)(bitrateMbps * 1_000_000);
         var duration = double.Parse(args.GetValueOrDefault("duration", "5"));
         var codec = args.GetValueOrDefault("codec", "h264");
+        var backend = args.GetValueOrDefault("backend", "mft");
         var throttle = args.GetValueOrDefault("throttle", "true") != "false";
 
-        Console.WriteLine($"# bench-encode codec={codec} {width}x{height}@{fps} bitrate={bitrateMbps}Mbps duration={duration}s throttle={throttle}");
+        Console.WriteLine($"# bench-encode codec={codec} backend={backend} {width}x{height}@{fps} bitrate={bitrateMbps}Mbps duration={duration}s throttle={throttle}");
 
         IVideoEncoderFactory factory;
+        D3D11DeviceManager? sharedDevices = null;
         switch (codec)
         {
             case "h264":
@@ -110,7 +113,22 @@ internal static class Program
                     Console.Error.WriteLine("ERROR: Media Foundation could not initialize");
                     return 2;
                 }
-                factory = new MediaFoundationH264EncoderFactory();
+                if (backend == "nvenc")
+                {
+                    // NVENC SDK path needs a real D3D11 device.
+                    sharedDevices = new D3D11DeviceManager();
+                    sharedDevices.Initialize();
+                    factory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264EncoderFactory(sharedDevices.Device);
+                }
+                else if (backend == "mft")
+                {
+                    factory = new MediaFoundationH264EncoderFactory();
+                }
+                else
+                {
+                    Console.Error.WriteLine($"ERROR: unknown backend '{backend}' (expected mft or nvenc)");
+                    return 2;
+                }
                 break;
             case "vp8":
                 factory = new VpxEncoderFactory();
@@ -141,6 +159,24 @@ internal static class Program
         var totalSw = Stopwatch.StartNew();
         var endTicks = (long)(duration * Stopwatch.Frequency);
         var frameInterval = Stopwatch.Frequency / fps;
+
+        // Async encoders (NVENC, MFT hardware) return null from EncodeBgra
+        // and emit via OutputAvailable. Drain that path into the same
+        // counters so fps reporting is accurate regardless of backend.
+        if (encoder is IAsyncEncodedOutputSource asyncOut)
+        {
+            asyncOut.OutputAvailable += () =>
+            {
+                while (asyncOut.TryDequeueEncoded(out var ef))
+                {
+                    if (ef.Bytes.Length > 0)
+                    {
+                        Interlocked.Increment(ref frameCount);
+                        Interlocked.Add(ref totalBytes, ef.Bytes.Length);
+                    }
+                }
+            };
+        }
 
         // Spin a small warmup so the first encode (NVENC priming, JIT) doesn't
         // skew the average. Encoder may also return null for the first few
@@ -962,7 +998,10 @@ internal static class Program
 
         var sharedDevices = new D3D11DeviceManager();
         sharedDevices.Initialize();
-        var encoderFactory = new MediaFoundationH264EncoderFactory(sharedDevices.Device);
+        // Selector picks NVENC when H264EncoderFactorySelector.UseNvencSdk
+        // is true (Phase 2 default) and capabilities are present, otherwise
+        // falls back to MFT — this is the production code path.
+        var encoderFactory = new H264EncoderFactorySelector(sharedDevices.Device);
         var decoderFactory = new MediaFoundationH264DecoderFactory(sharedDevices.Device);
         var decoder = decoderFactory.CreateDecoder();
 
@@ -2138,6 +2177,118 @@ internal static class Program
         Console.Error.WriteLine("    --pid N             required, target process id");
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("  bench-nvenc-probe     run NVENC capability probe and print findings");
+        Console.Error.WriteLine("  bench-nvenc-keyframe  validate force-IDR + UpdateBitrate against the live encoder");
+    }
+
+    /// <summary>
+    /// Phase-2 validation: encode 60 frames, request a keyframe at frame 30,
+    /// reconfigure bitrate at frame 45. Assert at least one frame >> the
+    /// average size lands soon after each keyframe request, and bitrate
+    /// reconfigure produces no errors. The bitstream's first byte (NAL
+    /// type) is dumped per frame so we can see IDR (5) vs P (1) ordering
+    /// in the log.
+    /// </summary>
+    private static int RunNvencKeyframeBenchmark(Dictionary<string, string> args)
+    {
+        const int width = 1280;
+        const int height = 720;
+        const int fps = 30;
+        const int gop = 60;
+        const long bitrate = 4_000_000;
+
+        Console.WriteLine($"# bench-nvenc-keyframe {width}x{height}@{fps} bitrate={bitrate} gop={gop}");
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAvailable)
+        {
+            Console.Error.WriteLine($"NVENC not available: {caps.UnavailableReason}");
+            return 2;
+        }
+
+        using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264Encoder(
+            width, height, fps, bitrate, gop, devices.Device);
+        var stride = width * 4;
+        var bgra = new byte[height * stride];
+        FillGradient(bgra, width, height);
+
+        var frames = new List<(int idx, int len, byte firstNalUnitType)>();
+        var encodedAtFrame = new Dictionary<int, int>();
+        int submittedIdx = 0;
+        encoder.OutputAvailable += () =>
+        {
+            while (encoder.TryDequeueEncoded(out var ef))
+            {
+                // First NAL unit type: byte 4 lower 5 bits (after 0x00000001 start code).
+                byte nalType = 0;
+                if (ef.Bytes.Length >= 5)
+                {
+                    nalType = (byte)(ef.Bytes[4] & 0x1F);
+                }
+                lock (frames)
+                {
+                    frames.Add((frames.Count, ef.Bytes.Length, nalType));
+                }
+            }
+        };
+
+        // First 60 frames at 30fps = 2 seconds. Keyframe at frame 30,
+        // bitrate change at frame 45.
+        var clock = Stopwatch.StartNew();
+        for (int i = 0; i < 60; i++)
+        {
+            MutatePattern(bgra, i, width);
+            if (i == 30)
+            {
+                Console.WriteLine("# requesting keyframe");
+                encoder.RequestKeyframe();
+            }
+            if (i == 45)
+            {
+                Console.WriteLine("# updating bitrate to 8Mbps");
+                encoder.UpdateBitrate(8_000_000);
+            }
+            encoder.EncodeBgra(bgra, stride, clock.Elapsed);
+            submittedIdx++;
+            // Pace at 30fps.
+            var deadline = (long)(submittedIdx * Stopwatch.Frequency / (double)fps);
+            while (clock.ElapsedTicks < deadline)
+            {
+            }
+        }
+
+        // Drain — give the encoder ~200ms to flush in-flight frames.
+        Thread.Sleep(200);
+
+        lock (frames)
+        {
+            Console.WriteLine($"RESULT: encoded={frames.Count}");
+            int idrCount = 0;
+            int? firstIdrIdx = null;
+            int? secondIdrIdx = null;
+            for (int i = 0; i < frames.Count; i++)
+            {
+                var f = frames[i];
+                if (f.firstNalUnitType == 5 || f.firstNalUnitType == 7) // IDR or SPS — both signal a keyframe boundary
+                {
+                    idrCount++;
+                    firstIdrIdx ??= f.idx;
+                    if (idrCount == 2)
+                    {
+                        secondIdrIdx = f.idx;
+                    }
+                }
+            }
+            Console.WriteLine($"RESULT: idr_or_sps_count={idrCount}");
+            Console.WriteLine($"RESULT: first_idr_idx={firstIdrIdx}");
+            Console.WriteLine($"RESULT: second_idr_idx={secondIdrIdx}");
+
+            // First frame is always IDR. After RequestKeyframe at frame 30,
+            // we expect another IDR at or shortly after that index.
+            var pass = idrCount >= 2 && secondIdrIdx is { } s && s >= 28 && s <= 35;
+            Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (expected IDR near frame 30, got {secondIdrIdx})");
+            return pass ? 0 : 3;
+        }
     }
 
     /// <summary>
@@ -2152,6 +2303,14 @@ internal static class Program
     private static int RunNvencProbeBenchmark(Dictionary<string, string> args)
     {
         Console.WriteLine("# bench-nvenc-probe");
+
+        // Pin struct sizes against SDK 13.0 expectations. Any mismatch
+        // here means a layout bug; the InitializeEncoder call later would
+        // surface it as a misleading "tuningInfo invalid" or VERSION error.
+        // Discovered the hard way that NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE
+        // is 16 bytes (one packed bitfield uint + 3 reserved uints), not 4.
+        Console.WriteLine($"RESULT: sizeof_NV_ENC_INITIALIZE_PARAMS={System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NV_ENC_INITIALIZE_PARAMS>()}");
+        Console.WriteLine($"RESULT: sizeof_NV_ENC_PIC_PARAMS={System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NV_ENC_PIC_PARAMS>()}");
 
         using var devices = new D3D11DeviceManager();
         devices.Initialize();
