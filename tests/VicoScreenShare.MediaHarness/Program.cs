@@ -78,6 +78,7 @@ internal static class Program
                 "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
                 "bench-mft-av1-decoder" => RunMftAv1DecoderProbeBenchmark(argMap),
                 "bench-av1-rtp-roundtrip" => RunAv1RtpRoundtripBenchmark(argMap),
+                "bench-av1-encode-decode" => RunAv1EncodeDecodeBenchmark(argMap),
                 "bench-nvenc-keyframe" => RunNvencKeyframeBenchmark(argMap),
                 "bench-vbv" => RunVbvBenchmark(argMap),
                 "bench-intra-refresh" => RunIntraRefreshBenchmark(argMap),
@@ -2232,6 +2233,10 @@ internal static class Program
         Console.Error.WriteLine("    --frames N           default 60");
         Console.Error.WriteLine("    --mtu N              default 1200");
         Console.Error.WriteLine("    --loss <0..0.5>      drop probability per packet, default 0");
+        Console.Error.WriteLine("  bench-av1-encode-decode  full encode → packetize → depacketize → MFT decode loop");
+        Console.Error.WriteLine("    --frames N           default 60");
+        Console.Error.WriteLine("    --width N            default 1280");
+        Console.Error.WriteLine("    --height N           default 720");
         Console.Error.WriteLine("  bench-nvenc-keyframe  validate force-IDR + UpdateBitrate against the live encoder");
         Console.Error.WriteLine("  bench-vbv             sweep VBV buffer size, assert per-frame size variance shrinks");
         Console.Error.WriteLine("  bench-intra-refresh   validate intra-refresh produces no IDRs after frame 0");
@@ -2909,6 +2914,96 @@ internal static class Program
         //          (the dropped ones are expected to fail).
         var pass = byteMismatch == 0 && (roundtripExact + lostByDrop) == encoded.Count;
         Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (byte_mismatch={byteMismatch})");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Phase-3 verification: end-to-end NVENC AV1 encode → RTP packetize →
+    /// RTP depacketize → MFT AV1 decode → BGRA frame out. Counts decoded
+    /// frames vs encoded frames; PASS when ≥95% of encoded frames decode
+    /// successfully on the clean (no-loss) path. Both encoder and decoder
+    /// are real on the user's hardware — this is the proof that the AV1
+    /// pipeline works end-to-end.
+    /// </summary>
+    private static int RunAv1EncodeDecodeBenchmark(Dictionary<string, string> args)
+    {
+        var width = int.Parse(args.GetValueOrDefault("width", "1280"));
+        var height = int.Parse(args.GetValueOrDefault("height", "720"));
+        var totalFrames = int.Parse(args.GetValueOrDefault("frames", "60"));
+        const int fps = 30;
+        const long bitrate = 4_000_000;
+
+        Console.WriteLine($"# bench-av1-encode-decode {width}x{height}@{fps} bitrate={bitrate} frames={totalFrames}");
+
+        MediaFoundationRuntime.EnsureInitialized();
+        if (!MediaFoundationRuntime.IsAvailable)
+        {
+            Console.Error.WriteLine("ERROR: Media Foundation could not initialize");
+            return 2;
+        }
+
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAv1Available)
+        {
+            Console.Error.WriteLine("NVENC AV1 unavailable on this hardware");
+            return 2;
+        }
+        if (!MediaFoundationAv1Decoder.HasAv1DecoderInstalled())
+        {
+            Console.Error.WriteLine("MFT AV1 decoder unavailable (install \"AV1 Video Extension\" from Microsoft Store)");
+            return 2;
+        }
+
+        using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1Encoder(
+            width, height, fps, bitrate, gopFrames: fps * 2, devices.Device);
+        using var decoder = new MediaFoundationAv1Decoder(devices.Device);
+
+        // Track decoded frames via the GPU output handler (preferred when
+        // shared device is set) AND the CPU return-value path (fallback).
+        // We just count — pixel validation isn't needed; the AV1 decoder
+        // not crashing on our bitstream is the key signal.
+        int decoded = 0;
+        decoder.GpuOutputHandler = (_, _, _, _) => Interlocked.Increment(ref decoded);
+
+        // Encoder output → RTP packetize → depacketize → decoder feed.
+        // Each EncodedFrame is one AV1 temporal unit; we packetize and
+        // immediately depacketize back (no actual network), then hand
+        // the reassembled OBU stream to the MFT decoder.
+        var encodedCount = 0;
+        encoder.OutputAvailable += () =>
+        {
+            while (encoder.TryDequeueEncoded(out var ef))
+            {
+                Interlocked.Increment(ref encodedCount);
+                var packets = VicoScreenShare.Client.Media.Codecs.Av1RtpPacketizer.Packetize(ef.Bytes, mtu: 1200);
+                var assembled = VicoScreenShare.Client.Media.Codecs.Av1RtpDepacketizer.Depacketize(packets);
+                if (assembled is not null)
+                {
+                    var cpuFrames = decoder.Decode(assembled, ef.Timestamp);
+                    Interlocked.Add(ref decoded, cpuFrames.Count);
+                }
+            }
+        };
+
+        var stride = width * 4;
+        var bgra = new byte[height * stride];
+        FillGradient(bgra, width, height);
+        var clock = Stopwatch.StartNew();
+        for (var i = 0; i < totalFrames; i++)
+        {
+            MutatePattern(bgra, i * 7, width);
+            encoder.EncodeBgra(bgra, stride, clock.Elapsed);
+        }
+        Thread.Sleep(500); // drain encoder + decoder pipelines
+
+        Console.WriteLine($"RESULT: encoded={encodedCount}");
+        Console.WriteLine($"RESULT: decoded={decoded}");
+        var ratio = encodedCount == 0 ? 0.0 : (double)decoded / encodedCount;
+        Console.WriteLine($"RESULT: decode_ratio={ratio:F3}");
+        var pass = encodedCount > 0 && ratio >= 0.95;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (decoded={decoded} / encoded={encodedCount})");
         return pass ? 0 : 3;
     }
 
