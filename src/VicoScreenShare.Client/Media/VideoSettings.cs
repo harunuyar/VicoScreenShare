@@ -172,6 +172,15 @@ public sealed class VideoSettings
     /// <see cref="EnableIntraRefresh"/> is true.
     /// </summary>
     public int IntraRefreshPeriodFrames { get; set; } = 0;
+
+    /// <summary>
+    /// NVENC preset level 1..7. P1 = fastest / lowest quality, P7 = slowest
+    /// / highest quality. Default 4 = balanced. P5/P6 are typically a
+    /// quality win on a 4070-class card without breaking the real-time
+    /// budget; P7 is for archive-grade quality where encode time is no
+    /// constraint. Ignored on the MFT path.
+    /// </summary>
+    public int NvencPreset { get; set; } = 4;
 }
 
 /// <summary>

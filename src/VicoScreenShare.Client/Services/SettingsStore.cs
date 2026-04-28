@@ -134,6 +134,7 @@ public sealed class SettingsStore
         public bool EnableIntraRefresh { get; set; } = true;
         public int IntraRefreshPeriodFrames { get; set; } = 0;
         public H264EncoderBackend H264Backend { get; set; } = H264EncoderBackend.Auto;
+        public int NvencPreset { get; set; } = 4;
 
         // Audio (shared-content loopback). Separate fields rather than a
         // nested object so existing settings.json files still load cleanly
@@ -183,6 +184,7 @@ public sealed class SettingsStore
             EnableIntraRefresh = source.Video.EnableIntraRefresh,
             IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
             H264Backend = source.Video.H264Backend,
+            NvencPreset = source.Video.NvencPreset,
             AudioForceSystemAudio = source.Audio.ForceSystemAudio,
             AudioTargetBitrate = source.Audio.TargetBitrate,
             AudioStereo = source.Audio.Stereo,
@@ -213,6 +215,7 @@ public sealed class SettingsStore
                     EnableIntraRefresh = EnableIntraRefresh,
                     IntraRefreshPeriodFrames = IntraRefreshPeriodFrames >= 0 && IntraRefreshPeriodFrames <= 14_400 ? IntraRefreshPeriodFrames : 0,
                     H264Backend = H264Backend,
+                    NvencPreset = NvencPreset >= 1 && NvencPreset <= 7 ? NvencPreset : 4,
                 },
                 Audio = new AudioSettings
                 {

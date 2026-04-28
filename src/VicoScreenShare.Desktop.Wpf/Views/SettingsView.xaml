@@ -262,6 +262,19 @@
 
                         <StackPanel Margin="0,0,0,12">
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="Encoder preset" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Trades encode time for quality at the same bitrate. P1 is fastest / lowest quality; P7 is slowest / highest quality. P4 (balanced) is the historical default. Higher presets help most at low bitrates; on a modern GPU even P6 keeps real-time at 1080p60.&#10;&#10;Applies on your next share." />
+                            </StackPanel>
+                            <ComboBox ItemsSource="{Binding NvencPresetOptions}"
+                                      SelectedItem="{Binding SelectedNvencPreset}"
+                                      DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
+                                      Margin="0,4,0,0" />
+                        </StackPanel>
+
+                        <StackPanel Margin="0,0,0,12">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                                 <TextBlock Text="Adaptive quantization" Style="{StaticResource FieldLabel}" />
                                 <ui:SymbolIcon Style="{StaticResource InfoIcon}"
                                                ToolTip="Shifts bit budget toward complex regions like text and edges, away from flat areas. Single biggest quality knob for screen content. Recommended on." />

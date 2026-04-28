@@ -114,6 +114,8 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _enableAdaptiveQuantization = _settings.Video.EnableAdaptiveQuantization;
         _enableEncoderLookahead = _settings.Video.EnableEncoderLookahead;
         _enableIntraRefresh = _settings.Video.EnableIntraRefresh;
+        _selectedNvencPreset = NvencPresetOptions.FirstOrDefault(o => o.Level == _settings.Video.NvencPreset)
+            ?? NvencPresetOptions.First(o => o.Level == 4);
 
         // Capability flags from the live encoder factory selector. Greys
         // the corresponding toggle when the GPU lacks the feature.
@@ -240,6 +242,20 @@ public sealed partial class SettingsViewModel : ViewModelBase
     private bool _enableIntraRefresh;
 
     [ObservableProperty]
+    private NvencPresetOption _selectedNvencPreset = null!;
+
+    public IReadOnlyList<NvencPresetOption> NvencPresetOptions { get; } = new[]
+    {
+        new NvencPresetOption(1, "P1 — Fastest (lowest quality)"),
+        new NvencPresetOption(2, "P2 — Faster"),
+        new NvencPresetOption(3, "P3 — Fast"),
+        new NvencPresetOption(4, "P4 — Balanced (default)"),
+        new NvencPresetOption(5, "P5 — Slow"),
+        new NvencPresetOption(6, "P6 — Slower"),
+        new NvencPresetOption(7, "P7 — Slowest (highest quality)"),
+    };
+
+    [ObservableProperty]
     private H264BackendOption _selectedH264Backend = null!;
 
     /// <summary>The H.264 backend choices we offer. NVENC SDK appears only
@@ -351,6 +367,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableEncoderLookahead = EnableEncoderLookahead;
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
         _settings.Video.H264Backend = SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto;
+        _settings.Video.NvencPreset = SelectedNvencPreset?.Level ?? 4;
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;
@@ -440,4 +457,5 @@ public sealed record QualityPreset(
     ScalerMode Scaler);
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);
 public sealed record H264BackendOption(H264EncoderBackend Backend, string DisplayName);
+public sealed record NvencPresetOption(int Level, string DisplayName);
 public sealed record AudioBitrateOption(string DisplayName, int Bitrate);

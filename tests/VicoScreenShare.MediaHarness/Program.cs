@@ -121,7 +121,12 @@ internal static class Program
                     // NVENC SDK path needs a real D3D11 device.
                     sharedDevices = new D3D11DeviceManager();
                     sharedDevices.Initialize();
-                    factory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264EncoderFactory(sharedDevices.Device);
+                    var nvencFactory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264EncoderFactory(sharedDevices.Device);
+                    nvencFactory.Options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+                    {
+                        Preset = int.Parse(args.GetValueOrDefault("preset", "4")),
+                    };
+                    factory = nvencFactory;
                 }
                 else if (backend == "mft")
                 {
@@ -1013,6 +1018,7 @@ internal static class Program
             EnableAdaptiveQuantization = args.GetValueOrDefault("aq", "1") != "0",
             EnableTemporalAq = args.GetValueOrDefault("aq", "1") != "0",
             EnableIntraRefresh = args.GetValueOrDefault("intra-refresh", "1") != "0",
+            Preset = int.Parse(args.GetValueOrDefault("preset", "4")),
         };
         var decoderFactory = new MediaFoundationH264DecoderFactory(sharedDevices.Device);
         var decoder = decoderFactory.CreateDecoder();

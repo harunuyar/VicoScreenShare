@@ -997,6 +997,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         EnableIntraRefresh = settings.EnableIntraRefresh,
         IntraRefreshPeriodFrames = settings.IntraRefreshPeriodFrames,
         VbvBufferSizeBits = 0, // preset default for now; readability/motion modes will tune later
+        Preset = settings.NvencPreset,
     };
 
     private void ApplyEncoderFactorySettings(VideoSettings settings)

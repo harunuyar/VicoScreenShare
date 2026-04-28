@@ -226,8 +226,9 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         preset.presetCfg.version = NvencApi.NV_ENC_CONFIG_VER;
         preset.presetCfg.rcParams.version = NvencApi.NV_ENC_RC_PARAMS_VER;
 
+        var presetGuid = NvencGuids.PresetByLevel(_options.Preset);
         var status = _getPresetConfig(_encoder,
-            NvencGuids.CodecH264, NvencGuids.PresetP4,
+            NvencGuids.CodecH264, presetGuid,
             NV_ENC_TUNING_INFO.LowLatency, &preset);
         if (status != NVENCSTATUS.NV_ENC_SUCCESS)
         {
@@ -245,7 +246,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         var init = default(NV_ENC_INITIALIZE_PARAMS);
         init.version = NvencApi.NV_ENC_INITIALIZE_PARAMS_VER;
         init.encodeGUID = NvencGuids.CodecH264;
-        init.presetGUID = NvencGuids.PresetP4;
+        init.presetGUID = presetGuid;
         init.encodeWidth = (uint)_width;
         init.encodeHeight = (uint)_height;
         init.darWidth = (uint)_width;
@@ -759,7 +760,8 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         preset.version = NvencApi.NV_ENC_PRESET_CONFIG_VER;
         preset.presetCfg.version = NvencApi.NV_ENC_CONFIG_VER;
         preset.presetCfg.rcParams.version = NvencApi.NV_ENC_RC_PARAMS_VER;
-        var pcs = _getPresetConfig(_encoder, NvencGuids.CodecH264, NvencGuids.PresetP4,
+        var presetGuid = NvencGuids.PresetByLevel(_options.Preset);
+        var pcs = _getPresetConfig(_encoder, NvencGuids.CodecH264, presetGuid,
             NV_ENC_TUNING_INFO.LowLatency, &preset);
         if (pcs != NVENCSTATUS.NV_ENC_SUCCESS)
         {
@@ -777,7 +779,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         rec.version = NvencApi.NV_ENC_RECONFIGURE_PARAMS_VER;
         rec.reInitEncodeParams.version = NvencApi.NV_ENC_INITIALIZE_PARAMS_VER;
         rec.reInitEncodeParams.encodeGUID = NvencGuids.CodecH264;
-        rec.reInitEncodeParams.presetGUID = NvencGuids.PresetP4;
+        rec.reInitEncodeParams.presetGUID = presetGuid;
         rec.reInitEncodeParams.encodeWidth = (uint)_width;
         rec.reInitEncodeParams.encodeHeight = (uint)_height;
         rec.reInitEncodeParams.darWidth = (uint)_width;

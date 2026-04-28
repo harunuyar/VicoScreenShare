@@ -66,5 +66,15 @@ public sealed class NvencEncodeOptions
     /// </summary>
     public int VbvBufferSizeBits { get; init; }
 
+    /// <summary>
+    /// NVENC preset level 1..7. P1 = fastest / lowest quality, P7 = slowest
+    /// / highest quality. Default 4 = balanced (the historical hard-coded
+    /// value). Higher levels redirect more silicon toward rate-distortion
+    /// optimization at the cost of encode time; on a 4070-class GPU even
+    /// P6 keeps real-time at 1080p60 with headroom. Out-of-range values
+    /// clamp to P4 inside <see cref="NvencGuids.PresetByLevel"/>.
+    /// </summary>
+    public int Preset { get; init; } = 4;
+
     public static readonly NvencEncodeOptions Default = new();
 }
