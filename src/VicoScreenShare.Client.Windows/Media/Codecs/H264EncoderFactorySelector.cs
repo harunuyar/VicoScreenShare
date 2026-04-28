@@ -19,7 +19,7 @@ using Vortice.Direct3D11;
 /// <see cref="UseNvencSdk"/> gate; Phase 3 enables the gate by default
 /// when capabilities are present.
 /// </summary>
-public sealed class H264EncoderFactorySelector : IVideoEncoderFactory
+public sealed class H264EncoderFactorySelector : IVideoEncoderFactory, IVideoEncoderDimensionPolicy
 {
     private readonly ID3D11Device _sharedDevice;
     private readonly MediaFoundationH264EncoderFactory _mft;
@@ -91,6 +91,8 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory
     public bool SupportsTextureInput =>
         (UseNvencSdk && _caps.IsAvailable)
         || _mft.SupportsTextureInput;
+
+    public bool RequiresMacroblockAlignedDimensions => UseNvencSdk && _caps.IsAvailable;
 
     public IVideoEncoder CreateEncoder(
         int width,

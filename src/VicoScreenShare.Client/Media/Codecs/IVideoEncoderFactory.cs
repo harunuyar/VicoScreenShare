@@ -36,3 +36,12 @@ public interface IVideoEncoderFactory
         int targetBitrate,
         int gopFrames);
 }
+
+/// <summary>
+/// Optional factory policy for encoders whose bitstream/display paths are
+/// cleaner when targets land on codec block boundaries.
+/// </summary>
+public interface IVideoEncoderDimensionPolicy
+{
+    bool RequiresMacroblockAlignedDimensions { get; }
+}

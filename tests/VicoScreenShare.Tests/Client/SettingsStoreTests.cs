@@ -105,6 +105,10 @@ public class SettingsStoreTests : IDisposable
                 TargetBitrate = 25_000_000,
                 KeyframeIntervalSeconds = 1.0,
                 Scaler = ScalerMode.Lanczos,
+                EnableAdaptiveQuantization = false,
+                EnableEncoderLookahead = true,
+                EnableIntraRefresh = false,
+                IntraRefreshPeriodFrames = 90,
             },
         });
 
@@ -115,6 +119,10 @@ public class SettingsStoreTests : IDisposable
         loaded.Video.TargetBitrate.Should().Be(25_000_000);
         loaded.Video.KeyframeIntervalSeconds.Should().Be(1.0);
         loaded.Video.Scaler.Should().Be(ScalerMode.Lanczos);
+        loaded.Video.EnableAdaptiveQuantization.Should().BeFalse();
+        loaded.Video.EnableEncoderLookahead.Should().BeTrue();
+        loaded.Video.EnableIntraRefresh.Should().BeFalse();
+        loaded.Video.IntraRefreshPeriodFrames.Should().Be(90);
     }
 
     [Fact]

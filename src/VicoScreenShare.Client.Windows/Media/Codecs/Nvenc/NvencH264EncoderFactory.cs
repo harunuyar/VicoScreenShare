@@ -8,7 +8,7 @@ using Vortice.Direct3D11;
 /// the composite <see cref="H264EncoderFactorySelector"/> is what callers
 /// actually register, so on non-NVIDIA hosts this factory is never reached.
 /// </summary>
-public sealed class NvencH264EncoderFactory : IVideoEncoderFactory
+public sealed class NvencH264EncoderFactory : IVideoEncoderFactory, IVideoEncoderDimensionPolicy
 {
     private readonly ID3D11Device _sharedDevice;
 
@@ -28,6 +28,8 @@ public sealed class NvencH264EncoderFactory : IVideoEncoderFactory
     public bool IsAvailable => NvencCapabilities.Probe(_sharedDevice).IsAvailable;
 
     public bool SupportsTextureInput => IsAvailable;
+
+    public bool RequiresMacroblockAlignedDimensions => true;
 
     public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) =>
         new NvencH264Encoder(width, height, targetFps, targetBitrate, gopFrames, _sharedDevice, Options);

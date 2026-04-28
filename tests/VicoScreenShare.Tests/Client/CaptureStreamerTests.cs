@@ -2,6 +2,7 @@ namespace VicoScreenShare.Tests.Client;
 
 using FluentAssertions;
 using VicoScreenShare.Client.Media;
+using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
 
 public class CaptureStreamerTests
@@ -119,6 +120,31 @@ public class CaptureStreamerTests
     }
 
     [Fact]
+    public void H264_downscale_aligns_odd_width_targets_to_macroblock_boundary()
+    {
+        var source = new FakeCaptureSource();
+        var settings = new VideoSettings
+        {
+            TargetHeight = 360,
+            TargetFrameRate = 30,
+        };
+        using var streamer = new CaptureStreamer(
+            source,
+            (_, _, _) => { },
+            settings,
+            new FakeVideoEncoderFactory(VideoCodec.H264, requiresMacroblockAlignedDimensions: true));
+        streamer.Start();
+
+        const int width = 1010;
+        const int height = 564;
+        var bgra = new byte[width * height * 4];
+        source.PumpFrame(bgra, width, height, strideBytes: width * 4, TimeSpan.FromMilliseconds(0));
+
+        streamer.CurrentEncoderHeight.Should().Be(352);
+        streamer.CurrentEncoderWidth.Should().Be(640);
+    }
+
+    [Fact]
     public void Stop_detaches_from_source_and_halts_emission()
     {
         var source = new FakeCaptureSource();
@@ -161,5 +187,36 @@ public class CaptureStreamerTests
         }
 
         public void RaiseClosed() => Closed?.Invoke();
+    }
+
+    private sealed class FakeVideoEncoderFactory(
+        VideoCodec codec,
+        bool requiresMacroblockAlignedDimensions = false) : IVideoEncoderFactory, IVideoEncoderDimensionPolicy
+    {
+        public VideoCodec Codec => codec;
+        public bool IsAvailable => true;
+        public bool SupportsTextureInput => false;
+        public bool RequiresMacroblockAlignedDimensions => requiresMacroblockAlignedDimensions;
+
+        public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) =>
+            new FakeVideoEncoder(codec, width, height);
+    }
+
+    private sealed class FakeVideoEncoder(VideoCodec codec, int width, int height) : IVideoEncoder
+    {
+        public VideoCodec Codec => codec;
+        public int Width => width;
+        public int Height => height;
+        public bool SupportsTextureInput => false;
+
+        public EncodedFrame? EncodeBgra(byte[] bgra, int stride, TimeSpan inputTimestamp) =>
+            new EncodedFrame(new byte[] { 1 }, inputTimestamp);
+
+        public EncodedFrame? EncodeTexture(IntPtr nativeTexture, int sourceWidth, int sourceHeight, TimeSpan inputTimestamp) =>
+            throw new NotSupportedException();
+
+        public void Dispose()
+        {
+        }
     }
 }

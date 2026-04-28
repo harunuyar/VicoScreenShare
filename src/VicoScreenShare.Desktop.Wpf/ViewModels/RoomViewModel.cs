@@ -178,15 +178,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _sessionCodec = resolved.selected;
         _encoderFactory = resolved.encoderFactory;
         _decoderFactory = resolved.decoderFactory;
-        if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc)
-        {
-            mfEnc.Scaler = settings.Video.Scaler;
-        }
-        if (_encoderFactory is H264EncoderFactorySelector selectorEnc)
-        {
-            selectorEnc.Scaler = settings.Video.Scaler;
-            selectorEnc.NvencOptions = BuildNvencOptions(settings.Video);
-        }
+        ApplyEncoderFactorySettings(settings.Video);
 
         _roomId = initial.RoomId;
         _yourPeerId = initial.YourPeerId;
@@ -718,6 +710,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
             _pickedTarget = pick.Target;
             _effectiveVideoSettings = pick.EffectiveSettings;
+            ApplyEncoderFactorySettings(pick.EffectiveSettings);
             source = await _captureProvider.CreateSourceForTargetAsync(pick.Target, pick.EffectiveSettings.TargetFrameRate).ConfigureAwait(true);
             if (source is null)
             {
@@ -1006,6 +999,19 @@ public sealed partial class RoomViewModel : ViewModelBase
         VbvBufferSizeBits = 0, // preset default for now; readability/motion modes will tune later
     };
 
+    private void ApplyEncoderFactorySettings(VideoSettings settings)
+    {
+        if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc)
+        {
+            mfEnc.Scaler = settings.Scaler;
+        }
+        if (_encoderFactory is H264EncoderFactorySelector selectorEnc)
+        {
+            selectorEnc.Scaler = settings.Scaler;
+            selectorEnc.NvencOptions = BuildNvencOptions(settings);
+        }
+    }
+
     /// <summary>
     /// Build the encoder-to-wire callback for a fresh share session.
     /// Returns the callback (consumed by <see cref="CaptureStreamer"/>)
@@ -1141,15 +1147,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         _sessionCodec = resolved.selected;
         _encoderFactory = resolved.encoderFactory;
         _decoderFactory = resolved.decoderFactory;
-        if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc2)
-        {
-            mfEnc2.Scaler = _settings.Video.Scaler;
-        }
-        if (_encoderFactory is H264EncoderFactorySelector selectorEnc2)
-        {
-            selectorEnc2.Scaler = _settings.Video.Scaler;
-            selectorEnc2.NvencOptions = BuildNvencOptions(_settings.Video);
-        }
+        ApplyEncoderFactorySettings(_settings.Video);
 
         _negotiationStarted = false;
         await StartWebRtcAsync().ConfigureAwait(true);
@@ -1832,6 +1830,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             // the saved settings — the drop shouldn't silently change
             // quality.
             var effective = _effectiveVideoSettings ?? _settings.Video;
+            ApplyEncoderFactorySettings(effective);
             var sendCallback = BuildVideoSendCallback(session, effective);
             var streamer = new CaptureStreamer(
                 _localCaptureSource,

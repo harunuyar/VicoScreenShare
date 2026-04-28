@@ -44,6 +44,7 @@ public sealed class CaptureStreamer : IDisposable
     private readonly int _targetFps;
     private readonly int _targetBitrate;
     private readonly int _gopFrames;
+    private readonly bool _requiresMacroblockAlignedDimensions;
     private readonly long _frameGapTicks;
     private readonly long _frameGapToleranceTicks;
     private long _nextDeadlineTicks;
@@ -77,6 +78,7 @@ public sealed class CaptureStreamer : IDisposable
         _source = source;
         _onEncoded = onEncoded;
         _encoderFactory = encoderFactory;
+        _requiresMacroblockAlignedDimensions = encoderFactory is IVideoEncoderDimensionPolicy { RequiresMacroblockAlignedDimensions: true };
         // 0 means "match source" — let the first frame decide.
         _targetHeight = settings.TargetHeight <= 0 ? 0 : Math.Max(2, settings.TargetHeight);
         _targetFps = Math.Clamp(settings.TargetFrameRate, 1, 240);
@@ -255,6 +257,42 @@ public sealed class CaptureStreamer : IDisposable
         return true;
     }
 
+    private (int Width, int Height) ResolveEncoderDimensions(int sourceWidth, int sourceHeight)
+    {
+        int encWidth;
+        int encHeight;
+        if (_targetHeight == 0 || _targetHeight >= sourceHeight)
+        {
+            encWidth = sourceWidth;
+            encHeight = sourceHeight;
+        }
+        else
+        {
+            encHeight = _targetHeight & ~1;
+            var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
+            encWidth = derivedWidth & ~1;
+            if (encWidth < 2)
+            {
+                encWidth = 2;
+            }
+        }
+
+        // NVENC's H.264 path can expose padded coded dimensions when an
+        // odd-aspect target width is not macroblock-aligned. Align both axes
+        // for those odd-width cases, but leave standard widths such as
+        // 1920x1080 alone since their vertical crop is handled correctly.
+        if (_requiresMacroblockAlignedDimensions && encWidth >= 16 && encWidth % 16 != 0)
+        {
+            encWidth &= ~15;
+            if (encHeight >= 16)
+            {
+                encHeight &= ~15;
+            }
+        }
+
+        return (encWidth, encHeight);
+    }
+
     private int _diagnosticFrames;
 
     /// <summary>
@@ -296,22 +334,7 @@ public sealed class CaptureStreamer : IDisposable
             return;
         }
 
-        int encWidth, encHeight;
-        if (_targetHeight == 0 || _targetHeight >= sourceHeight)
-        {
-            encWidth = sourceWidth;
-            encHeight = sourceHeight;
-        }
-        else
-        {
-            encHeight = _targetHeight & ~1;
-            var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
-            encWidth = derivedWidth & ~1;
-            if (encWidth < 2)
-            {
-                encWidth = 2;
-            }
-        }
+        var (encWidth, encHeight) = ResolveEncoderDimensions(sourceWidth, sourceHeight);
 
         if (_diagnosticFrames < 3)
         {
@@ -426,22 +449,7 @@ public sealed class CaptureStreamer : IDisposable
         // Decide the encoder target. The user picks a target height; width is
         // derived from the source aspect ratio at runtime so the output never
         // distorts. _targetHeight == 0 (or >= source) means "don't downscale".
-        int encWidth, encHeight;
-        if (_targetHeight == 0 || _targetHeight >= sourceHeight)
-        {
-            encWidth = sourceWidth;
-            encHeight = sourceHeight;
-        }
-        else
-        {
-            encHeight = _targetHeight & ~1;
-            var derivedWidth = (int)Math.Round((double)sourceWidth * encHeight / sourceHeight);
-            encWidth = derivedWidth & ~1;
-            if (encWidth < 2)
-            {
-                encWidth = 2;
-            }
-        }
+        var (encWidth, encHeight) = ResolveEncoderDimensions(sourceWidth, sourceHeight);
 
         // Compact the source into a packed BGRA buffer first.
         var packedRowBytes = sourceWidth * 4;

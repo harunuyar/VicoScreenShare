@@ -129,6 +129,10 @@ public sealed class SettingsStore
         public int MinAdaptiveBitrate { get; set; } = 500_000;
         public bool EnableSendPacing { get; set; } = false;
         public int SendPacingBitrateMultiplier { get; set; } = 1;
+        public bool EnableAdaptiveQuantization { get; set; } = true;
+        public bool EnableEncoderLookahead { get; set; } = false;
+        public bool EnableIntraRefresh { get; set; } = true;
+        public int IntraRefreshPeriodFrames { get; set; } = 0;
 
         // Audio (shared-content loopback). Separate fields rather than a
         // nested object so existing settings.json files still load cleanly
@@ -173,6 +177,10 @@ public sealed class SettingsStore
             MinAdaptiveBitrate = source.Video.MinAdaptiveBitrate,
             EnableSendPacing = source.Video.EnableSendPacing,
             SendPacingBitrateMultiplier = source.Video.SendPacingBitrateMultiplier,
+            EnableAdaptiveQuantization = source.Video.EnableAdaptiveQuantization,
+            EnableEncoderLookahead = source.Video.EnableEncoderLookahead,
+            EnableIntraRefresh = source.Video.EnableIntraRefresh,
+            IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
             AudioForceSystemAudio = source.Audio.ForceSystemAudio,
             AudioTargetBitrate = source.Audio.TargetBitrate,
             AudioStereo = source.Audio.Stereo,
@@ -198,6 +206,10 @@ public sealed class SettingsStore
                     MinAdaptiveBitrate = MinAdaptiveBitrate > 0 && MinAdaptiveBitrate <= 50_000_000 ? MinAdaptiveBitrate : 500_000,
                     EnableSendPacing = EnableSendPacing,
                     SendPacingBitrateMultiplier = SendPacingBitrateMultiplier >= 1 && SendPacingBitrateMultiplier <= 5 ? SendPacingBitrateMultiplier : 1,
+                    EnableAdaptiveQuantization = EnableAdaptiveQuantization,
+                    EnableEncoderLookahead = EnableEncoderLookahead,
+                    EnableIntraRefresh = EnableIntraRefresh,
+                    IntraRefreshPeriodFrames = IntraRefreshPeriodFrames >= 0 && IntraRefreshPeriodFrames <= 14_400 ? IntraRefreshPeriodFrames : 0,
                 },
                 Audio = new AudioSettings
                 {

@@ -2,12 +2,11 @@ namespace VicoScreenShare.Client.Windows.Media.Codecs.Nvenc;
 
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
+using VicoScreenShare.Client.Windows.Direct3D;
 using Vortice.Direct3D11;
 using IVideoEncoder = VicoScreenShare.Client.Media.Codecs.IVideoEncoder;
 
@@ -38,6 +37,9 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
     private readonly NvencCapabilities _capabilities;
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
+    private ITextureScaler? _textureScaler;
+    private int _textureScalerSrcWidth;
+    private int _textureScalerSrcHeight;
 
     private IntPtr _encoder;
     private NV_ENCODE_API_FUNCTION_LIST _table;
@@ -496,7 +498,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         {
             _context.Unmap(staging, 0);
         }
-        SubmitEncode(staging.NativePointer, inputTimestamp);
+        SubmitEncode(staging.NativePointer, _width, _height, inputTimestamp);
         return null;
     }
 
@@ -506,11 +508,11 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         {
             return null;
         }
-        SubmitEncode(nativeTexture, inputTimestamp);
+        SubmitEncode(nativeTexture, sourceWidth, sourceHeight, inputTimestamp);
         return null;
     }
 
-    private void SubmitEncode(IntPtr sourceTexture, TimeSpan timestamp)
+    private void SubmitEncode(IntPtr sourceTexture, int sourceWidth, int sourceHeight, TimeSpan timestamp)
     {
         // Block until a slot is free. The pump returns slots to the
         // semaphore as completion events fire — backpressure on the caller
@@ -543,11 +545,31 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
 
         lock (_submitLock)
         {
-            // Copy from source into the encoder-owned texture. CopyResource
-            // is GPU-side; the source can be any same-device texture.
+            // Scale/copy from source into the encoder-owned texture. The
+            // source texture usually has capture dimensions while this slot
+            // has encoder dimensions; CopyResource is valid only when they
+            // match, so route every texture input through the same GPU scaler
+            // the MFT path uses.
             using var srcTexture = new ID3D11Texture2D(sourceTexture);
             srcTexture.AddRef(); // we don't own this pointer; balance the wrapper's Release.
-            _context.CopyResource(slot.Texture, srcTexture);
+            try
+            {
+                if (sourceWidth == _width && sourceHeight == _height)
+                {
+                    _context.CopyResource(slot.Texture, srcTexture);
+                }
+                else
+                {
+                    EnsureTextureScaler(sourceWidth, sourceHeight);
+                    _textureScaler!.Process(srcTexture, slot.Texture);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Write($"[nvenc] texture scaler threw: {ex.Message}");
+                _freeSlots.Release();
+                return;
+            }
 
             // Map the registered handle for this encode. The mapped pointer
             // must be freed via NvEncUnmapInputResource after the pump locks
@@ -607,6 +629,22 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
             // the queue was empty.
             _pendingNotify.Set();
         }
+    }
+
+    private void EnsureTextureScaler(int sourceWidth, int sourceHeight)
+    {
+        if (_textureScaler is not null
+            && _textureScalerSrcWidth == sourceWidth
+            && _textureScalerSrcHeight == sourceHeight)
+        {
+            return;
+        }
+
+        _textureScaler?.Dispose();
+        _textureScaler = new D3D11VideoScaler(_device, sourceWidth, sourceHeight, _width, _height);
+        _textureScalerSrcWidth = sourceWidth;
+        _textureScalerSrcHeight = sourceHeight;
+        DebugLog.Write($"[nvenc] texture pipeline built {sourceWidth}x{sourceHeight} -> {_width}x{_height} (Bilinear)");
     }
 
     private void EventPumpLoop()
@@ -733,6 +771,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         preset.presetCfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE.Cbr;
         preset.presetCfg.rcParams.averageBitRate = (uint)Math.Min(_bitrate, uint.MaxValue);
         preset.presetCfg.rcParams.maxBitRate = preset.presetCfg.rcParams.averageBitRate;
+        ApplyQualityOptions(ref preset.presetCfg);
 
         var rec = default(NV_ENC_RECONFIGURE_PARAMS);
         rec.version = NvencApi.NV_ENC_RECONFIGURE_PARAMS_VER;
@@ -748,7 +787,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         rec.reInitEncodeParams.enableEncodeAsync = 1;
         rec.reInitEncodeParams.enablePTD = 1;
         rec.reInitEncodeParams.tuningInfo = NV_ENC_TUNING_INFO.LowLatency;
-        rec.reInitEncodeParams.bufferFormat = NV_ENC_BUFFER_FORMAT.Argb;
+        rec.reInitEncodeParams.bufferFormat = NV_ENC_BUFFER_FORMAT.Undefined;
         rec.reInitEncodeParams.maxEncodeWidth = (uint)_width;
         rec.reInitEncodeParams.maxEncodeHeight = (uint)_height;
         rec.reInitEncodeParams.encodeConfig = &preset.presetCfg;
@@ -835,6 +874,8 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
             _destroy?.Invoke(_encoder);
             _encoder = IntPtr.Zero;
         }
+        try { _textureScaler?.Dispose(); } catch { }
+        _textureScaler = null;
         if (_cancelEvent != IntPtr.Zero)
         {
             CloseHandle(_cancelEvent);
