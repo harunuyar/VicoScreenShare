@@ -43,7 +43,14 @@ public sealed class NvencCapabilities
         bool supportsCustomVbv,
         bool supportsAsyncEncode,
         int maxWidth,
-        int maxHeight)
+        int maxHeight,
+        bool isAv1Available,
+        bool av1SupportsTemporalAq,
+        bool av1SupportsLookahead,
+        bool av1SupportsIntraRefresh,
+        bool av1SupportsCustomVbv,
+        int av1MaxWidth,
+        int av1MaxHeight)
     {
         IsAvailable = isAvailable;
         UnavailableReason = unavailableReason;
@@ -54,9 +61,19 @@ public sealed class NvencCapabilities
         SupportsAsyncEncode = supportsAsyncEncode;
         MaxWidth = maxWidth;
         MaxHeight = maxHeight;
+        IsAv1Available = isAv1Available;
+        Av1SupportsTemporalAq = av1SupportsTemporalAq;
+        Av1SupportsLookahead = av1SupportsLookahead;
+        Av1SupportsIntraRefresh = av1SupportsIntraRefresh;
+        Av1SupportsCustomVbvBufferSize = av1SupportsCustomVbv;
+        Av1MaxWidth = av1MaxWidth;
+        Av1MaxHeight = av1MaxHeight;
     }
 
-    /// <summary>True when an NVENC SDK encoder can be constructed for this device.</summary>
+    /// <summary>True when an NVENC SDK encoder can be constructed for this device.
+    /// Equivalent to "H.264 encode is available" — the H.264 path is the
+    /// minimum any NVENC-capable card supports. AV1 is queried separately
+    /// via <see cref="IsAv1Available"/>.</summary>
     public bool IsAvailable { get; }
 
     /// <summary>
@@ -65,19 +82,26 @@ public sealed class NvencCapabilities
     /// </summary>
     public string? UnavailableReason { get; }
 
+    // ----- H.264 caps (back-compat: these are the original properties) -----
     public bool SupportsTemporalAq { get; }
-
     public bool SupportsLookahead { get; }
-
     public bool SupportsIntraRefresh { get; }
-
     public bool SupportsCustomVbvBufferSize { get; }
-
     public bool SupportsAsyncEncode { get; }
-
     public int MaxWidth { get; }
-
     public int MaxHeight { get; }
+
+    // ----- AV1 caps (Phase 0 additions) -----
+    /// <summary>True when the GPU advertises hardware AV1 encode (RTX 40+,
+    /// Intel Arc, AMD RDNA 3+). False on Ada-and-older NVIDIA, AMD RDNA 2-,
+    /// Intel pre-Arc.</summary>
+    public bool IsAv1Available { get; }
+    public bool Av1SupportsTemporalAq { get; }
+    public bool Av1SupportsLookahead { get; }
+    public bool Av1SupportsIntraRefresh { get; }
+    public bool Av1SupportsCustomVbvBufferSize { get; }
+    public int Av1MaxWidth { get; }
+    public int Av1MaxHeight { get; }
 
     /// <summary>
     /// Probe once per process for a given D3D11 device. Subsequent calls
@@ -247,6 +271,7 @@ public sealed class NvencCapabilities
             }
 
             var supportsH264 = false;
+            var supportsAv1 = false;
             var arraySize = (int)Math.Min(expectedCount, 16u);
             var guids = stackalloc Guid[arraySize];
             uint guidCount;
@@ -258,7 +283,10 @@ public sealed class NvencCapabilities
                     if (guids[i] == NvencGuids.CodecH264)
                     {
                         supportsH264 = true;
-                        break;
+                    }
+                    else if (guids[i] == NvencGuids.CodecAv1)
+                    {
+                        supportsAv1 = true;
                     }
                 }
             }
@@ -269,19 +297,46 @@ public sealed class NvencCapabilities
                 return Unavailable(reason);
             }
 
-            var temporalAq = QueryCap(getCaps, encoder, NV_ENC_CAPS.SupportTemporalAq);
-            var lookahead = QueryCap(getCaps, encoder, NV_ENC_CAPS.SupportLookahead);
-            var intraRefresh = QueryCap(getCaps, encoder, NV_ENC_CAPS.SupportIntraRefresh);
-            var customVbv = QueryCap(getCaps, encoder, NV_ENC_CAPS.SupportCustomVbvBufSize);
-            var asyncEncode = QueryCap(getCaps, encoder, NV_ENC_CAPS.AsyncEncodeSupport);
-            var widthMax = QueryCapInt(getCaps, encoder, NV_ENC_CAPS.WidthMax);
-            var heightMax = QueryCapInt(getCaps, encoder, NV_ENC_CAPS.HeightMax);
+            var h264 = NvencGuids.CodecH264;
+            var temporalAq = QueryCap(getCaps, encoder, h264, NV_ENC_CAPS.SupportTemporalAq);
+            var lookahead = QueryCap(getCaps, encoder, h264, NV_ENC_CAPS.SupportLookahead);
+            var intraRefresh = QueryCap(getCaps, encoder, h264, NV_ENC_CAPS.SupportIntraRefresh);
+            var customVbv = QueryCap(getCaps, encoder, h264, NV_ENC_CAPS.SupportCustomVbvBufSize);
+            var asyncEncode = QueryCap(getCaps, encoder, h264, NV_ENC_CAPS.AsyncEncodeSupport);
+            var widthMax = QueryCapInt(getCaps, encoder, h264, NV_ENC_CAPS.WidthMax);
+            var heightMax = QueryCapInt(getCaps, encoder, h264, NV_ENC_CAPS.HeightMax);
+
+            // AV1 caps. Each query is gated on the codec being supported —
+            // querying caps against an unsupported codec GUID returns
+            // INVALID_PARAM and would noise the log. Default the values to
+            // false / 0 for non-AV1 hardware.
+            var av1TemporalAq = false;
+            var av1Lookahead = false;
+            var av1IntraRefresh = false;
+            var av1CustomVbv = false;
+            var av1WidthMax = 0;
+            var av1HeightMax = 0;
+            if (supportsAv1)
+            {
+                var av1 = NvencGuids.CodecAv1;
+                av1TemporalAq = QueryCap(getCaps, encoder, av1, NV_ENC_CAPS.SupportTemporalAq);
+                av1Lookahead = QueryCap(getCaps, encoder, av1, NV_ENC_CAPS.SupportLookahead);
+                av1IntraRefresh = QueryCap(getCaps, encoder, av1, NV_ENC_CAPS.SupportIntraRefresh);
+                av1CustomVbv = QueryCap(getCaps, encoder, av1, NV_ENC_CAPS.SupportCustomVbvBufSize);
+                av1WidthMax = QueryCapInt(getCaps, encoder, av1, NV_ENC_CAPS.WidthMax);
+                av1HeightMax = QueryCapInt(getCaps, encoder, av1, NV_ENC_CAPS.HeightMax);
+            }
 
             DebugLog.Write(
                 $"[nvenc] probe: ok h264=1 temporal_aq={(temporalAq ? 1 : 0)} "
                 + $"lookahead={(lookahead ? 1 : 0)} intra_refresh={(intraRefresh ? 1 : 0)} "
                 + $"custom_vbv={(customVbv ? 1 : 0)} async={(asyncEncode ? 1 : 0)} "
                 + $"max={widthMax}x{heightMax}");
+            DebugLog.Write(
+                $"[nvenc] probe: av1={(supportsAv1 ? 1 : 0)} "
+                + $"av1_temporal_aq={(av1TemporalAq ? 1 : 0)} av1_lookahead={(av1Lookahead ? 1 : 0)} "
+                + $"av1_intra_refresh={(av1IntraRefresh ? 1 : 0)} av1_custom_vbv={(av1CustomVbv ? 1 : 0)} "
+                + $"av1_max={av1WidthMax}x{av1HeightMax}");
 
             return new NvencCapabilities(
                 isAvailable: true,
@@ -292,7 +347,14 @@ public sealed class NvencCapabilities
                 supportsCustomVbv: customVbv,
                 supportsAsyncEncode: asyncEncode,
                 maxWidth: widthMax,
-                maxHeight: heightMax);
+                maxHeight: heightMax,
+                isAv1Available: supportsAv1,
+                av1SupportsTemporalAq: av1TemporalAq,
+                av1SupportsLookahead: av1Lookahead,
+                av1SupportsIntraRefresh: av1IntraRefresh,
+                av1SupportsCustomVbv: av1CustomVbv,
+                av1MaxWidth: av1WidthMax,
+                av1MaxHeight: av1HeightMax);
         }
         finally
         {
@@ -300,7 +362,7 @@ public sealed class NvencCapabilities
         }
     }
 
-    private static unsafe bool QueryCap(NvencApi.NvEncGetEncodeCapsFn fn, IntPtr encoder, NV_ENC_CAPS cap)
+    private static unsafe bool QueryCap(NvencApi.NvEncGetEncodeCapsFn fn, IntPtr encoder, Guid codecGuid, NV_ENC_CAPS cap)
     {
         var capsParam = new NV_ENC_CAPS_PARAM
         {
@@ -308,7 +370,7 @@ public sealed class NvencCapabilities
             capsToQuery = cap,
         };
         int value;
-        var status = fn(encoder, NvencGuids.CodecH264, ref capsParam, &value);
+        var status = fn(encoder, codecGuid, ref capsParam, &value);
         if (status != NVENCSTATUS.NV_ENC_SUCCESS)
         {
             DebugLog.Write($"[nvenc] cap {cap} query failed: {status}");
@@ -317,7 +379,7 @@ public sealed class NvencCapabilities
         return value != 0;
     }
 
-    private static unsafe int QueryCapInt(NvencApi.NvEncGetEncodeCapsFn fn, IntPtr encoder, NV_ENC_CAPS cap)
+    private static unsafe int QueryCapInt(NvencApi.NvEncGetEncodeCapsFn fn, IntPtr encoder, Guid codecGuid, NV_ENC_CAPS cap)
     {
         var capsParam = new NV_ENC_CAPS_PARAM
         {
@@ -325,7 +387,7 @@ public sealed class NvencCapabilities
             capsToQuery = cap,
         };
         int value;
-        var status = fn(encoder, NvencGuids.CodecH264, ref capsParam, &value);
+        var status = fn(encoder, codecGuid, ref capsParam, &value);
         if (status != NVENCSTATUS.NV_ENC_SUCCESS)
         {
             return 0;
@@ -357,7 +419,14 @@ public sealed class NvencCapabilities
         supportsCustomVbv: false,
         supportsAsyncEncode: false,
         maxWidth: 0,
-        maxHeight: 0);
+        maxHeight: 0,
+        isAv1Available: false,
+        av1SupportsTemporalAq: false,
+        av1SupportsLookahead: false,
+        av1SupportsIntraRefresh: false,
+        av1SupportsCustomVbv: false,
+        av1MaxWidth: 0,
+        av1MaxHeight: 0);
 
     private static string Decode(uint v) => $"{v & 0xFFFFFFu}.{(v >> 24) & 0xFFu}";
 

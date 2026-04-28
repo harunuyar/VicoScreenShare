@@ -76,6 +76,7 @@ internal static class Program
                 "list-targets" => RunListTargetsScenario(argMap).GetAwaiter().GetResult(),
                 "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
+                "bench-mft-av1-decoder" => RunMftAv1DecoderProbeBenchmark(argMap),
                 "bench-nvenc-keyframe" => RunNvencKeyframeBenchmark(argMap),
                 "bench-vbv" => RunVbvBenchmark(argMap),
                 "bench-intra-refresh" => RunIntraRefreshBenchmark(argMap),
@@ -2195,6 +2196,7 @@ internal static class Program
         Console.Error.WriteLine("    --pid N             required, target process id");
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("  bench-nvenc-probe     run NVENC capability probe and print findings");
+        Console.Error.WriteLine("  bench-mft-av1-decoder probe Media Foundation for an AV1 video decoder");
         Console.Error.WriteLine("  bench-nvenc-keyframe  validate force-IDR + UpdateBitrate against the live encoder");
         Console.Error.WriteLine("  bench-vbv             sweep VBV buffer size, assert per-frame size variance shrinks");
         Console.Error.WriteLine("  bench-intra-refresh   validate intra-refresh produces no IDRs after frame 0");
@@ -2661,6 +2663,90 @@ internal static class Program
     /// GUID is in the supported list, and (e) the cap query path works.
     /// On a non-NVIDIA host this prints "available=0" with the reason.
     /// </summary>
+    /// <summary>
+    /// Phase-0 (AV1 plan): probe Media Foundation for an AV1 video decoder.
+    /// Enumerates MFT VideoDecoder candidates filtered on input subtype
+    /// MFVideoFormat_AV1 ({31305641-0000-0010-8000-00AA00389B71}, FOURCC
+    /// 'AV01'). A non-empty result means MFT can decode AV1 on this host —
+    /// either built-in (Windows 11 with sufficient hardware) or via the
+    /// Microsoft Store "AV1 Video Extension" package.
+    ///
+    /// Output is per-MFT: friendly name, hardware/software flag, and the
+    /// underlying CLSID.
+    /// </summary>
+    private static int RunMftAv1DecoderProbeBenchmark(Dictionary<string, string> args)
+    {
+        Console.WriteLine("# bench-mft-av1-decoder");
+        VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationRuntime.EnsureInitialized();
+        if (!VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationRuntime.IsAvailable)
+        {
+            Console.Error.WriteLine("ERROR: Media Foundation could not initialize");
+            return 2;
+        }
+
+        // MFVideoFormat_AV1 = {31305641-0000-0010-8000-00AA00389B71} — FOURCC
+        // 'AV01' as the first DWORD, then Microsoft's standard GUID tail.
+        var mfVideoFormatAv1 = new Guid(
+            0x31305641, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
+        var inputFilter = new Vortice.MediaFoundation.RegisterTypeInfo
+        {
+            GuidMajorType = Vortice.MediaFoundation.MediaTypeGuids.Video,
+            GuidSubtype = mfVideoFormatAv1,
+        };
+
+        // Try hardware first, then software. Same flags pattern as the
+        // H.264 decoder probe in MediaFoundationH264Decoder.CreateDecoder.
+        var hwFlags = (uint)(Vortice.MediaFoundation.EnumFlag.EnumFlagHardware
+                             | Vortice.MediaFoundation.EnumFlag.EnumFlagSyncmft
+                             | Vortice.MediaFoundation.EnumFlag.EnumFlagAsyncmft
+                             | Vortice.MediaFoundation.EnumFlag.EnumFlagSortandfilter);
+        var swFlags = (uint)(Vortice.MediaFoundation.EnumFlag.EnumFlagSyncmft
+                             | Vortice.MediaFoundation.EnumFlag.EnumFlagSortandfilter);
+
+        int hwCount = EnumerateAv1Decoders(inputFilter, hwFlags, "hardware");
+        int swCount = EnumerateAv1Decoders(inputFilter, swFlags, "software");
+
+        Console.WriteLine($"RESULT: av1_mft_hardware_decoders={hwCount}");
+        Console.WriteLine($"RESULT: av1_mft_software_decoders={swCount}");
+        Console.WriteLine($"RESULT: av1_mft_total={hwCount + swCount}");
+        var pass = (hwCount + swCount) > 0;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} — {(pass ? "MFT AV1 decoder available" : "no AV1 MFT decoder; need NVDEC fallback or AV1 Video Extension install")}");
+        return pass ? 0 : 3;
+    }
+
+    private static int EnumerateAv1Decoders(Vortice.MediaFoundation.RegisterTypeInfo inputFilter, uint flags, string label)
+    {
+        try
+        {
+            using var collection = Vortice.MediaFoundation.MediaFactory.MFTEnumEx(
+                Vortice.MediaFoundation.TransformCategoryGuids.VideoDecoder,
+                flags,
+                inputType: inputFilter,
+                outputType: null);
+
+            int count = 0;
+            foreach (var activate in collection)
+            {
+                count++;
+                try
+                {
+                    var name = activate.GetString(Vortice.MediaFoundation.TransformAttributeKeys.MftFriendlyNameAttribute);
+                    Console.WriteLine($"RESULT: av1_mft_{label}: {(string.IsNullOrEmpty(name) ? "(unnamed)" : name)}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"RESULT: av1_mft_{label}: (name query threw: {ex.Message})");
+                }
+            }
+            return count;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"RESULT: av1_mft_{label}_enum_threw={ex.GetType().Name}: {ex.Message}");
+            return 0;
+        }
+    }
+
     private static int RunNvencProbeBenchmark(Dictionary<string, string> args)
     {
         Console.WriteLine("# bench-nvenc-probe");
@@ -2693,6 +2779,16 @@ internal static class Program
         Console.WriteLine($"RESULT: async_encode={(caps.SupportsAsyncEncode ? 1 : 0)}");
         Console.WriteLine($"RESULT: width_max={caps.MaxWidth}");
         Console.WriteLine($"RESULT: height_max={caps.MaxHeight}");
+        Console.WriteLine($"RESULT: av1_available={(caps.IsAv1Available ? 1 : 0)}");
+        if (caps.IsAv1Available)
+        {
+            Console.WriteLine($"RESULT: av1_temporal_aq={(caps.Av1SupportsTemporalAq ? 1 : 0)}");
+            Console.WriteLine($"RESULT: av1_lookahead={(caps.Av1SupportsLookahead ? 1 : 0)}");
+            Console.WriteLine($"RESULT: av1_intra_refresh={(caps.Av1SupportsIntraRefresh ? 1 : 0)}");
+            Console.WriteLine($"RESULT: av1_custom_vbv={(caps.Av1SupportsCustomVbvBufferSize ? 1 : 0)}");
+            Console.WriteLine($"RESULT: av1_width_max={caps.Av1MaxWidth}");
+            Console.WriteLine($"RESULT: av1_height_max={caps.Av1MaxHeight}");
+        }
         return 0;
     }
 }
