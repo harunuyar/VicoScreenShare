@@ -139,6 +139,21 @@ internal static class Program
                     return 2;
                 }
                 break;
+            case "av1":
+                // AV1 only goes through NVENC SDK — there's no MFT AV1
+                // encoder shim worth using. Still requires a shared device.
+                sharedDevices = new D3D11DeviceManager();
+                sharedDevices.Initialize();
+                var av1Factory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory(sharedDevices.Device);
+                av1Factory.Options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+                {
+                    Preset = int.Parse(args.GetValueOrDefault("preset", "4")),
+                    EnableAdaptiveQuantization = args.GetValueOrDefault("aq", "1") != "0",
+                    EnableTemporalAq = args.GetValueOrDefault("aq", "1") != "0",
+                    EnableIntraRefresh = args.GetValueOrDefault("intra-refresh", "0") != "0",
+                };
+                factory = av1Factory;
+                break;
             case "vp8":
                 factory = new VpxEncoderFactory();
                 break;
@@ -155,6 +170,14 @@ internal static class Program
 
         var encoder = factory.CreateEncoder(width, height, fps, bitrate, gopFrames: fps * 2);
         Console.WriteLine($"# encoder created: {encoder.GetType().Name} codec={encoder.Codec}");
+
+        var outPath = args.GetValueOrDefault("out", "");
+        FileStream? outStream = null;
+        if (!string.IsNullOrEmpty(outPath))
+        {
+            outStream = File.Create(outPath);
+            Console.WriteLine($"# bitstream dump: {outPath}");
+        }
 
         var stride = width * 4;
         var bgra = new byte[height * stride];
@@ -182,6 +205,7 @@ internal static class Program
                     {
                         Interlocked.Increment(ref frameCount);
                         Interlocked.Add(ref totalBytes, ef.Bytes.Length);
+                        outStream?.Write(ef.Bytes, 0, ef.Bytes.Length);
                     }
                 }
             };
@@ -243,6 +267,12 @@ internal static class Program
 
         var elapsedSeconds = benchSw.Elapsed.TotalSeconds;
         encoder.Dispose();
+        // Drain anything that landed during dispose / final flush before
+        // closing the bitstream file.
+        Thread.Sleep(150);
+        outStream?.Flush();
+        outStream?.Dispose();
+        sharedDevices?.Dispose();
 
         var actualFps = frameCount / elapsedSeconds;
         var bitrateOutMbps = (totalBytes * 8.0 / elapsedSeconds) / 1_000_000.0;

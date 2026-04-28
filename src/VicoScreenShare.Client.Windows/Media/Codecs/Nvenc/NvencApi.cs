@@ -431,6 +431,55 @@ public struct NV_ENC_CONFIG_H264_OVERLAY
 }
 
 /// <summary>
+/// Overlay onto the leading bytes of <see cref="NV_ENC_CODEC_CONFIG"/>
+/// when the codec is AV1. Mirrors the layout of <c>NV_ENC_CONFIG_AV1</c>
+/// at nvEncodeAPI.h:2060 up through the fields we care about
+/// (idrPeriod, intraRefresh*, plus the leading bitfields). Fields beyond
+/// <see cref="intraRefreshCnt"/> are not declared here — the rest stays
+/// as whatever the preset filled in.
+///
+/// AV1's bit-field run is laid out differently from H.264's — see
+/// <see cref="Av1ConfigBits"/> for positions.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct NV_ENC_CONFIG_AV1_OVERLAY
+{
+    public uint level;
+    public uint tier;
+    public uint minPartSize;     // NV_ENC_AV1_PART_SIZE enum (auto = 0)
+    public uint maxPartSize;     // NV_ENC_AV1_PART_SIZE enum (auto = 0)
+    public uint bitfields;
+    public uint idrPeriod;
+    public uint intraRefreshPeriod;
+    public uint intraRefreshCnt;
+}
+
+/// <summary>
+/// Bit positions inside <see cref="NV_ENC_CONFIG_AV1_OVERLAY.bitfields"/>.
+/// Order matches the C struct's declaration of the leading :1 / :2 fields
+/// (nvEncodeAPI.h:2066) — do not reorder.
+/// </summary>
+public static class Av1ConfigBits
+{
+    public const uint OutputAnnexBFormat = 1u << 0;
+    public const uint EnableTimingInfo = 1u << 1;
+    public const uint EnableDecoderModelInfo = 1u << 2;
+    public const uint EnableFrameIdNumbers = 1u << 3;
+    public const uint DisableSeqHdr = 1u << 4;
+    public const uint RepeatSeqHdr = 1u << 5;
+    public const uint EnableIntraRefresh = 1u << 6;
+    public const int ChromaFormatIdcShift = 7;
+    public const uint ChromaFormatIdcMask = 0x3u << ChromaFormatIdcShift;
+    public const uint EnableBitstreamPadding = 1u << 9;
+    public const uint EnableCustomTileConfig = 1u << 10;
+    public const uint EnableFilmGrainParams = 1u << 11;
+    public const uint EnableLTR = 1u << 12;
+    public const uint EnableTemporalSVC = 1u << 13;
+    public const uint OutputMaxCll = 1u << 14;
+    public const uint OutputMasteringDisplay = 1u << 15;
+}
+
+/// <summary>
 /// Bit positions inside <see cref="NV_ENC_CONFIG_H264_OVERLAY.bitfields"/>.
 /// Order matches the C struct's declaration of the leading :1 fields
 /// (nvEncodeAPI.h:1807) — do not reorder.
