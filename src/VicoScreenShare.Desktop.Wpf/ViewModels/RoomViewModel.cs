@@ -1008,6 +1008,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_encoderFactory is H264EncoderFactorySelector selectorEnc)
         {
             selectorEnc.Scaler = settings.Scaler;
+            selectorEnc.Backend = settings.H264Backend;
             selectorEnc.NvencOptions = BuildNvencOptions(settings);
         }
     }

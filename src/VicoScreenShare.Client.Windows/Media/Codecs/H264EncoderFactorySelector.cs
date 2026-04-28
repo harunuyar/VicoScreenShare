@@ -27,13 +27,27 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory, IVideoEnc
     private readonly NvencCapabilities _caps;
 
     /// <summary>
-    /// Switch between NVENC SDK and the MFT path. Default off in Phase 2 so
-    /// the encoder is opt-in for testing — flip to true to route H.264
-    /// construction through <see cref="NvencH264Encoder"/> when capabilities
-    /// allow. Phase 3 will default this to true once we've validated the
-    /// quality knobs land via bench scenarios.
+    /// Per-instance backend preference, set by the room view-model from
+    /// <see cref="VideoSettings.H264Backend"/>. <see cref="H264EncoderBackend.Auto"/>
+    /// (default) picks NVENC SDK when supported, MFT otherwise.
+    /// <see cref="H264EncoderBackend.Mft"/> always uses MFT.
+    /// <see cref="H264EncoderBackend.NvencSdk"/> tries NVENC first and
+    /// falls back to MFT if construction fails (so the toggle never
+    /// breaks the share).
     /// </summary>
-    public static bool UseNvencSdk { get; set; } = true;
+    public H264EncoderBackend Backend { get; set; } = H264EncoderBackend.Auto;
+
+    /// <summary>True when the active backend (per <see cref="Backend"/>
+    /// resolution against <see cref="Capabilities"/>) is the NVENC SDK
+    /// path. Used by the Settings UI to gate the "NVENC quality" card.</summary>
+    public bool IsNvencActive => ResolveBackend() == H264EncoderBackend.NvencSdk;
+
+    private H264EncoderBackend ResolveBackend() => Backend switch
+    {
+        H264EncoderBackend.Mft => H264EncoderBackend.Mft,
+        H264EncoderBackend.NvencSdk => _caps.IsAvailable ? H264EncoderBackend.NvencSdk : H264EncoderBackend.Mft,
+        _ => _caps.IsAvailable ? H264EncoderBackend.NvencSdk : H264EncoderBackend.Mft, // Auto
+    };
 
     public H264EncoderFactorySelector(ID3D11Device sharedDevice)
     {
@@ -89,10 +103,10 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory, IVideoEnc
     public bool IsAvailable => _mft.IsAvailable || _caps.IsAvailable;
 
     public bool SupportsTextureInput =>
-        (UseNvencSdk && _caps.IsAvailable)
+        IsNvencActive
         || _mft.SupportsTextureInput;
 
-    public bool RequiresMacroblockAlignedDimensions => UseNvencSdk && _caps.IsAvailable;
+    public bool RequiresMacroblockAlignedDimensions => IsNvencActive;
 
     public IVideoEncoder CreateEncoder(
         int width,
@@ -101,12 +115,12 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory, IVideoEnc
         int targetBitrate,
         int gopFrames)
     {
-        if (UseNvencSdk && _caps.IsAvailable)
+        if (ResolveBackend() == H264EncoderBackend.NvencSdk)
         {
             try
             {
                 var enc = _nvenc.CreateEncoder(width, height, targetFps, targetBitrate, gopFrames);
-                DebugLog.Write($"[encoder-select] picked NVENC SDK ({width}x{height}@{targetFps} {targetBitrate} bps)");
+                DebugLog.Write($"[encoder-select] picked NVENC SDK ({width}x{height}@{targetFps} {targetBitrate} bps, pref={Backend})");
                 return enc;
             }
             catch (NvencException ex)
@@ -116,6 +130,7 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory, IVideoEnc
                 DebugLog.Write($"[encoder-select] NVENC ctor failed, falling back to MFT: {ex.Message}");
             }
         }
+        DebugLog.Write($"[encoder-select] picked MFT ({width}x{height}@{targetFps} {targetBitrate} bps, pref={Backend})");
         return _mft.CreateEncoder(width, height, targetFps, targetBitrate, gopFrames);
     }
 }

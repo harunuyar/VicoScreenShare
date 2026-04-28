@@ -230,6 +230,20 @@
                                   SelectedItem="{Binding SelectedCodec}"
                                   DisplayMemberPath="DisplayName"
                                   HorizontalAlignment="Stretch" />
+
+                        <StackPanel Margin="0,12,0,0"
+                                    Visibility="{Binding IsH264Selected, Converter={StaticResource BoolToVisibility}}">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="H.264 encoder" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Auto picks the direct NVENC SDK on NVIDIA GPUs (faster, exposes adaptive quantization / lookahead / intra-refresh) and falls back to Media Foundation on other hardware. Force Media Foundation if you want the legacy path or are A/B comparing. Direct NVENC SDK only appears when your GPU supports it.&#10;&#10;Applies on your next share." />
+                            </StackPanel>
+                            <ComboBox ItemsSource="{Binding H264BackendOptions}"
+                                      SelectedItem="{Binding SelectedH264Backend}"
+                                      DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
+                                      Margin="0,4,0,0" />
+                        </StackPanel>
                     </StackPanel>
                 </ui:Card>
 
@@ -277,11 +291,11 @@
                     </StackPanel>
                 </ui:Card>
 
-                <!-- NVENC quality knobs -->
+                <!-- NVENC quality knobs — only when NVENC is the active backend
+                     (codec=H.264 + GPU supports it + user didn't force MFT). -->
                 <ui:Card Margin="0,12,0,0" Padding="16"
                          HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
-                         IsEnabled="{Binding IsNvencAvailable}"
-                         ToolTip="{Binding NvencUnavailableReason}">
+                         Visibility="{Binding IsNvencActiveForQualityCard, Converter={StaticResource BoolToVisibility}}">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                             <TextBlock Text="NVENC quality" Style="{StaticResource CardHeader}" />

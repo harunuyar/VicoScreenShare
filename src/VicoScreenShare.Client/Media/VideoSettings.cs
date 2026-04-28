@@ -121,12 +121,24 @@ public sealed class VideoSettings
     /// </summary>
     public int SendPacingBitrateMultiplier { get; set; } = 1;
 
+    /// <summary>
+    /// Which H.264 encoder backend the client uses. <see cref="H264EncoderBackend.Auto"/>
+    /// (the default) picks NVENC SDK when the GPU supports it, falls back
+    /// to Media Foundation otherwise. Force <see cref="H264EncoderBackend.Mft"/>
+    /// to use the legacy Media Foundation H.264 encoder regardless of GPU
+    /// (useful for A/B comparison or when working around an NVENC quirk).
+    /// Force <see cref="H264EncoderBackend.NvencSdk"/> to require the
+    /// direct path and refuse to fall back; if the GPU lacks support the
+    /// selector will still fall through to MFT, but the toggle records
+    /// the user's intent. Ignored when <see cref="Codec"/> is not H.264.
+    /// </summary>
+    public H264EncoderBackend H264Backend { get; set; } = H264EncoderBackend.Auto;
+
     // ----- NVENC SDK quality knobs -----
     // These four properties drive the direct NVENC SDK encoder backend
-    // when it's available (NVIDIA GPU + capability probe passes). On
-    // non-NVIDIA hosts the values are read but ignored — the MFT
-    // fallback path doesn't expose any of these knobs (the contract
-    // it advertises has no AQ / lookahead / intra-refresh / VBV control).
+    // when it's the active backend (Auto on NVIDIA, or explicit NvencSdk).
+    // On the MFT path the values are read but ignored — that contract
+    // doesn't expose AQ / lookahead / intra-refresh / VBV control.
 
     /// <summary>
     /// Spatial AQ: shift bit budget toward complex regions (text, edges)
@@ -160,6 +172,33 @@ public sealed class VideoSettings
     /// <see cref="EnableIntraRefresh"/> is true.
     /// </summary>
     public int IntraRefreshPeriodFrames { get; set; } = 0;
+}
+
+/// <summary>
+/// Selects which H.264 encoder backend the client uses on Windows.
+/// </summary>
+public enum H264EncoderBackend
+{
+    /// <summary>
+    /// Pick the NVENC SDK direct path on NVIDIA GPUs that support it; fall
+    /// back to Media Foundation otherwise. Recommended default.
+    /// </summary>
+    Auto = 0,
+
+    /// <summary>
+    /// Force the legacy Media Foundation H.264 encoder. Universal — works
+    /// on any Windows GPU. Lacks adaptive quantization, lookahead,
+    /// intra-refresh, and custom VBV (the MFT contract doesn't expose
+    /// them, and NVIDIA's MFT shim silently ignores knobs that DO exist).
+    /// </summary>
+    Mft = 1,
+
+    /// <summary>
+    /// Force the direct NVENC SDK path. NVIDIA GPUs only; the selector
+    /// still falls back to MFT if construction fails (driver missing,
+    /// session limit hit, etc.) so picking this never breaks the share.
+    /// </summary>
+    NvencSdk = 2,
 }
 
 /// <summary>

@@ -123,6 +123,24 @@ public sealed partial class SettingsViewModel : ViewModelBase
         NvencSupportsIntraRefresh = nvencCaps.IsAvailable && nvencCaps.SupportsIntraRefresh;
         NvencUnavailableReason = nvencCaps.IsAvailable ? null : nvencCaps.UnavailableReason;
 
+        // H.264 backend dropdown. NVENC option is only present when the GPU
+        // supports it; on non-NVIDIA hosts the user only sees Auto + MFT
+        // (Auto resolves to MFT in that case).
+        var backendOptions = new List<H264BackendOption>
+        {
+            new(H264EncoderBackend.Auto, IsNvencAvailable
+                ? "Auto — NVENC SDK (recommended)"
+                : "Auto — Media Foundation"),
+            new(H264EncoderBackend.Mft, "Media Foundation (legacy, universal)"),
+        };
+        if (IsNvencAvailable)
+        {
+            backendOptions.Insert(2, new H264BackendOption(H264EncoderBackend.NvencSdk, "Direct NVENC SDK"));
+        }
+        H264BackendOptions = backendOptions;
+        _selectedH264Backend = H264BackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.H264Backend)
+            ?? H264BackendOptions[0];
+
         // Audio settings. Bitrate combo is fixed-set so the UI stays
         // simple; people who want to experiment with 160 kbps Opus can
         // edit the JSON settings file directly.
@@ -221,6 +239,13 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private bool _enableIntraRefresh;
 
+    [ObservableProperty]
+    private H264BackendOption _selectedH264Backend = null!;
+
+    /// <summary>The H.264 backend choices we offer. NVENC SDK appears only
+    /// when the GPU supports it; on other hosts the user sees Auto + MFT.</summary>
+    public IReadOnlyList<H264BackendOption> H264BackendOptions { get; }
+
     /// <summary>True when the NVENC SDK encoder backend is available
     /// on this machine. Settings UI greys NVENC-only toggles otherwise.</summary>
     public bool IsNvencAvailable { get; }
@@ -231,6 +256,31 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
     /// <summary>Tooltip text for greyed-out NVENC controls.</summary>
     public string? NvencUnavailableReason { get; }
+
+    /// <summary>
+    /// True when the currently-selected codec + backend resolves to NVENC
+    /// SDK on this machine. Drives the visibility of the "NVENC quality"
+    /// card so MFT-only sessions don't show it.
+    /// </summary>
+    public bool IsNvencActiveForQualityCard =>
+        SelectedCodec?.Codec == VideoCodec.H264
+        && IsNvencAvailable
+        && (SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto) != H264EncoderBackend.Mft;
+
+    partial void OnSelectedH264BackendChanged(H264BackendOption value)
+    {
+        OnPropertyChanged(nameof(IsNvencActiveForQualityCard));
+    }
+
+    partial void OnSelectedCodecChanged(CodecOption value)
+    {
+        OnPropertyChanged(nameof(IsNvencActiveForQualityCard));
+        OnPropertyChanged(nameof(IsH264Selected));
+    }
+
+    /// <summary>True when the codec dropdown is on H.264. Drives the
+    /// visibility of the H.264 backend dropdown.</summary>
+    public bool IsH264Selected => SelectedCodec?.Codec == VideoCodec.H264;
 
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
@@ -300,6 +350,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableAdaptiveQuantization = EnableAdaptiveQuantization;
         _settings.Video.EnableEncoderLookahead = EnableEncoderLookahead;
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
+        _settings.Video.H264Backend = SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto;
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;
@@ -388,4 +439,5 @@ public sealed record QualityPreset(
     double KeyframeIntervalSeconds,
     ScalerMode Scaler);
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);
+public sealed record H264BackendOption(H264EncoderBackend Backend, string DisplayName);
 public sealed record AudioBitrateOption(string DisplayName, int Bitrate);

@@ -109,6 +109,7 @@ public class SettingsStoreTests : IDisposable
                 EnableEncoderLookahead = true,
                 EnableIntraRefresh = false,
                 IntraRefreshPeriodFrames = 90,
+                H264Backend = H264EncoderBackend.Mft,
             },
         });
 
@@ -123,6 +124,7 @@ public class SettingsStoreTests : IDisposable
         loaded.Video.EnableEncoderLookahead.Should().BeTrue();
         loaded.Video.EnableIntraRefresh.Should().BeFalse();
         loaded.Video.IntraRefreshPeriodFrames.Should().Be(90);
+        loaded.Video.H264Backend.Should().Be(H264EncoderBackend.Mft);
     }
 
     [Fact]
