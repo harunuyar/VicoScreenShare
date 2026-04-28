@@ -60,6 +60,19 @@ public sealed class H264EncoderFactorySelector : IVideoEncoderFactory
     public NvencCapabilities Capabilities => _caps;
 
     /// <summary>
+    /// NVENC quality-knob options (AQ, lookahead, intra-refresh, VBV).
+    /// Apply before constructing a new encoder; mid-stream changes have no
+    /// effect until the next <see cref="CreateEncoder"/> call (which
+    /// happens on resolution / fps change in <c>CaptureStreamer</c>).
+    /// Routed to the underlying NVENC factory; ignored on the MFT path.
+    /// </summary>
+    public NvencEncodeOptions NvencOptions
+    {
+        get => _nvenc.Options;
+        set => _nvenc.Options = value;
+    }
+
+    /// <summary>
     /// Forwards through to the underlying MFT factory's scaler setting.
     /// The NVENC backend, when it lands, will scale on the GPU using
     /// NVENC's own pre-processing instead — so this property only flows

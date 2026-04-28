@@ -17,6 +17,7 @@ using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Platform;
 using VicoScreenShare.Client.Services;
 using VicoScreenShare.Client.Windows.Media.Codecs;
+using VicoScreenShare.Client.Windows.Media.Codecs.Nvenc;
 using VicoScreenShare.Desktop.App.Services;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
@@ -180,6 +181,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc)
         {
             mfEnc.Scaler = settings.Video.Scaler;
+        }
+        if (_encoderFactory is H264EncoderFactorySelector selectorEnc)
+        {
+            selectorEnc.Scaler = settings.Video.Scaler;
+            selectorEnc.NvencOptions = BuildNvencOptions(settings.Video);
         }
 
         _roomId = initial.RoomId;
@@ -982,6 +988,25 @@ public sealed partial class RoomViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Translate user-facing video settings into the NVENC SDK options
+    /// the encoder factory consumes. Hardware capability gating happens
+    /// inside the encoder itself (per <c>NvencEncodeOptions</c> docstring),
+    /// so we just forward the user's intent here — flipping a flag the
+    /// hardware doesn't support is logged and silently dropped, never
+    /// fails the construction.
+    /// </summary>
+    private static NvencEncodeOptions BuildNvencOptions(VideoSettings settings) => new()
+    {
+        EnableAdaptiveQuantization = settings.EnableAdaptiveQuantization,
+        EnableTemporalAq = settings.EnableAdaptiveQuantization, // pair temporal with spatial
+        AqStrength = 8,
+        LookaheadDepth = settings.EnableEncoderLookahead ? 8 : 0,
+        EnableIntraRefresh = settings.EnableIntraRefresh,
+        IntraRefreshPeriodFrames = settings.IntraRefreshPeriodFrames,
+        VbvBufferSizeBits = 0, // preset default for now; readability/motion modes will tune later
+    };
+
+    /// <summary>
     /// Build the encoder-to-wire callback for a fresh share session.
     /// Returns the callback (consumed by <see cref="CaptureStreamer"/>)
     /// and assigns the pacer (or null when pacing is disabled) to
@@ -1119,6 +1144,11 @@ public sealed partial class RoomViewModel : ViewModelBase
         if (_encoderFactory is MediaFoundationH264EncoderFactory mfEnc2)
         {
             mfEnc2.Scaler = _settings.Video.Scaler;
+        }
+        if (_encoderFactory is H264EncoderFactorySelector selectorEnc2)
+        {
+            selectorEnc2.Scaler = _settings.Video.Scaler;
+            selectorEnc2.NvencOptions = BuildNvencOptions(_settings.Video);
         }
 
         _negotiationStarted = false;

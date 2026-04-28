@@ -277,6 +277,54 @@
                     </StackPanel>
                 </ui:Card>
 
+                <!-- NVENC quality knobs -->
+                <ui:Card Margin="0,12,0,0" Padding="16"
+                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                         IsEnabled="{Binding IsNvencAvailable}"
+                         ToolTip="{Binding NvencUnavailableReason}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                            <TextBlock Text="NVENC quality" Style="{StaticResource CardHeader}" />
+                            <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                           ToolTip="Direct NVENC SDK encoder knobs that the Windows Media Foundation shim silently ignored. Only available on NVIDIA GPUs with current drivers; greyed otherwise.&#10;&#10;Applies on your next share." />
+                        </StackPanel>
+
+                        <StackPanel Margin="0,0,0,12">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="Adaptive quantization" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Shifts bit budget toward complex regions like text and edges, away from flat areas. Single biggest quality knob for screen content. Recommended on." />
+                            </StackPanel>
+                            <ui:ToggleSwitch IsChecked="{Binding EnableAdaptiveQuantization}"
+                                             OffContent="Off"
+                                             OnContent="On" />
+                        </StackPanel>
+
+                        <StackPanel Margin="0,0,0,12"
+                                    IsEnabled="{Binding NvencSupportsIntraRefresh}">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="Intra-refresh" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Replaces periodic IDR keyframes with gradual refresh slices spread over a window. Halves worst-case per-frame size at GOP boundaries. Recommended on." />
+                            </StackPanel>
+                            <ui:ToggleSwitch IsChecked="{Binding EnableIntraRefresh}"
+                                             OffContent="Off"
+                                             OnContent="On" />
+                        </StackPanel>
+
+                        <StackPanel IsEnabled="{Binding NvencSupportsLookahead}">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="Encoder lookahead" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Encoder peeks at the next 8 frames before committing rate decisions for the current one. Improves quality but adds ~8 frames of encode-side latency. Off by default; turn on for readability-first scenarios." />
+                            </StackPanel>
+                            <ui:ToggleSwitch IsChecked="{Binding EnableEncoderLookahead}"
+                                             OffContent="Off"
+                                             OnContent="On" />
+                        </StackPanel>
+                    </StackPanel>
+                </ui:Card>
+
                 <!-- ═══════ AUDIO ═══════ -->
                 <TextBlock Text="Audio" Style="{StaticResource SectionHeader}" Margin="2,20,0,8" />
 

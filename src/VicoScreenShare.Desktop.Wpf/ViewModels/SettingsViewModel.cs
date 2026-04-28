@@ -9,6 +9,7 @@ using VicoScreenShare.Client;
 using VicoScreenShare.Client.Media;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Client.Services;
+using VicoScreenShare.Client.Windows.Media.Codecs.Nvenc;
 
 public sealed partial class SettingsViewModel : ViewModelBase
 {
@@ -110,6 +111,17 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _enableAdaptiveBitrate = _settings.Video.EnableAdaptiveBitrate;
         _enableSendPacing = _settings.Video.EnableSendPacing;
         _sendPacingBitrateMultiplier = Math.Clamp(_settings.Video.SendPacingBitrateMultiplier, 1, 5);
+        _enableAdaptiveQuantization = _settings.Video.EnableAdaptiveQuantization;
+        _enableEncoderLookahead = _settings.Video.EnableEncoderLookahead;
+        _enableIntraRefresh = _settings.Video.EnableIntraRefresh;
+
+        // Capability flags from the live encoder factory selector. Greys
+        // the corresponding toggle when the GPU lacks the feature.
+        var nvencCaps = ResolveNvencCapabilities();
+        IsNvencAvailable = nvencCaps.IsAvailable;
+        NvencSupportsLookahead = nvencCaps.IsAvailable && nvencCaps.SupportsLookahead;
+        NvencSupportsIntraRefresh = nvencCaps.IsAvailable && nvencCaps.SupportsIntraRefresh;
+        NvencUnavailableReason = nvencCaps.IsAvailable ? null : nvencCaps.UnavailableReason;
 
         // Audio settings. Bitrate combo is fixed-set so the UI stays
         // simple; people who want to experiment with 160 kbps Opus can
@@ -200,6 +212,26 @@ public sealed partial class SettingsViewModel : ViewModelBase
     [ObservableProperty]
     private int _sendPacingBitrateMultiplier;
 
+    [ObservableProperty]
+    private bool _enableAdaptiveQuantization;
+
+    [ObservableProperty]
+    private bool _enableEncoderLookahead;
+
+    [ObservableProperty]
+    private bool _enableIntraRefresh;
+
+    /// <summary>True when the NVENC SDK encoder backend is available
+    /// on this machine. Settings UI greys NVENC-only toggles otherwise.</summary>
+    public bool IsNvencAvailable { get; }
+
+    public bool NvencSupportsLookahead { get; }
+
+    public bool NvencSupportsIntraRefresh { get; }
+
+    /// <summary>Tooltip text for greyed-out NVENC controls.</summary>
+    public string? NvencUnavailableReason { get; }
+
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
     [ObservableProperty]
@@ -265,6 +297,9 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableAdaptiveBitrate = EnableAdaptiveBitrate;
         _settings.Video.EnableSendPacing = EnableSendPacing;
         _settings.Video.SendPacingBitrateMultiplier = Math.Clamp(SendPacingBitrateMultiplier, 1, 5);
+        _settings.Video.EnableAdaptiveQuantization = EnableAdaptiveQuantization;
+        _settings.Video.EnableEncoderLookahead = EnableEncoderLookahead;
+        _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
         _settings.Audio.Stereo = AudioStereo;
@@ -297,6 +332,22 @@ public sealed partial class SettingsViewModel : ViewModelBase
         var isAvailable = available.Contains(codec);
         var display = isAvailable ? label : $"{label} — not available";
         return new CodecOption(codec, display, isAvailable);
+    }
+
+    /// <summary>
+    /// Probe NVENC capability via the shared device, falling back to an
+    /// "unavailable" record if the device isn't ready or NVENC isn't on
+    /// this host. Drives the IsNvencAvailable bindings used by the UI to
+    /// grey NVENC-only toggles.
+    /// </summary>
+    private static NvencCapabilities ResolveNvencCapabilities()
+    {
+        var device = App.SharedDevices?.Device;
+        if (device is null)
+        {
+            return NvencCapabilities.Probe(null);
+        }
+        return NvencCapabilities.Probe(device);
     }
 
     private static double BpsToSliderValue(int bps)

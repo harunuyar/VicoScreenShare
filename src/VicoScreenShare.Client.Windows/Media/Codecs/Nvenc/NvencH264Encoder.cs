@@ -34,6 +34,8 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
     private readonly int _height;
     private readonly int _fps;
     private readonly int _gopFrames;
+    private readonly NvencEncodeOptions _options;
+    private readonly NvencCapabilities _capabilities;
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
 
@@ -99,12 +101,18 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
     }
 
     public NvencH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, ID3D11Device device)
+        : this(width, height, fps, bitrate, gopFrames, device, NvencEncodeOptions.Default)
+    {
+    }
+
+    public NvencH264Encoder(int width, int height, int fps, long bitrate, int gopFrames, ID3D11Device device, NvencEncodeOptions options)
     {
         _width = width;
         _height = height;
         _fps = Math.Max(1, fps);
         _bitrate = Math.Max(500_000, bitrate);
         _gopFrames = Math.Max(1, gopFrames);
+        _options = options;
         _device = device;
         _context = device.ImmediateContext;
 
@@ -117,6 +125,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
             throw new NvencException(NVENCSTATUS.NV_ENC_ERR_NO_ENCODE_DEVICE,
                 "ctor", caps.UnavailableReason);
         }
+        _capabilities = caps;
 
         _table = default;
         _table.version = NvencApi.NV_ENCODE_API_FUNCTION_LIST_VER;
@@ -223,12 +232,13 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
             throw new NvencException(status, "NvEncGetEncodePresetConfigEx", GetLastErrorString());
         }
 
-        // Override what we care about for Phase 2.
-        preset.presetCfg.gopLength = (uint)_gopFrames;
+        // Override what we care about for Phase 2 baseline.
         preset.presetCfg.frameIntervalP = 1; // IPP — no B frames (low-latency).
         preset.presetCfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE.Cbr;
         preset.presetCfg.rcParams.averageBitRate = (uint)Math.Min(_bitrate, uint.MaxValue);
         preset.presetCfg.rcParams.maxBitRate = preset.presetCfg.rcParams.averageBitRate;
+
+        ApplyQualityOptions(ref preset.presetCfg);
 
         var init = default(NV_ENC_INITIALIZE_PARAMS);
         init.version = NvencApi.NV_ENC_INITIALIZE_PARAMS_VER;
@@ -258,6 +268,112 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         if (status != NVENCSTATUS.NV_ENC_SUCCESS)
         {
             throw new NvencException(status, "NvEncInitializeEncoder", GetLastErrorString());
+        }
+    }
+
+    /// <summary>
+    /// Apply <see cref="NvencEncodeOptions"/> to a preset-filled config,
+    /// gated on <see cref="NvencCapabilities"/>. Each unsupported option
+    /// is logged once and silently dropped — the user's session still
+    /// initializes, just without that feature.
+    /// </summary>
+    private void ApplyQualityOptions(ref NV_ENC_CONFIG cfg)
+    {
+        // --- Spatial AQ (universal capability — no cap bit gates it) ---
+        if (_options.EnableAdaptiveQuantization)
+        {
+            cfg.rcParams.bitfields |= RcParamsBits.EnableAQ;
+            if (_options.AqStrength > 0)
+            {
+                var clamped = (uint)Math.Clamp(_options.AqStrength, 1, 15);
+                cfg.rcParams.bitfields = (cfg.rcParams.bitfields & ~RcParamsBits.AqStrengthMask)
+                    | (clamped << RcParamsBits.AqStrengthShift);
+            }
+        }
+
+        // --- Temporal AQ (Turing GPUs lack this) ---
+        if (_options.EnableTemporalAq)
+        {
+            if (_capabilities.SupportsTemporalAq)
+            {
+                cfg.rcParams.bitfields |= RcParamsBits.EnableTemporalAQ;
+            }
+            else
+            {
+                DebugLog.Write("[nvenc] options: TemporalAq requested but unsupported on this GPU; falling back to spatial AQ only");
+            }
+        }
+
+        // --- Lookahead ---
+        if (_options.LookaheadDepth > 0)
+        {
+            if (_capabilities.SupportsLookahead)
+            {
+                cfg.rcParams.bitfields |= RcParamsBits.EnableLookahead;
+                cfg.rcParams.lookaheadDepth = (ushort)Math.Clamp(_options.LookaheadDepth, 1, 32);
+                DebugLog.Write($"[nvenc] options: lookahead enabled depth={cfg.rcParams.lookaheadDepth}");
+            }
+            else
+            {
+                DebugLog.Write("[nvenc] options: Lookahead requested but unsupported on this GPU; ignoring");
+            }
+        }
+
+        // --- VBV buffer size override ---
+        // The MFT shim's silently-ignored knob; here it actually takes effect.
+        if (_options.VbvBufferSizeBits > 0)
+        {
+            if (_capabilities.SupportsCustomVbvBufferSize)
+            {
+                cfg.rcParams.vbvBufferSize = (uint)_options.VbvBufferSizeBits;
+                cfg.rcParams.vbvInitialDelay = (uint)_options.VbvBufferSizeBits;
+                DebugLog.Write($"[nvenc] options: vbvBufferSize={_options.VbvBufferSizeBits} bits");
+            }
+            else
+            {
+                DebugLog.Write("[nvenc] options: VbvBufferSizeBits requested but unsupported on this GPU; ignoring");
+            }
+        }
+
+        // --- GOP length / IDR period ---
+        // Intra-refresh requires gopLength = INFINITE (per SDK note line 1868);
+        // periodic IDR is mutually exclusive with intra-refresh.
+        var wantIntraRefresh = _options.EnableIntraRefresh && _capabilities.SupportsIntraRefresh;
+        if (_options.EnableIntraRefresh && !_capabilities.SupportsIntraRefresh)
+        {
+            DebugLog.Write("[nvenc] options: IntraRefresh requested but unsupported on this GPU; ignoring");
+        }
+
+        unsafe
+        {
+            // Overlay the H.264-specific config onto the codec union and
+            // patch the bits we want.
+            fixed (NV_ENC_CODEC_CONFIG* codecCfgPtr = &cfg.encodeCodecConfig)
+            {
+                var h264 = (NV_ENC_CONFIG_H264_OVERLAY*)codecCfgPtr;
+                // RepeatSPSPPS: cheap insurance for SIPSorcery's depacketizer
+                // reading the stream from any keyframe — always safe to set.
+                h264->bitfields |= H264ConfigBits.RepeatSPSPPS;
+
+                if (wantIntraRefresh)
+                {
+                    h264->bitfields |= H264ConfigBits.EnableIntraRefresh;
+                    var period = _options.IntraRefreshPeriodFrames > 0
+                        ? (uint)_options.IntraRefreshPeriodFrames
+                        : (uint)_gopFrames;
+                    h264->intraRefreshPeriod = period;
+                    // Length of the refresh cycle: spread across max(2, period/30) frames.
+                    h264->intraRefreshCnt = (uint)Math.Max(2, (int)(period / 30));
+                    h264->idrPeriod = NvencApi.NVENC_INFINITE_GOPLENGTH;
+                    cfg.gopLength = NvencApi.NVENC_INFINITE_GOPLENGTH;
+                    DebugLog.Write($"[nvenc] options: intraRefresh enabled period={period} cnt={h264->intraRefreshCnt}");
+                }
+                else
+                {
+                    cfg.gopLength = (uint)_gopFrames;
+                    h264->idrPeriod = (uint)_gopFrames;
+                }
+            }
         }
     }
 

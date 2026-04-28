@@ -388,16 +388,77 @@ public static class RcParamsBits
     public const uint EnableExtLookahead = 1u << 16;
 }
 
-/// <summary>nvEncodeAPI.h:2167 — codec-specific config union. We don't
-/// touch the H.264-specific fields in Phase 2 (preset config fills them);
-/// Phase 3 will add a NV_ENC_CONFIG_H264 struct overlay. Keeping the union
-/// as opaque bytes (1280 = 320 × 4, the largest member size by reservation
-/// trail in the SDK header) is enough for the driver to round-trip the
-/// config back through GetEncodePresetConfigEx + InitializeEncoder.</summary>
+/// <summary>nvEncodeAPI.h:2167 — codec-specific config union. The size
+/// is 1280 bytes (320 × uint32, set by the union's reserved member which
+/// is always largest). We hold the union as opaque bytes; to mutate
+/// H.264-specific fields, cast the address of this struct to
+/// <see cref="NV_ENC_CONFIG_H264_OVERLAY"/> and write through that.</summary>
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct NV_ENC_CODEC_CONFIG
 {
-    private fixed byte storage[1280]; // 320 uint32 reserved words
+    public fixed byte storage[1280]; // 320 uint32 reserved words
+}
+
+/// <summary>
+/// Overlay onto the leading bytes of <see cref="NV_ENC_CODEC_CONFIG"/>
+/// when the codec is H.264. Mirrors the layout of
+/// <c>NV_ENC_CONFIG_H264</c> at nvEncodeAPI.h:1805 up through the fields
+/// we care about. Fields beyond <see cref="intraRefreshCnt"/> are not
+/// declared here — the rest stays as whatever the preset filled in.
+///
+/// The bit-field run at the start of the C struct collapses into
+/// <see cref="bitfields"/>; constants for individual bits live in
+/// <see cref="H264ConfigBits"/>.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct NV_ENC_CONFIG_H264_OVERLAY
+{
+    public uint bitfields;
+    public uint level;
+    public uint idrPeriod;
+    public uint separateColourPlaneFlag;
+    public uint disableDeblockingFilterIDC;
+    public uint numTemporalLayers;
+    public uint spsId;
+    public uint ppsId;
+    public uint adaptiveTransformMode;
+    public uint fmoMode;
+    public uint bdirectMode;
+    public uint entropyCodingMode;
+    public uint stereoMode;
+    public uint intraRefreshPeriod;
+    public uint intraRefreshCnt;
+}
+
+/// <summary>
+/// Bit positions inside <see cref="NV_ENC_CONFIG_H264_OVERLAY.bitfields"/>.
+/// Order matches the C struct's declaration of the leading :1 fields
+/// (nvEncodeAPI.h:1807) — do not reorder.
+/// </summary>
+public static class H264ConfigBits
+{
+    public const uint EnableTemporalSVC = 1u << 0;
+    public const uint EnableStereoMVC = 1u << 1;
+    public const uint HierarchicalPFrames = 1u << 2;
+    public const uint HierarchicalBFrames = 1u << 3;
+    public const uint OutputBufferingPeriodSEI = 1u << 4;
+    public const uint OutputPictureTimingSEI = 1u << 5;
+    public const uint OutputAUD = 1u << 6;
+    public const uint DisableSPSPPS = 1u << 7;
+    public const uint OutputFramePackingSEI = 1u << 8;
+    public const uint OutputRecoveryPointSEI = 1u << 9;
+    public const uint EnableIntraRefresh = 1u << 10;
+    public const uint EnableConstrainedEncoding = 1u << 11;
+    public const uint RepeatSPSPPS = 1u << 12;
+    public const uint EnableVFR = 1u << 13;
+    public const uint EnableLTR = 1u << 14;
+    public const uint QpPrimeYZeroTransformBypassFlag = 1u << 15;
+    public const uint UseConstrainedIntraPred = 1u << 16;
+    public const uint EnableFillerDataInsertion = 1u << 17;
+    public const uint DisableSVCPrefixNalu = 1u << 18;
+    public const uint EnableScalabilityInfoSEI = 1u << 19;
+    public const uint SingleSliceIntraRefresh = 1u << 20;
+    public const uint EnableTimeCode = 1u << 21;
 }
 
 /// <summary>nvEncodeAPI.h:2182 — encoder configuration. Filled by

@@ -17,6 +17,12 @@ public sealed class NvencH264EncoderFactory : IVideoEncoderFactory
         _sharedDevice = sharedDevice;
     }
 
+    /// <summary>
+    /// Per-encoder options. Settable while the factory is alive; each
+    /// <see cref="CreateEncoder"/> call snapshots the current value.
+    /// </summary>
+    public NvencEncodeOptions Options { get; set; } = NvencEncodeOptions.Default;
+
     public VideoCodec Codec => VideoCodec.H264;
 
     public bool IsAvailable => NvencCapabilities.Probe(_sharedDevice).IsAvailable;
@@ -24,5 +30,5 @@ public sealed class NvencH264EncoderFactory : IVideoEncoderFactory
     public bool SupportsTextureInput => IsAvailable;
 
     public IVideoEncoder CreateEncoder(int width, int height, int targetFps, int targetBitrate, int gopFrames) =>
-        new NvencH264Encoder(width, height, targetFps, targetBitrate, gopFrames, _sharedDevice);
+        new NvencH264Encoder(width, height, targetFps, targetBitrate, gopFrames, _sharedDevice, Options);
 }

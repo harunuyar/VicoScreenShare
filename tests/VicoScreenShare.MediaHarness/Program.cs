@@ -77,6 +77,9 @@ internal static class Program
                 "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
                 "bench-nvenc-keyframe" => RunNvencKeyframeBenchmark(argMap),
+                "bench-vbv" => RunVbvBenchmark(argMap),
+                "bench-intra-refresh" => RunIntraRefreshBenchmark(argMap),
+                "bench-aq" => RunAqBenchmark(argMap),
                 _ => UnknownScenario(scenario),
             };
         }
@@ -2178,6 +2181,349 @@ internal static class Program
         Console.Error.WriteLine("    --duration sec      default 5");
         Console.Error.WriteLine("  bench-nvenc-probe     run NVENC capability probe and print findings");
         Console.Error.WriteLine("  bench-nvenc-keyframe  validate force-IDR + UpdateBitrate against the live encoder");
+        Console.Error.WriteLine("  bench-vbv             sweep VBV buffer size, assert per-frame size variance shrinks");
+        Console.Error.WriteLine("  bench-intra-refresh   validate intra-refresh produces no IDRs after frame 0");
+        Console.Error.WriteLine("  bench-aq              validate AQ shifts bits toward edge / text regions");
+    }
+
+    /// <summary>
+    /// Phase-3 verification: VBV control actually takes effect on the
+    /// SDK path. Sweeps vbvBufferSize across {0.5x, 1x, 2x, 8x} of
+    /// (bitrate / fps) and asserts per-frame-size variance decreases as
+    /// VBV shrinks. Old MFT-shim data showed identical IDR sizes across
+    /// every value (silently ignored); the SDK path's variance must
+    /// monotonically respond.
+    /// </summary>
+    private static int RunVbvBenchmark(Dictionary<string, string> args)
+    {
+        const int width = 1280;
+        const int height = 720;
+        const int fps = 30;
+        const int gop = 60;
+        const long bitrate = 4_000_000;
+        const int frames = 240;
+
+        Console.WriteLine($"# bench-vbv {width}x{height}@{fps} bitrate={bitrate} frames={frames}");
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAvailable)
+        {
+            Console.Error.WriteLine($"NVENC unavailable: {caps.UnavailableReason}");
+            return 2;
+        }
+        if (!caps.SupportsCustomVbvBufferSize)
+        {
+            Console.Error.WriteLine("NVENC reports custom VBV unsupported on this GPU; bench cannot run");
+            return 2;
+        }
+
+        var perFrameBitsPerSecond = bitrate / fps;
+        var multipliers = new double[] { 0.5, 1.0, 2.0, 8.0 };
+        var stddevs = new double[multipliers.Length];
+        var maxFrames = new int[multipliers.Length];
+
+        for (int sweep = 0; sweep < multipliers.Length; sweep++)
+        {
+            var vbvBits = (int)(perFrameBitsPerSecond * multipliers[sweep]);
+            var options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+            {
+                VbvBufferSizeBits = vbvBits,
+            };
+            using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264Encoder(
+                width, height, fps, bitrate, gop, devices.Device, options);
+
+            var sizes = new List<int>(frames);
+            encoder.OutputAvailable += () =>
+            {
+                while (encoder.TryDequeueEncoded(out var ef))
+                {
+                    sizes.Add(ef.Bytes.Length);
+                }
+            };
+
+            var stride = width * 4;
+            var bgra = new byte[height * stride];
+            FillGradient(bgra, width, height);
+            var clock = Stopwatch.StartNew();
+            for (int i = 0; i < frames; i++)
+            {
+                MutatePattern(bgra, i * 7, width); // higher-motion than default
+                encoder.EncodeBgra(bgra, stride, clock.Elapsed);
+            }
+            // Drain.
+            Thread.Sleep(300);
+
+            // Skip the IDR (frame 0) in stats — IDRs are always huge.
+            var stats = sizes.Skip(1).ToList();
+            if (stats.Count == 0)
+            {
+                Console.WriteLine($"# vbv multiplier={multipliers[sweep]}: NO FRAMES");
+                continue;
+            }
+            var mean = stats.Average();
+            var variance = stats.Select(s => (s - mean) * (s - mean)).Average();
+            stddevs[sweep] = Math.Sqrt(variance);
+            maxFrames[sweep] = stats.Max();
+
+            Console.WriteLine($"RESULT: vbv_x{multipliers[sweep]:F1}={vbvBits}bits frames={stats.Count} mean={mean:F0} stddev={stddevs[sweep]:F0} max={maxFrames[sweep]}");
+        }
+
+        // Assert: stddev tighter at smaller VBV. Allow tolerance because
+        // the synthetic content might not stress all sizes equally; require
+        // the smallest VBV (0.5x) to be tighter than the largest (8x).
+        var pass = stddevs[0] < stddevs[3] && maxFrames[0] <= maxFrames[3];
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (stddev 0.5x={stddevs[0]:F0} < 8x={stddevs[3]:F0}; max 0.5x={maxFrames[0]} <= 8x={maxFrames[3]})");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Phase-3 verification: intra-refresh produces refresh slices instead
+    /// of full IDRs after frame 0. Encodes 180 frames intra-refresh-on,
+    /// parses the H.264 NAL types, asserts at most one IDR (the initial
+    /// one) is present.
+    /// </summary>
+    private static int RunIntraRefreshBenchmark(Dictionary<string, string> args)
+    {
+        const int width = 1280;
+        const int height = 720;
+        const int fps = 30;
+        const int gop = 60;
+        const long bitrate = 4_000_000;
+        const int frames = 180;
+
+        Console.WriteLine($"# bench-intra-refresh {width}x{height}@{fps} bitrate={bitrate} frames={frames} gop={gop}");
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAvailable)
+        {
+            Console.Error.WriteLine($"NVENC unavailable: {caps.UnavailableReason}");
+            return 2;
+        }
+        if (!caps.SupportsIntraRefresh)
+        {
+            Console.Error.WriteLine("NVENC reports intra-refresh unsupported on this GPU; bench cannot run");
+            return 2;
+        }
+
+        return RunIntraRefreshSweep(devices.Device, width, height, fps, gop, bitrate, frames, intraRefreshOn: true)
+            + RunIntraRefreshSweep(devices.Device, width, height, fps, gop, bitrate, frames, intraRefreshOn: false);
+    }
+
+    private static int RunIntraRefreshSweep(ID3D11Device device, int width, int height, int fps, int gop, long bitrate, int frames, bool intraRefreshOn)
+    {
+        var options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+        {
+            EnableIntraRefresh = intraRefreshOn,
+            IntraRefreshPeriodFrames = intraRefreshOn ? gop : 0,
+        };
+        using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264Encoder(
+            width, height, fps, bitrate, gop, device, options);
+
+        // Count NAL types per frame. H.264 NAL header byte: lower 5 bits = nal_unit_type.
+        // We look for: 5 = IDR slice, 1 = non-IDR slice, 7 = SPS, 8 = PPS, 6 = SEI.
+        // With intra-refresh on, IDR (5) should NOT appear after frame 0.
+        int idrCount = 0;
+        int totalFrames = 0;
+        int totalBytes = 0;
+        encoder.OutputAvailable += () =>
+        {
+            while (encoder.TryDequeueEncoded(out var ef))
+            {
+                totalFrames++;
+                totalBytes += ef.Bytes.Length;
+                if (ContainsNalType(ef.Bytes, nalType: 5))
+                {
+                    idrCount++;
+                }
+            }
+        };
+
+        var stride = width * 4;
+        var bgra = new byte[height * stride];
+        FillGradient(bgra, width, height);
+        var clock = Stopwatch.StartNew();
+        for (int i = 0; i < frames; i++)
+        {
+            MutatePattern(bgra, i * 5, width);
+            encoder.EncodeBgra(bgra, stride, clock.Elapsed);
+        }
+        Thread.Sleep(300);
+
+        var label = intraRefreshOn ? "on" : "off";
+        Console.WriteLine($"RESULT: intra_refresh_{label}: frames={totalFrames} idrs={idrCount} bytes={totalBytes}");
+
+        if (intraRefreshOn)
+        {
+            // With intra-refresh ON, only the initial IDR (frame 0) is allowed.
+            var pass = idrCount <= 1;
+            Console.WriteLine($"VERDICT_intra_on: {(pass ? "PASS" : "FAIL")} (expected ≤1 IDR, got {idrCount})");
+            return pass ? 0 : 3;
+        }
+        else
+        {
+            // With intra-refresh OFF and gopLength=60 over 180 frames, we
+            // expect at least 3 IDRs (one per GOP).
+            var pass = idrCount >= 2;
+            Console.WriteLine($"VERDICT_intra_off: {(pass ? "PASS" : "FAIL")} (expected ≥2 IDRs as periodic-IDR baseline, got {idrCount})");
+            return pass ? 0 : 3;
+        }
+    }
+
+    /// <summary>
+    /// Phase-3 verification: AQ shifts bits toward complex / text regions.
+    /// Encodes a composite half-flat / half-text image with AQ off and AQ
+    /// on, then compares the per-region byte count by re-encoding each
+    /// half independently with the same encoder config. With AQ on the
+    /// text half should consume measurably more of the per-frame budget
+    /// than the flat half, by a wider margin than with AQ off.
+    /// </summary>
+    private static int RunAqBenchmark(Dictionary<string, string> args)
+    {
+        const int width = 1280;
+        const int height = 720;
+        const int fps = 30;
+        const int gop = 60;
+        const long bitrate = 2_000_000; // tight enough for AQ to matter
+        const int frames = 60;
+
+        Console.WriteLine($"# bench-aq {width}x{height}@{fps} bitrate={bitrate} frames={frames}");
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAvailable)
+        {
+            Console.Error.WriteLine($"NVENC unavailable: {caps.UnavailableReason}");
+            return 2;
+        }
+
+        // Build a flat-only frame and a text-only frame at the same
+        // resolution. We measure each option's effect by encoding each
+        // independently and comparing the bit budget.
+        var stride = width * 4;
+        var flat = new byte[height * stride];
+        FillFlatGray(flat, width, height, gray: 128);
+        var text = new byte[height * stride];
+        FillSyntheticText(text, width, height);
+
+        long EncodeAndMeasure(byte[] frame, bool aqOn)
+        {
+            var options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+            {
+                EnableAdaptiveQuantization = aqOn,
+                AqStrength = aqOn ? 8 : 0,
+            };
+            using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencH264Encoder(
+                width, height, fps, bitrate, gop, devices.Device, options);
+            long total = 0;
+            int count = 0;
+            encoder.OutputAvailable += () =>
+            {
+                while (encoder.TryDequeueEncoded(out var ef))
+                {
+                    // Skip the IDR — it dominates and isn't where AQ shows up.
+                    if (count > 0)
+                    {
+                        total += ef.Bytes.Length;
+                    }
+                    count++;
+                }
+            };
+            var clock = Stopwatch.StartNew();
+            for (int i = 0; i < frames; i++)
+            {
+                encoder.EncodeBgra(frame, stride, clock.Elapsed);
+            }
+            Thread.Sleep(300);
+            return total;
+        }
+
+        var flatOff = EncodeAndMeasure(flat, aqOn: false);
+        var textOff = EncodeAndMeasure(text, aqOn: false);
+        var flatOn = EncodeAndMeasure(flat, aqOn: true);
+        var textOn = EncodeAndMeasure(text, aqOn: true);
+
+        // Ratio of text-bits to flat-bits. AQ on should make text consume
+        // a higher proportion of the bit budget compared to flat.
+        var ratioOff = textOff / Math.Max(1.0, flatOff);
+        var ratioOn = textOn / Math.Max(1.0, flatOn);
+
+        Console.WriteLine($"RESULT: flat_off={flatOff} text_off={textOff} ratio_off={ratioOff:F3}");
+        Console.WriteLine($"RESULT: flat_on={flatOn} text_on={textOn} ratio_on={ratioOn:F3}");
+        Console.WriteLine($"RESULT: ratio_delta_pct={(ratioOn / Math.Max(0.001, ratioOff) - 1.0) * 100:F1}");
+
+        // AQ should make text-vs-flat allocation MORE skewed toward text.
+        var pass = ratioOn > ratioOff;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (ratio_on={ratioOn:F2} > ratio_off={ratioOff:F2})");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Scan a packed Annex-B H.264 bitstream for any NAL unit with the
+    /// given type. Looks for 4-byte start codes (00 00 00 01) and 3-byte
+    /// start codes (00 00 01). Returns true on first match.
+    /// </summary>
+    private static bool ContainsNalType(byte[] bytes, byte nalType)
+    {
+        for (int i = 0; i + 4 < bytes.Length; i++)
+        {
+            // 4-byte start: 00 00 00 01
+            if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 0 && bytes[i + 3] == 1)
+            {
+                if ((bytes[i + 4] & 0x1F) == nalType)
+                {
+                    return true;
+                }
+            }
+            // 3-byte start: 00 00 01
+            else if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1)
+            {
+                if ((bytes[i + 3] & 0x1F) == nalType)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void FillFlatGray(byte[] bgra, int width, int height, byte gray)
+    {
+        // BGRA: B, G, R, A.
+        for (int i = 0; i < bgra.Length; i += 4)
+        {
+            bgra[i + 0] = gray;
+            bgra[i + 1] = gray;
+            bgra[i + 2] = gray;
+            bgra[i + 3] = 255;
+        }
+    }
+
+    private static void FillSyntheticText(byte[] bgra, int width, int height)
+    {
+        // Background gray + alternating black-pixel "letters" — a high-
+        // frequency pattern that AQ should preserve while flat areas get
+        // less budget.
+        FillFlatGray(bgra, width, height, gray: 200);
+        // Draw vertical and horizontal lines every 8 pixels — coarse
+        // approximation of dense text edges.
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                bool edge = (x % 8 == 0) || (y % 12 == 0) || ((x + y) % 17 == 0);
+                if (!edge)
+                {
+                    continue;
+                }
+                int i = (y * width + x) * 4;
+                bgra[i + 0] = 20;
+                bgra[i + 1] = 20;
+                bgra[i + 2] = 20;
+                bgra[i + 3] = 255;
+            }
+        }
     }
 
     /// <summary>

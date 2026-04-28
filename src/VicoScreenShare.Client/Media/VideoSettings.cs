@@ -120,6 +120,46 @@ public sealed class VideoSettings
     /// off.
     /// </summary>
     public int SendPacingBitrateMultiplier { get; set; } = 1;
+
+    // ----- NVENC SDK quality knobs -----
+    // These four properties drive the direct NVENC SDK encoder backend
+    // when it's available (NVIDIA GPU + capability probe passes). On
+    // non-NVIDIA hosts the values are read but ignored — the MFT
+    // fallback path doesn't expose any of these knobs (the contract
+    // it advertises has no AQ / lookahead / intra-refresh / VBV control).
+
+    /// <summary>
+    /// Spatial AQ: shift bit budget toward complex regions (text, edges)
+    /// and away from flat areas. Single-highest-ROI quality knob for
+    /// screen content. Default on. Disabled on the MFT path; greyed in
+    /// Settings UI when <c>NvencCapabilities.IsAvailable</c> is false.
+    /// </summary>
+    public bool EnableAdaptiveQuantization { get; set; } = true;
+
+    /// <summary>
+    /// Encoder-internal lookahead: smarter rate-distortion decisions over
+    /// a window of frames. Adds encoder-pipeline latency equal to the
+    /// depth, so default off; flip on for "readability mode" use cases
+    /// where the latency budget is softer than the visible-quality
+    /// budget. Greyed when the GPU lacks <c>SupportsLookahead</c>.
+    /// </summary>
+    public bool EnableEncoderLookahead { get; set; } = false;
+
+    /// <summary>
+    /// Cyclic intra-refresh: replace periodic IDR keyframe bursts with
+    /// gradual refresh slices spread over a window. Halves the worst-case
+    /// per-frame size at GOP boundaries. Default on; flip off if a
+    /// receiver decoder reports decode errors (rare). Greyed when the
+    /// GPU lacks <c>SupportsIntraRefresh</c>.
+    /// </summary>
+    public bool EnableIntraRefresh { get; set; } = true;
+
+    /// <summary>
+    /// Number of frames between successive intra-refresh cycles. 0 =
+    /// auto (use GOP length). Only meaningful when
+    /// <see cref="EnableIntraRefresh"/> is true.
+    /// </summary>
+    public int IntraRefreshPeriodFrames { get; set; } = 0;
 }
 
 /// <summary>
