@@ -12,30 +12,10 @@ Users can currently pick a resolution and a bitrate independently. Bad combinati
 
 ## Audio
 
-## Encoder backend
-
-### Direct NVENC SDK path (bypass Media Foundation for NVIDIA)
-On the most common hardware (NVIDIA GPUs) the `NVIDIA H.264 Encoder MFT` is the Media Foundation shim NVIDIA ships, and it silently no-ops several CODECAPI properties Microsoft's API contract says it should honor. Two harness scenarios proved it before they were removed as part of cleaning up the dead user-facing settings they were tied to:
-
-- `bench-vbv` swept `VbvFraction` 0.10 → 2.00 (a 20× range). IDR keyframe sizes were identical at every value (ratio 1.00). `CODECAPI_AVEncCommonBufferSize` is a no-op on NVENC's MFT shim.
-- `bench-intra-refresh` enabled cyclic intra-refresh on a fresh encoder vs a baseline. Both produced the same number of IDRs at the same cadence and the same peak frame size (e.g. 5 IDRs / 911 KB peak in both runs over 5 s). `CODECAPI_AVEncVideoIntraRefreshMode` and `CODECAPI_AVEncVideoIntraRefreshPeriod` are also no-ops on the MFT shim.
-
-`TrySet` did not log a rejection in either case — the attribute Set call succeeds, the encoder simply doesn't apply it. Microsoft's software H.264 MFT and AMD/Intel MFTs may behave differently; never tested. The MFT shim is the broken layer and we cannot patch it from outside.
-
-The fix is the same one OBS, ffmpeg, and vMix use: call `NvEncodeAPI64.dll` directly. Wrap `NvEncodeAPICreateInstance`, manage `NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS`, configure `NV_ENC_RC_PARAMS` (where `vbvBufferSize`, `vbvInitialDelay`, and `intraRefreshPeriod` actually take effect), shuttle BGRA / NV12 frames in via `NvEncMapInputResource`, and pull encoded bitstreams out of `NvEncLockBitstream`. Roughly 1500–2500 lines of P/Invoke + session lifecycle + per-frame buffer marshalling, gated behind a runtime probe so non-NVIDIA users keep the MFT path.
-
-When this lands, re-add `bench-vbv` and `bench-intra-refresh` against the new NVENC encoder factory and wire the user-facing knobs back into Settings. Until then, NVENC users get neither knob, and the only available burst-prevention mechanism is the send-side packet pacer (`PacingRtpSender`, exposed in Settings as "Smooth keyframe sends").
-
 ## Encoder quality
 
-### Adaptive quantization
-Enable the encoder's spatial and temporal AQ so bits get redistributed from flat surfaces to detailed regions. This matches the shape of screen content (large flat areas punctuated by text) and is the single highest-ROI quality change for our bitrate range.
-
-### Encoder lookahead
-Let the encoder look a few frames ahead to make smarter rate-distortion decisions. Verify it cooperates with the low-latency path — if it adds meaningful latency, gate it behind readability mode where latency budget is softer.
-
 ### Raise quality-vs-speed preset
-Current preset is tuned conservatively. Push higher, measure encode-time impact on target hardware, keep the new value if quality improves without blowing the real-time budget.
+NVENC SDK path currently uses preset P4 (`NV_ENC_PRESET_P4_GUID`, mid). P5 / P6 trade encode time for visibly better quality at the same bitrate; P4 was picked for safety but the headroom on a 4070-class card is large. Push higher, measure encode-time on target hardware via `bench-encode --backend nvenc`, keep the new preset if quality improves without blowing the real-time budget. The "Readability mode" entry above is the natural place to gate this.
 
 ## Loss resilience
 
