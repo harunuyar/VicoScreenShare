@@ -20,7 +20,9 @@ NVENC SDK path currently uses preset P4 (`NV_ENC_PRESET_P4_GUID`, mid). P5 / P6 
 ## Loss resilience
 
 ### NACK
-We currently recover from packet loss by asking for a full keyframe, which costs a huge burst and often causes more loss. Add selective retransmission so a single lost packet can be recovered without a keyframe.
+We currently recover from packet loss by asking for a full keyframe (RTCP PLI → forced IDR, with a stale-pixel probe and an output-stagnation watchdog backing it up). That costs a huge burst and often causes more loss. Add selective retransmission so a single lost packet can be recovered without a keyframe.
+
+Prerequisite: a real packet-level jitter buffer (entry below). The custom AV1 RTP depacketizer reassembles in arrival order and can't accept late inserts, so RTX packets (RFC 4588, separate PT) need a reorder buffer that sits between the network and the depacketizer. Two attempts on this branch shipped same-SSRC retransmits and then RFC 4588 RTX, both reverted: same-SSRC was silently dropped by SRTP anti-replay, and RTX without a reorder buffer fed late-timestamped packets straight into the AV1 reassembler and crashed it.
 
 ### FEC
 Add forward error correction so brief losses heal without any round trip.
