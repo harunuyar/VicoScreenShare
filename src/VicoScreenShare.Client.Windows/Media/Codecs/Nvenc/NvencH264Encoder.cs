@@ -603,6 +603,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
             if (Interlocked.Exchange(ref _pendingForceIdr, 0) != 0)
             {
                 pic.encodePicFlags = (uint)NV_ENC_PIC_FLAGS.ForceIdr;
+                DebugLog.Write("[nvenc/h264] forced IDR flag consumed on this frame");
             }
 
             slot.PendingTimestamp = timestamp;

@@ -93,7 +93,7 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         // idle (no packets since last tick).
         _rateLogTimer = new System.Threading.Timer(
             _ => LogForwardRate(), null,
-            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
     }
 
     private void LogForwardRate()
@@ -112,11 +112,11 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
         {
             return;
         }
-        const double WindowSeconds = 30.0;
+        const double WindowSeconds = 2.0;
         var mbps = dBytes * 8.0 / WindowSeconds / 1_000_000.0;
         var pps = dPkts / WindowSeconds;
         _logger?.LogInformation(
-            "[sfu-send] viewer={Viewer} pub={Pub} 30s: {Pps:F0} pps, {Mbps:F2} Mbps | totals pkts={TotalPkts}",
+            "[sfu-send] viewer={Viewer} pub={Pub} 2s: {Pps:F0} pps, {Mbps:F2} Mbps | totals pkts={TotalPkts}",
             ViewerPeerId.ToString("N").Substring(0, 8),
             PublisherPeerId.ToString("N").Substring(0, 8),
             pps, mbps, pkts);
@@ -147,16 +147,89 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
     /// for the next natural IDR.</summary>
     public event Action? Connected;
 
+    // Video forwarding gate. New subscribers can't decode mid-stream
+    // P-frames — the AV1 NVDEC parser fires a bogus-dimensions sequence
+    // callback before the first real Sequence Header arrives, wedging the
+    // decoder for 5+ seconds while the playout queue stays drained. Same
+    // class of problem on H.264 (decoder needs SPS+PPS+IDR to initialize).
+    //
+    // Production SFUs (mediasoup, livekit, Janus) handle this by holding
+    // video packets for a fresh subscriber until they observe a keyframe
+    // boundary in the publisher's stream, then releasing the gate. The
+    // existing sub.Connected → publisher.SendRequestKeyframeAsync chain
+    // guarantees the publisher emits an IDR within ~50 ms RTT, so the
+    // gate's hold window is short.
+    //
+    // AV1 keyframe detection: RFC 9066 aggregation header bit 3 is the
+    // N flag — set on the first packet of a TU containing a Sequence
+    // Header. Our Av1RtpPacketizer sets it (Av1RtpPacketizer.cs:53-64).
+    // For H.264 the same bit position falls on FU-A / STAP-A / PPS NAL
+    // type bytes which are present in most non-trivial H.264 RTP packets,
+    // so the gate effectively releases on the first packet of any
+    // multi-NAL frame — fine, since H.264's MFT decoder didn't show the
+    // bogus-seq pathology AV1 has.
+    //
+    // Audio bypasses the gate entirely; Opus is loss-tolerant.
+    private int _videoGated = 1; // 1 = gated, 0 = released
+    private long _videoPacketsDroppedAtGate;
+
     /// <summary>
     /// Forward a received RTP packet from the upstream publisher out to the viewer.
     /// Called by <see cref="SfuSession"/> for every packet that the paired
-    /// <see cref="SfuPeer"/> receives from the publisher.
+    /// <see cref="SfuPeer"/> receives from the publisher. Video packets are
+    /// dropped on the floor until we observe a keyframe-marked packet —
+    /// see comment block above for the motivation.
     /// </summary>
     public void SendForwardedRtp(SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
         if (_disposed)
         {
             return;
+        }
+
+        if (mediaType == SDPMediaTypesEnum.video
+            && System.Threading.Volatile.Read(ref _videoGated) != 0)
+        {
+            // Codec-aware keyframe detection on the first byte:
+            //
+            //   PT 102 (AV1 OR H.264, both ride this slot in our SDP) —
+            //   bit 3 set means: AV1 RFC 9066 N bit (Sequence Header
+            //   start, true keyframe boundary), OR H.264 NAL types
+            //   24/28 (STAP-A / FU-A) which fragmented IDRs use. In
+            //   production, IDRs are large enough to require FU-A
+            //   wrapping, so the first IDR packet has bit 3 set; for
+            //   AV1 the N bit is exactly the right signal.
+            //
+            //   PT 96 (VP8) — first byte is the VP8 payload descriptor
+            //   (X|R|N|S|PartID). Bit 3 is part of PartID, not a
+            //   keyframe marker. The gate would never release for VP8
+            //   without a different signal, so just skip the gate for
+            //   VP8 and accept whatever the decoder does on its own.
+            //   VP8 doesn't show the AV1 NVDEC bogus-sequence pathology.
+            //
+            //   Other PTs (audio, RTX) — already filtered above.
+            var pt = rtpPacket.Header.PayloadType;
+            if (pt != 102)
+            {
+                System.Threading.Volatile.Write(ref _videoGated, 0);
+            }
+            else
+            {
+                var payload = rtpPacket.Payload;
+                if (payload is { Length: > 0 } && (payload[0] & 0x08) != 0)
+                {
+                    System.Threading.Volatile.Write(ref _videoGated, 0);
+                    _logger?.LogInformation(
+                        "[sfu-gate] viewer={Viewer} pub={Pub} keyframe seen, releasing gate (dropped={Dropped} pkts during gate)",
+                        ViewerPeerId, PublisherPeerId,
+                        System.Threading.Interlocked.Read(ref _videoPacketsDroppedAtGate));
+                }
+                else
+                {
+                    System.Threading.Interlocked.Increment(ref _videoPacketsDroppedAtGate);
+                    return;
+                }
+            }
         }
 
         try
@@ -239,20 +312,50 @@ public sealed class SfuSubscriberPeer : IAsyncDisposable
             return;
         }
         var rr = report.ReceiverReport;
-        if (rr?.ReceptionReports is null)
+        if (rr?.ReceptionReports is not null)
         {
-            return;
-        }
-        byte worst = 0;
-        foreach (var sample in rr.ReceptionReports)
-        {
-            if (sample.FractionLost > worst)
+            byte worst = 0;
+            foreach (var sample in rr.ReceptionReports)
             {
-                worst = sample.FractionLost;
+                if (sample.FractionLost > worst)
+                {
+                    worst = sample.FractionLost;
+                }
+            }
+            LatestFractionLost = worst;
+        }
+
+        // Look for a PLI feedback packet from this viewer. SIPSorcery exposes
+        // the feedback subtype on RTCPFeedback.Header — PSFB-class packets
+        // (PacketType == PSFB) carry the picture-specific feedback subtype
+        // in PayloadFeedbackMessageType (PLI is the one we care about).
+        // RTPFB-class packets (NACK / TWCC) use FeedbackMessageType instead;
+        // we don't act on those here. RTCPCompoundPacket.Feedback is the
+        // single RTCPFeedback present in the compound (or null).
+        var fb = report.Feedback;
+        if (fb is not null
+            && fb.Header.PacketType == RTCPReportTypesEnum.PSFB
+            && fb.Header.PayloadFeedbackMessageType == PSFBFeedbackTypesEnum.PLI)
+        {
+            try
+            {
+                ViewerKeyframeRequested?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogDebug(ex, "SfuSubscriberPeer {Viewer}<-{Publisher} ViewerKeyframeRequested handler threw",
+                    ViewerPeerId, PublisherPeerId);
             }
         }
-        LatestFractionLost = worst;
     }
+
+    /// <summary>
+    /// Fires when this subscriber's viewer-side RTCPeerConnection sends a
+    /// PLI or FIR. <see cref="SfuSession"/> wires this to the matching
+    /// publisher's <see cref="SfuPeer.TryForwardPli"/>, which coalesces
+    /// across viewers and emits a single upstream PLI per publisher.
+    /// </summary>
+    public event Action? ViewerKeyframeRequested;
 
     private void OnLocalIceCandidate(RTCIceCandidate candidate)
     {

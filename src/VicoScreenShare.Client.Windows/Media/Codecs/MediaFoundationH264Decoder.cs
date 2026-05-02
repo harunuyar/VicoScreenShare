@@ -45,6 +45,14 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     // MFT_OUTPUT_STREAM_INFO_FLAGS.MFT_OUTPUT_STREAM_PROVIDES_SAMPLES = 0x00000100
     private const int MftOutputStreamProvidesSamples = 0x100;
     private bool _warnedTypeNotSet;
+    private int _consecutiveZeroOutputDecodes;
+    // After this many consecutive Decode() calls with non-empty input
+    // produce zero output, raise KeyframeNeeded. MFT silently consumes
+    // corrupted bitstream by returning NEED_MORE_INPUT from ProcessOutput
+    // forever — no error code we can classify, so we have to detect it
+    // by observation. Threshold sized for ~100ms at 60fps to filter out
+    // legitimate "decoder is just buffering an early sequence" cases.
+    private const int ZeroOutputDecodesBeforeKeyframeRequest = 6;
 
     private readonly IMFTransform _transform;
     private readonly ID3D11Device? _d3dDevice;
@@ -81,6 +89,21 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
     /// path when null.
     /// </summary>
     public Action<IntPtr, int, int, TimeSpan>? GpuOutputHandler { get; set; }
+
+    /// <summary>
+    /// Raised when the MFT enters a state we can't recover from in-place
+    /// (TYPE_NOT_SET that re-negotiation didn't fix, or any other non-
+    /// STREAM_CHANGE / non-NEED_MORE_INPUT failure HRESULT). The receiver
+    /// listens for this and sends RTCP PLI upstream so the publisher
+    /// emits an IDR to reset the decoder.
+    /// </summary>
+    public event Action? KeyframeNeeded;
+
+    private void RaiseKeyframeNeeded(string reason)
+    {
+        DebugLog.Write($"[mf-h264] keyframe-needed: {reason}");
+        try { KeyframeNeeded?.Invoke(); } catch { /* listener exceptions must not crash decoder */ }
+    }
 
     public MediaFoundationH264Decoder() : this(externalDevice: null)
     {
@@ -308,7 +331,26 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
             inputBuffer.Dispose();
         }
 
-        return DrainOutput();
+        var output = DrainOutput();
+        if (output.Count == 0)
+        {
+            // Non-empty input produced no output. Could be the decoder
+            // legitimately buffering up to its first keyframe, OR
+            // silently consuming a corrupted bitstream. After enough
+            // consecutive zero-output calls, treat as the latter and
+            // ask upstream for a fresh IDR — receiver-side debounce
+            // ensures we don't spam.
+            _consecutiveZeroOutputDecodes++;
+            if (_consecutiveZeroOutputDecodes == ZeroOutputDecodesBeforeKeyframeRequest)
+            {
+                RaiseKeyframeNeeded($"{_consecutiveZeroOutputDecodes} consecutive Decode() calls produced no output");
+            }
+        }
+        else
+        {
+            _consecutiveZeroOutputDecodes = 0;
+        }
+        return output;
     }
 
     private IReadOnlyList<DecodedVideoFrame> DrainOutput()
@@ -383,12 +425,18 @@ internal sealed unsafe class MediaFoundationH264Decoder : IVideoDecoder
                         _warnedTypeNotSet = true;
                         DebugLog.Write("[mf] H264 decoder ProcessOutput stuck with TYPE_NOT_SET; decoder output format could not be negotiated");
                     }
+                    // Wedged — only a fresh IDR can lift this, since the
+                    // decoder won't accept input until it has an output
+                    // type and we couldn't negotiate one from the bitstream
+                    // we've seen so far.
+                    RaiseKeyframeNeeded("ProcessOutput TYPE_NOT_SET");
                     return (IReadOnlyList<DecodedVideoFrame>?)results ?? Array.Empty<DecodedVideoFrame>();
                 }
 
                 if (result.Failure)
                 {
                     DebugLog.Write($"[mf] H264 decoder ProcessOutput failed HRESULT 0x{(uint)result.Code:X8}");
+                    RaiseKeyframeNeeded($"ProcessOutput HRESULT 0x{(uint)result.Code:X8}");
                     return (IReadOnlyList<DecodedVideoFrame>?)results ?? Array.Empty<DecodedVideoFrame>();
                 }
 

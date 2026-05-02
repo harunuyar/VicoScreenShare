@@ -324,6 +324,58 @@ public static class Av1RtpPacketizer
         return result;
     }
 
+    /// <summary>
+    /// Walk an encoder-style AV1 temporal unit (each OBU has
+    /// <c>obu_has_size_field=1</c> and a LEB128 size) and return true if
+    /// any OBU is a Sequence Header (type 1). This is the keyframe
+    /// boundary the receiver's await-keyframe gate watches for: an AV1
+    /// stream starts decodable at a Sequence Header, equivalent to an
+    /// H.264 IDR. Tolerates malformed input by stopping the scan and
+    /// returning whatever it found so far.
+    /// </summary>
+    public static bool ContainsSequenceHeader(byte[] obuStream)
+        => ContainsSequenceHeader(obuStream, obuStream?.Length ?? 0);
+
+    public static bool ContainsSequenceHeader(byte[] obuStream, int validLength)
+    {
+        if (obuStream is null || validLength <= 0)
+        {
+            return false;
+        }
+
+        var pos = 0;
+        while (pos < validLength)
+        {
+            var header = obuStream[pos++];
+            var obuType = (header >> 3) & 0xF;
+            var hasExtension = (header & 0x04) != 0;
+            var hasSize = (header & 0x02) != 0;
+
+            if (hasExtension)
+            {
+                if (pos >= validLength)
+                {
+                    return false;
+                }
+                pos++;
+            }
+
+            if (obuType == ObuTypeSequenceHeader)
+            {
+                return true;
+            }
+
+            if (!hasSize)
+            {
+                return false;
+            }
+
+            var (size, lebBytes) = ReadLeb128(obuStream, pos);
+            pos += lebBytes + (int)size;
+        }
+        return false;
+    }
+
     // --- LEB128 helpers (shared with depacketizer) ---
 
     internal static (uint value, int bytesRead) ReadLeb128(byte[] data, int offset)

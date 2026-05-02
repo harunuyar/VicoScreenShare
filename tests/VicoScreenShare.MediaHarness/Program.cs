@@ -76,10 +76,14 @@ internal static class Program
                 "list-targets" => RunListTargetsScenario(argMap).GetAwaiter().GetResult(),
                 "bench-process-audio" => RunProcessAudioBenchmark(argMap).GetAwaiter().GetResult(),
                 "bench-nvenc-probe" => RunNvencProbeBenchmark(argMap),
+                "bench-nvdec-probe" => RunNvdecProbeBenchmark(argMap),
+                "bench-nvdec-decode" => RunNvdecDecodeBenchmark(argMap),
                 "bench-mft-av1-decoder" => RunMftAv1DecoderProbeBenchmark(argMap),
                 "bench-av1-rtp-roundtrip" => RunAv1RtpRoundtripBenchmark(argMap),
                 "bench-av1-encode-decode" => RunAv1EncodeDecodeBenchmark(argMap),
                 "bench-nvenc-keyframe" => RunNvencKeyframeBenchmark(argMap),
+                "bench-nvenc-av1-keyframe" => RunNvencAv1KeyframeBenchmark(argMap),
+                "bench-decoder-keyframe-needed" => RunDecoderKeyframeNeededBenchmark(argMap),
                 "bench-vbv" => RunVbvBenchmark(argMap),
                 "bench-intra-refresh" => RunIntraRefreshBenchmark(argMap),
                 "bench-aq" => RunAqBenchmark(argMap),
@@ -2591,6 +2595,314 @@ internal static class Program
     /// type) is dumped per frame so we can see IDR (5) vs P (1) ordering
     /// in the log.
     /// </summary>
+    /// <summary>
+    /// AV1 force-IDR contract test. Encode P-frames, call RequestKeyframe,
+    /// confirm the encoder emits a frame with a Sequence Header OBU shortly
+    /// after — that's the AV1 equivalent of an H.264 IDR-with-SPS. The
+    /// detector walks the OBU stream byte-by-byte: the OBU header byte's
+    /// type field (bits 6..3) equals 1 for OBU_SEQUENCE_HEADER. AV1 spec
+    /// §5.3.2 forbids type=1 from appearing inside payload bytes since
+    /// every OBU is length-prefixed (when obu_has_size_field=1, which
+    /// NVENC sets), so a top-level walk gives a clean keyframe signal.
+    /// </summary>
+    /// <summary>
+    /// Pinning test for the codec-agnostic recovery contract: every D3D11-
+    /// backed decoder MUST raise <see cref="IVideoDecoder.KeyframeNeeded"/>
+    /// when fed bitstream the decoder can't recover from. Lives in the
+    /// MediaHarness rather than xunit because the MFT and NVDEC decoders
+    /// need a real D3D11 device the same way the production pipeline does.
+    /// VPX has its own xunit coverage in DecoderKeyframeNeededTests.
+    ///
+    /// Strategy: feed each available decoder a stream of garbage bytes
+    /// shaped like a plausible bitstream payload (so the decoder runs the
+    /// real parse path and not a trivial early-out length check) and
+    /// verify the event fires within a few Decode() calls. We don't
+    /// require the FIRST call to fire it — some MFT decoders defer
+    /// errors until ProcessOutput drains, which happens N calls later.
+    /// </summary>
+    private static int RunDecoderKeyframeNeededBenchmark(Dictionary<string, string> args)
+    {
+        Console.WriteLine("# bench-decoder-keyframe-needed");
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+
+        int passed = 0;
+        int failed = 0;
+        int skipped = 0;
+
+        // -------- NVDEC AV1 --------
+        if (VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecCapabilities.Probe().IsAv1Available)
+        {
+            var fired = ExerciseDecoderForKeyframeNeeded(
+                () => new VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecAv1Decoder(devices.Device, 1920, 1088),
+                MakeAv1GarbageStream(),
+                callsToTry: 8);
+            Console.WriteLine($"RESULT: nvdec_av1_fired={fired}");
+            if (fired) { passed++; } else { failed++; }
+        }
+        else
+        {
+            Console.WriteLine("RESULT: nvdec_av1_fired=skip (NVDEC AV1 unavailable on this host)");
+            skipped++;
+        }
+
+        // -------- MFT AV1 --------
+        if (VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationAv1Decoder.HasAv1DecoderInstalled())
+        {
+            var fired = ExerciseDecoderForKeyframeNeeded(
+                () => new VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationAv1Decoder(devices.Device, hintWidth: 1920, hintHeight: 1088),
+                MakeAv1GarbageStream(),
+                callsToTry: 8);
+            Console.WriteLine($"RESULT: mft_av1_fired={fired}");
+            if (fired) { passed++; } else { failed++; }
+        }
+        else
+        {
+            Console.WriteLine("RESULT: mft_av1_fired=skip (AV1 Video Extension not installed)");
+            skipped++;
+        }
+
+        // -------- MFT H.264 --------
+        // MFT H.264 decoder is shipped with Windows 10+, no probe needed.
+        // Constructor is internal; route through the factory.
+        {
+            var h264Factory = new VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationH264DecoderFactory(devices.Device);
+            var fired = ExerciseDecoderForKeyframeNeeded(
+                () => h264Factory.CreateDecoder(),
+                MakeH264GarbageStream(),
+                callsToTry: 8);
+            Console.WriteLine($"RESULT: mft_h264_fired={fired}");
+            if (fired) { passed++; } else { failed++; }
+        }
+
+        Console.WriteLine($"VERDICT: {(failed == 0 ? "PASS" : "FAIL")} (passed={passed} failed={failed} skipped={skipped})");
+        return failed == 0 ? 0 : 3;
+    }
+
+    private static bool ExerciseDecoderForKeyframeNeeded(
+        Func<IVideoDecoder> factory,
+        byte[] garbage,
+        int callsToTry)
+    {
+        IVideoDecoder? decoder = null;
+        try
+        {
+            decoder = factory();
+            var fired = false;
+            decoder.KeyframeNeeded += () => fired = true;
+
+            for (var i = 0; i < callsToTry && !fired; i++)
+            {
+                try
+                {
+                    decoder.Decode(garbage, TimeSpan.FromMilliseconds(i * 33));
+                }
+                catch
+                {
+                    // Decoder construction/decode exceptions are
+                    // unrelated to the contract under test.
+                }
+                if (fired) { break; }
+                System.Threading.Thread.Sleep(20);
+            }
+            return fired;
+        }
+        finally
+        {
+            try { decoder?.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// AV1-shaped garbage: starts with a plausible Temporal Delimiter OBU
+    /// (header type=2, size=0) so cuvid's parser advances past the entry
+    /// point before failing on the body. Pure random bytes after that.
+    /// </summary>
+    private static byte[] MakeAv1GarbageStream()
+    {
+        var rnd = new Random(0xAB1A5E);
+        var buf = new byte[8192];
+        rnd.NextBytes(buf);
+        // Force a plausible TD OBU header at offset 0:
+        //   obu_type=2 (TD), obu_has_size_field=1 (bit 1 set)
+        //   header byte = 0_0010_0_1_0 = 0x12, followed by LEB128 length 0
+        buf[0] = 0x12;
+        buf[1] = 0x00;
+        return buf;
+    }
+
+    /// <summary>
+    /// H.264-shaped garbage: starts with an Annex B start code so the MFT
+    /// decoder enters NAL parsing instead of rejecting at the entry
+    /// point. Following bytes are random.
+    /// </summary>
+    private static byte[] MakeH264GarbageStream()
+    {
+        var rnd = new Random(0x264BAD);
+        var buf = new byte[8192];
+        rnd.NextBytes(buf);
+        buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x01;
+        // NAL unit type 5 = IDR slice; corrupt body forces the MFT into
+        // a real parse attempt rather than discarding for missing SPS/PPS.
+        buf[4] = 0x65;
+        return buf;
+    }
+
+    private static int RunNvencAv1KeyframeBenchmark(Dictionary<string, string> args)
+    {
+        const int width = 1280;
+        const int height = 720;
+        const int fps = 30;
+        const int gop = 60;
+        const long bitrate = 4_000_000;
+
+        Console.WriteLine($"# bench-nvenc-av1-keyframe {width}x{height}@{fps} bitrate={bitrate} gop={gop}");
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencCapabilities.Probe(devices.Device);
+        if (!caps.IsAv1Available)
+        {
+            Console.Error.WriteLine($"NVENC AV1 not available: {caps.UnavailableReason}");
+            return 2;
+        }
+
+        // Intra-refresh ON to mirror the production AV1 path. Without this
+        // the encoder's natural IDR cadence at gop=60 frames would mask
+        // the force-IDR effect — we'd see periodic IDRs anyway. With
+        // intra-refresh, the only IDR after frame 0 should come from
+        // RequestKeyframe.
+        var av1Options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+        {
+            EnableIntraRefresh = true,
+            IntraRefreshPeriodFrames = gop,
+        };
+        using var encoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1Encoder(
+            width, height, fps, bitrate, gop, devices.Device, av1Options);
+        var stride = width * 4;
+        var bgra = new byte[height * stride];
+        FillGradient(bgra, width, height);
+
+        var frames = new List<(int idx, int len, bool hasSeqHdr)>();
+        encoder.OutputAvailable += () =>
+        {
+            while (encoder.TryDequeueEncoded(out var ef))
+            {
+                lock (frames)
+                {
+                    frames.Add((frames.Count, ef.Bytes.Length, ContainsAv1SequenceHeader(ef.Bytes)));
+                }
+            }
+        };
+
+        var clock = Stopwatch.StartNew();
+        const int submitFrames = 60;
+        const int requestKeyframeAt = 30;
+        for (int i = 0; i < submitFrames; i++)
+        {
+            MutatePattern(bgra, i, width);
+            if (i == requestKeyframeAt)
+            {
+                Console.WriteLine("# requesting keyframe");
+                encoder.RequestKeyframe();
+            }
+            encoder.EncodeBgra(bgra, stride, clock.Elapsed);
+            var deadline = (long)((i + 1) * Stopwatch.Frequency / (double)fps);
+            while (clock.ElapsedTicks < deadline)
+            {
+            }
+        }
+
+        Thread.Sleep(200);
+
+        lock (frames)
+        {
+            Console.WriteLine($"RESULT: encoded={frames.Count}");
+            int seqHdrCount = 0;
+            int? firstSeqHdrIdx = null;
+            int? secondSeqHdrIdx = null;
+            for (int i = 0; i < frames.Count; i++)
+            {
+                if (!frames[i].hasSeqHdr) { continue; }
+                seqHdrCount++;
+                firstSeqHdrIdx ??= frames[i].idx;
+                if (seqHdrCount == 2)
+                {
+                    secondSeqHdrIdx = frames[i].idx;
+                }
+            }
+            Console.WriteLine($"RESULT: seq_hdr_count={seqHdrCount}");
+            Console.WriteLine($"RESULT: first_seq_hdr_idx={firstSeqHdrIdx}");
+            Console.WriteLine($"RESULT: second_seq_hdr_idx={secondSeqHdrIdx}");
+
+            // First frame is always a keyframe (initial IDR with seq hdr).
+            // After RequestKeyframe at frame 30, expect another seq-hdr
+            // frame within a small window (encoder may emit 1-2 frames in
+            // flight before honoring the flag).
+            var pass = seqHdrCount >= 2
+                && secondSeqHdrIdx is { } s && s >= requestKeyframeAt - 1 && s <= requestKeyframeAt + 5;
+            Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")} (expected seq-hdr near frame {requestKeyframeAt}, got {secondSeqHdrIdx})");
+            return pass ? 0 : 3;
+        }
+    }
+
+    /// <summary>
+    /// Walk the AV1 OBU stream looking for a top-level SEQUENCE_HEADER OBU
+    /// (type=1). NVENC produces obu_has_size_field=1 (per Av1RtpPacketizer
+    /// expectations), so each OBU carries its own LEB128 length and we can
+    /// hop element-to-element without parsing the payload. Returns true
+    /// for a keyframe stream, false for P-frame streams.
+    /// </summary>
+    private static bool ContainsAv1SequenceHeader(byte[] obuStream)
+    {
+        if (obuStream is null || obuStream.Length == 0) { return false; }
+        var i = 0;
+        while (i < obuStream.Length)
+        {
+            var header = obuStream[i++];
+            var obuType = (header >> 3) & 0x0F;
+            var hasExtension = (header & 0x04) != 0;
+            var hasSize = (header & 0x02) != 0;
+            if (hasExtension)
+            {
+                if (i >= obuStream.Length) { break; }
+                i++;
+            }
+            int payloadLen;
+            if (hasSize)
+            {
+                if (!TryReadLeb128(obuStream, ref i, out payloadLen)) { break; }
+            }
+            else
+            {
+                // No length field — the OBU runs to end-of-stream. We've
+                // already consumed the type byte, so payload is the rest.
+                payloadLen = obuStream.Length - i;
+            }
+            if (obuType == 1)
+            {
+                return true;
+            }
+            i += payloadLen;
+        }
+        return false;
+    }
+
+    private static bool TryReadLeb128(byte[] buf, ref int i, out int value)
+    {
+        value = 0;
+        for (var shift = 0; shift < 28; shift += 7)
+        {
+            if (i >= buf.Length) { return false; }
+            var b = buf[i++];
+            value |= (b & 0x7F) << shift;
+            if ((b & 0x80) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static int RunNvencKeyframeBenchmark(Dictionary<string, string> args)
     {
         const int width = 1280;
@@ -3050,5 +3362,290 @@ internal static class Program
             Console.WriteLine($"RESULT: av1_height_max={caps.Av1MaxHeight}");
         }
         return 0;
+    }
+
+    /// <summary>
+    /// NVDEC capability probe. Standalone executable check for the AV1
+    /// decoder side that doesn't require running the full app — fast
+    /// turnaround when iterating on the C# binding layout for cuvid
+    /// structs. Validates struct sizes by hard-comparing
+    /// Marshal.SizeOf to the values from nvcuvid.h, then runs the
+    /// actual cuvidGetDecoderCaps query for AV1 / 4:2:0 / 8-bit.
+    /// </summary>
+    private static int RunNvdecProbeBenchmark(Dictionary<string, string> args)
+    {
+        Console.WriteLine("# bench-nvdec-probe");
+
+        // Hard-pin sizes for every cuvid struct we marshal across the
+        // boundary. Size mismatch = layout bug = silent failures from
+        // the API (saw this with bIsSupported=0 on AV1-capable HW
+        // because Sequential layout didn't reproduce the C struct's
+        // implicit pad after `unsigned char nNumNVDECs`). The first
+        // value is OUR managed-side size; the second is the C side.
+        // Any "EXPECTED ..." line that fails will surface here BEFORE
+        // we make any cuvid call, so we know the bug is in the C#
+        // binding rather than the driver.
+        // Sizes are derived from nvcuvid.h on a 64-bit Windows build:
+        //   CUVIDDECODECAPS — 88: 3×int IN + 3×uint reserved1 + 8 OUT
+        //     fields packed (24..47) + 10×uint reserved3 (48..87) = 88.
+        //     The earlier 80-byte value was a layout bug — reserved1 was
+        //     wrongly modelled as 3 bytes instead of 12, shifting every
+        //     OUT field by 9 bytes and producing supported=0 for all
+        //     codecs.
+        //   CUVIDPARSERPARAMS — 96: 5×uint + 1 bitfield uint + 4×uint
+        //     reserved + 7 pointers (pUserData + 5 callback fnptrs +
+        //     pExtVideoInfo) = 40 + 56 = 96.
+        //   CUVIDSOURCEDATAPACKET — 24: 2×uint flags+size, 1 pointer,
+        //     1 ulong timestamp.
+        //   CUVIDPARSERDISPINFO — 24: 4×int progressive flags + 1 ulong
+        //     timestamp.
+        var expected = new (string Name, int Actual, int Expected)[]
+        {
+            ("CUVIDDECODECAPS",
+                System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecApi.CUVIDDECODECAPS>(),
+                88),
+            ("CUVIDPARSERPARAMS",
+                System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecApi.CUVIDPARSERPARAMS>(),
+                96),
+            ("CUVIDSOURCEDATAPACKET",
+                System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecApi.CUVIDSOURCEDATAPACKET>(),
+                24),
+            ("CUVIDPARSERDISPINFO",
+                System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecApi.CUVIDPARSERDISPINFO>(),
+                24),
+            // CUVIDDECODECREATEINFO — 112 bytes: field bytes sum to 108,
+            // but vidLock (IntPtr) forces 8-byte struct alignment so the
+            // tail is padded out to 112 by both C and C#. Modelling
+            // ulWidth/etc. as ulong on Windows doubles the size and
+            // makes cuvidCreateDecoder fail with INVALID_VALUE — Windows
+            // C `unsigned long` is 4 bytes, not 8.
+            ("CUVIDDECODECREATEINFO",
+                System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecApi.CUVIDDECODECREATEINFO>(),
+                112),
+            // CUVIDPROCPARAMS — 256 bytes: 4 × int + 2 × uint + 8 +
+            // 2 × uint + 8 + 2 × uint + 8 (CUstream) + 46 × 4 (reserved)
+            // + 8 (histogram_dptr).
+            ("CUVIDPROCPARAMS",
+                System.Runtime.InteropServices.Marshal.SizeOf<VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecApi.CUVIDPROCPARAMS>(),
+                256),
+        };
+        var sizeOk = true;
+        foreach (var (name, actual, exp) in expected)
+        {
+            var verdict = actual == exp ? "OK" : "MISMATCH";
+            Console.WriteLine($"RESULT: sizeof_{name}={actual} expected={exp} verdict={verdict}");
+            if (actual != exp) { sizeOk = false; }
+        }
+        if (!sizeOk)
+        {
+            Console.Error.WriteLine("FAIL: at least one struct size mismatch — fix C# layout before running on real hardware");
+            return 2;
+        }
+
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecCapabilities.Probe();
+        Console.WriteLine($"RESULT: dlls_available={(caps.DllsAvailable ? 1 : 0)}");
+        Console.WriteLine($"RESULT: cuda_initialized={(caps.CudaInitialized ? 1 : 0)}");
+        Console.WriteLine($"RESULT: av1_available={(caps.IsAv1Available ? 1 : 0)}");
+        if (caps.IsAv1Available)
+        {
+            Console.WriteLine($"RESULT: av1_max_width={caps.Av1MaxWidth}");
+            Console.WriteLine($"RESULT: av1_max_height={caps.Av1MaxHeight}");
+            Console.WriteLine($"RESULT: av1_min_width={caps.Av1MinWidth}");
+            Console.WriteLine($"RESULT: av1_min_height={caps.Av1MinHeight}");
+            Console.WriteLine($"RESULT: av1_engines={caps.Av1NumNvdecs}");
+            Console.WriteLine($"VERDICT: PASS — NVDEC AV1 available on this host");
+            return 0;
+        }
+        if (!caps.DllsAvailable)
+        {
+            Console.WriteLine("VERDICT: SKIP — nvcuda.dll / nvcuvid.dll not present (non-NVIDIA host)");
+            return 0;
+        }
+        Console.WriteLine("VERDICT: FAIL — DLLs loaded and CUDA initialized, but cuvidGetDecoderCaps reported AV1 unsupported. Either the GPU is older than RTX 30/Volta, or the C# binding layout is still slightly off (after Size match this should not happen).");
+        return 3;
+    }
+
+    /// <summary>
+    /// Encode-decode roundtrip exercising the NVDEC AV1 decoder: feed
+    /// the OBU stream from a fresh NVENC AV1 encoder into NvDecAv1Decoder
+    /// and verify we get pixel output back at the requested dimensions.
+    /// Skipped (verdict SKIP) when NVDEC AV1 isn't available on this
+    /// host. Any decode anomaly (zero output frames, wrong dimensions,
+    /// callback-thrown exception) returns FAIL with the relevant log.
+    /// </summary>
+    private static int RunNvdecDecodeBenchmark(Dictionary<string, string> args)
+    {
+        Console.WriteLine("# bench-nvdec-decode");
+        var width = int.Parse(args.GetValueOrDefault("width", "1920"));
+        var height = int.Parse(args.GetValueOrDefault("height", "1088"));
+        var frames = int.Parse(args.GetValueOrDefault("frames", "30"));
+        var fps = int.Parse(args.GetValueOrDefault("fps", "60"));
+        var bitrate = long.Parse(args.GetValueOrDefault("bitrate", "8000000"));
+
+        var caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecCapabilities.Probe();
+        if (!caps.IsAv1Available)
+        {
+            Console.WriteLine($"VERDICT: SKIP — NVDEC AV1 unavailable (dlls={caps.DllsAvailable} cuda={caps.CudaInitialized})");
+            return 0;
+        }
+
+        using var devices = new D3D11DeviceManager();
+        devices.Initialize();
+
+        var encoderFactory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory(devices.Device);
+        if (!encoderFactory.IsAvailable)
+        {
+            Console.WriteLine("VERDICT: SKIP — NVENC AV1 encoder unavailable; cannot drive a roundtrip");
+            return 0;
+        }
+        using var encoder = encoderFactory.CreateEncoder(width, height, fps, (int)bitrate, gopFrames: fps);
+        var asyncEncoder = encoder as VicoScreenShare.Client.Media.Codecs.IAsyncEncodedOutputSource;
+        using var decoder = new VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecAv1Decoder(devices.Device, width, height);
+
+        // Wire a synchronous capture of decoder GPU output. We don't
+        // need to render — just count frames, record dimensions, and
+        // read back one BGRA pixel from the last frame to verify the
+        // shader actually wrote real content (guards against the
+        // false-positive case where the callback fires with correct
+        // dimensions but the destination texture is all-zero, e.g.
+        // because the conversion shader didn't compile / didn't run).
+        int decodedCount = 0;
+        int observedW = 0;
+        int observedH = 0;
+        uint lastPixelBgra = 0;
+        decoder.GpuOutputHandler = (ptr, w, h, ts) =>
+        {
+            System.Threading.Interlocked.Increment(ref decodedCount);
+            observedW = w;
+            observedH = h;
+
+            // Spot-check pixel at (w/2, h/2) by copying that 1x1 region
+            // into a STAGING texture and Map'ing it. Cheap (~50 us) and
+            // proves there's real pixel content downstream of the
+            // NV12-plane copy + BGRA shader pass.
+            try
+            {
+                var bgraTex = new Vortice.Direct3D11.ID3D11Texture2D(ptr);
+                System.Runtime.InteropServices.Marshal.AddRef(ptr);
+                try
+                {
+                    var stagingDesc = new Vortice.Direct3D11.Texture2DDescription
+                    {
+                        Width = 1,
+                        Height = 1,
+                        MipLevels = 1,
+                        ArraySize = 1,
+                        Format = Vortice.DXGI.Format.B8G8R8A8_UNorm,
+                        SampleDescription = new Vortice.DXGI.SampleDescription(1, 0),
+                        Usage = Vortice.Direct3D11.ResourceUsage.Staging,
+                        BindFlags = Vortice.Direct3D11.BindFlags.None,
+                        CPUAccessFlags = Vortice.Direct3D11.CpuAccessFlags.Read,
+                        MiscFlags = Vortice.Direct3D11.ResourceOptionFlags.None,
+                    };
+                    using var staging = devices.Device.CreateTexture2D(stagingDesc);
+                    var ctx = devices.Device.ImmediateContext;
+                    var srcBox = new Vortice.Mathematics.Box((int)(w / 2), (int)(h / 2), 0, (int)(w / 2) + 1, (int)(h / 2) + 1, 1);
+                    ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, bgraTex, 0, srcBox);
+                    var mapped = ctx.Map(staging, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+                    unsafe
+                    {
+                        var p = (byte*)mapped.DataPointer;
+                        lastPixelBgra = ((uint)p[0]) | ((uint)p[1] << 8) | ((uint)p[2] << 16) | ((uint)p[3] << 24);
+                    }
+                    ctx.Unmap(staging, 0);
+                }
+                finally
+                {
+                    bgraTex.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"pixel readback failed: {ex.Message}");
+            }
+        };
+
+        // Synthetic stimulus: a moving-gradient BGRA buffer per
+        // input frame so the encoder produces real bitstream.
+        var stride = width * 4;
+        var bgra = new byte[height * stride];
+        var encoded = 0;
+        for (int i = 0; i < frames; i++)
+        {
+            FillBgraGradient(bgra, width, height, frameIndex: i);
+            var ts = TimeSpan.FromMilliseconds(i * 1000.0 / fps);
+            var sync = encoder.EncodeBgra(bgra, stride, ts);
+            if (sync.HasValue)
+            {
+                encoded++;
+                decoder.Decode(sync.Value.Bytes, sync.Value.Bytes.Length, sync.Value.Timestamp);
+            }
+            // Async hardware encoders also surface output via the dequeue
+            // pump. Drain whatever's ready before submitting the next.
+            if (asyncEncoder is not null)
+            {
+                while (asyncEncoder.TryDequeueEncoded(out var asyncSample))
+                {
+                    encoded++;
+                    decoder.Decode(asyncSample.Bytes, asyncSample.Bytes.Length, asyncSample.Timestamp);
+                }
+            }
+        }
+        // Final flush: spin until the encoder reports no more samples
+        // for ~200 ms (covers in-flight async pipeline depth).
+        if (asyncEncoder is not null)
+        {
+            var spinUntil = DateTime.UtcNow.AddMilliseconds(500);
+            while (DateTime.UtcNow < spinUntil)
+            {
+                if (asyncEncoder.TryDequeueEncoded(out var asyncSample))
+                {
+                    encoded++;
+                    decoder.Decode(asyncSample.Bytes, asyncSample.Bytes.Length, asyncSample.Timestamp);
+                    spinUntil = DateTime.UtcNow.AddMilliseconds(200);
+                    continue;
+                }
+                System.Threading.Thread.Sleep(5);
+            }
+        }
+
+        Console.WriteLine($"RESULT: encoded={encoded}");
+        Console.WriteLine($"RESULT: decoded={decodedCount}");
+        Console.WriteLine($"RESULT: observed_dims={observedW}x{observedH}");
+        Console.WriteLine($"RESULT: center_pixel_bgra=0x{lastPixelBgra:X8}");
+        // Strip alpha (always 0xFF) so the "is this just black?" check
+        // doesn't get fooled by an opaque-zero pixel.
+        var rgbOnly = lastPixelBgra & 0x00FFFFFFu;
+        var pass = encoded > 0 && decodedCount > 0
+            && observedW == width && observedH == height
+            && rgbOnly != 0;
+        Console.WriteLine($"VERDICT: {(pass ? "PASS" : "FAIL")}");
+        return pass ? 0 : 3;
+    }
+
+    /// <summary>
+    /// Fill a BGRA buffer with a frame-index-modulated gradient. Gives
+    /// the encoder real-looking content to encode (vs. a flat color
+    /// which it would compress to a near-zero-byte frame and skip
+    /// downstream bit pattern verification).
+    /// </summary>
+    private static void FillBgraGradient(byte[] bgra, int width, int height, int frameIndex)
+    {
+        var rOff = (byte)(frameIndex * 7 % 256);
+        var gOff = (byte)(frameIndex * 11 % 256);
+        var bOff = (byte)(frameIndex * 13 % 256);
+        var stride = width * 4;
+        for (var y = 0; y < height; y++)
+        {
+            var row = y * stride;
+            for (var x = 0; x < width; x++)
+            {
+                var i = row + x * 4;
+                bgra[i + 0] = (byte)((x + bOff) & 0xFF); // B
+                bgra[i + 1] = (byte)((y + gOff) & 0xFF); // G
+                bgra[i + 2] = (byte)((x + y + rOff) & 0xFF); // R
+                bgra[i + 3] = 0xFF;                          // A
+            }
+        }
     }
 }

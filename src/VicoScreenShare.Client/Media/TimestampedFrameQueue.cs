@@ -124,7 +124,18 @@ public sealed class TimestampedFrameQueue
             {
                 dropped = _frames[0].OnDropped;
                 _frames.RemoveAt(0);
-                Interlocked.Increment(ref _droppedOverflowCount);
+                var totalDrops = Interlocked.Increment(ref _droppedOverflowCount);
+                // Layer 6c probe: queue overflow eviction. The
+                // consumer (PaintLoop) is falling behind producer
+                // (decoder/network). Each drop loses a frame and
+                // rotates the queue's pts span — once this starts
+                // firing, frame-spacing in the queue diverges from
+                // the publisher's send cadence, which is exactly the
+                // pattern that made the painter lock at 30 fps.
+                if (totalDrops <= 200 || totalDrops % 50 == 0)
+                {
+                    DebugLog.Write($"[recv-l6-overflow] queue full ({_maxCapacity}); evicted oldest. totalDrops={totalDrops}");
+                }
                 RateLimitedOverflowLog();
             }
 

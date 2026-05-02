@@ -95,6 +95,7 @@ public sealed class PacingRtpSender : IDisposable
 
     private uint _rtpTimestamp;
     private long _nextSendTicks;
+    private long _lastEnqueueWallTicks;
     private long _packetsSent;
     private long _framesSent;
     private long _framesQueued;
@@ -173,12 +174,32 @@ public sealed class PacingRtpSender : IDisposable
         // must use the encoder's codec — NOT the framing codec, which
         // may disagree if SDP intersection picked a different PT.
         var isKey = DetectKeyframe(sample, _contentCodec);
+        var nowTicks = Stopwatch.GetTimestamp();
+
+        // Publisher-side gap probe. Logs when the wall-time gap between
+        // successive frames *arriving from the encoder* exceeds the
+        // threshold. Pairs with the receive-side [recv-gap] probe so we
+        // can attribute wire-arrival gaps to the encoder (gap already
+        // present at Enqueue) vs the network or SIPSorcery send path
+        // (gap appears between Enqueue and wire arrival).
+        const double EnqueueGapLogThresholdMs = 25.0;
+        if (_lastEnqueueWallTicks != 0)
+        {
+            var gapMs = (nowTicks - _lastEnqueueWallTicks) * 1000.0 / Stopwatch.Frequency;
+            if (gapMs > EnqueueGapLogThresholdMs)
+            {
+                DebugLog.Write(
+                    $"[pacer-enq-gap] wallGap={gapMs:F1}ms isKey={isKey} sampleSize={sample.Length} qDepth={_queue.Count}");
+            }
+        }
+        _lastEnqueueWallTicks = nowTicks;
+
         var frame = new QueuedFrame
         {
             Duration = duration,
             Sample = sample,
             IsKeyframe = isKey,
-            EnqueuedTicks = Stopwatch.GetTimestamp(),
+            EnqueuedTicks = nowTicks,
         };
 
         var dropped = false;
@@ -339,10 +360,11 @@ public sealed class PacingRtpSender : IDisposable
         // the framing reassemble cleanly on the other side as long as
         // both sides agree on the framing — the encoder's codec is
         // orthogonal.
-        var packets = _framingCodec switch
+        IReadOnlyList<byte[]> packets = _framingCodec switch
         {
             VideoCodec.H264 => PacketiseH264(frame.Sample),
             VideoCodec.Vp8 => PacketiseVp8(frame.Sample),
+            VideoCodec.Av1 => Av1RtpPacketizer.Packetize(frame.Sample, RtpMaxPayload),
             _ => PacketiseGeneric(frame.Sample),
         };
 
@@ -455,7 +477,15 @@ public sealed class PacingRtpSender : IDisposable
             return sample.Length > 0 && (sample[0] & 0x01) == 0;
         }
 
-        // Unknown / AV1 — treat as non-keyframe; the drop policy still
+        if (codec == VideoCodec.Av1)
+        {
+            // AV1 keyframe = the temporal unit contains an OBU_SEQUENCE_HEADER
+            // (type 1). It's not necessarily the FIRST OBU — encoders typically
+            // lead with an OBU_TEMPORAL_DELIMITER (type 2). Walk all OBUs.
+            return Av1RtpPacketizer.ContainsSequenceHeader(sample);
+        }
+
+        // Unknown codec — treat as non-keyframe; the drop policy still
         // works (just less safely on unknown codecs).
         return false;
     }

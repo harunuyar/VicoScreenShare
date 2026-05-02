@@ -6,6 +6,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading.Channels;
 using Microsoft.Extensions.Options;
+using SIPSorcery.Net;
 using VicoScreenShare.Protocol;
 using VicoScreenShare.Protocol.Messages;
 using VicoScreenShare.Server.Config;
@@ -613,6 +614,35 @@ public sealed class WsSession
         {
             await SendErrorAsync(ErrorCode.BadRequest, "SubscriptionId is server-driven; clients must not offer on a subscriber PC", envelope.CorrelationId).ConfigureAwait(false);
             return;
+        }
+
+        // Re-offer detection. SIPSorcery's <c>setRemoteDescription</c> doesn't
+        // ICE-restart a connected RTCPeerConnection in place, so when the
+        // client disposes its main PC and offers again (e.g. codec rebuild),
+        // the existing SfuPeer keeps its old transport bound to the dead
+        // client endpoint — accepting the new offer succeeds at the SDP
+        // layer but media never flows. Always replace when an existing
+        // SfuPeer is present: the only legitimate reason a client offers a
+        // second time is that they tore down their PC, since we don't
+        // support in-place renegotiation. _sfuPeerBound is reset so the
+        // local-ICE-candidate forwarder re-attaches to the new instance.
+        // The previous narrower condition (state != new && state != connecting)
+        // missed re-offers that arrived while the OLD SfuPeer's state had
+        // not yet transitioned away from "new" / "connecting" — e.g. when the
+        // first negotiation was cut short by a quick stop+restart.
+        var existing = sfu.Find(PeerId);
+        _logger.LogInformation(
+            "Session {PeerId} HandleSdpOfferAsync entry — existingPeer={HasExisting} state={State}",
+            PeerId,
+            existing is not null,
+            existing?.PeerConnection.connectionState.ToString() ?? "n/a");
+        if (existing is not null)
+        {
+            _logger.LogInformation(
+                "Session {PeerId} SDP re-offer received; replacing stale SfuPeer (was state={State})",
+                PeerId, existing.PeerConnection.connectionState);
+            await sfu.ReplacePeerAsync(PeerId).ConfigureAwait(false);
+            _sfuPeerBound = false;
         }
 
         var peer = GetOrAttachSfuPeer(sfu);

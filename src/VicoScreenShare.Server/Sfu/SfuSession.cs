@@ -79,6 +79,33 @@ public sealed class SfuSession : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Drop the existing <see cref="SfuPeer"/> for <paramref name="peerId"/> so the
+    /// next <see cref="GetOrCreatePeer"/> builds a fresh one. Called when a client
+    /// disposed its main RTCPeerConnection (e.g. codec rebuild) and re-offers SDP:
+    /// the server's existing SfuPeer is bound to the dead client PC and won't
+    /// ICE-restart in place via SIPSorcery's <c>setRemoteDescription</c>, so we
+    /// have to swap it out. Existing <see cref="SfuSubscriberPeer"/>s that were
+    /// fanning out from this publisher stay valid — fan-out is keyed on
+    /// <c>(viewer, publisher)</c> in <see cref="_subscribers"/>, looked up
+    /// dynamically from <see cref="ForwardPublisherRtp"/>, so the new peer's
+    /// forwarder takes over without touching subscriber state. Returns
+    /// <c>true</c> when a peer was actually removed.
+    /// </summary>
+    public async Task<bool> ReplacePeerAsync(Guid peerId)
+    {
+        if (!_peers.TryRemove(peerId, out var peer))
+        {
+            return false;
+        }
+        if (_forwarders.TryRemove(peerId, out var forwarder))
+        {
+            peer.RtpPacketReceived -= forwarder.OnRtpReceived;
+        }
+        try { await peer.DisposeAsync().ConfigureAwait(false); } catch { }
+        return true;
+    }
+
     public SfuPeer? Find(Guid peerId) =>
         _peers.TryGetValue(peerId, out var peer) ? peer : null;
 
@@ -229,6 +256,19 @@ public sealed class SfuSession : IAsyncDisposable
             await sub.DisposeAsync().ConfigureAwait(false);
             return;
         }
+
+        // Wire viewer-side RTCP PLI to the publisher's SfuPeer. The
+        // publisher peer coalesces, so multiple viewers all asking at
+        // once produce one upstream PLI per coalesce window. The
+        // publisher then emits an IDR which the SFU's normal RTP
+        // forwarding broadcasts to every viewer.
+        sub.ViewerKeyframeRequested += () =>
+        {
+            if (_peers.TryGetValue(publisherPeerId, out var publisherPeer))
+            {
+                publisherPeer.TryForwardPli();
+            }
+        };
 
         // Let WsSession drive the SDP offer out to the viewer tagged with
         // publisherPeerId as SubscriptionId. SubscriberReady is a multicast

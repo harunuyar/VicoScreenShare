@@ -1,6 +1,7 @@
 namespace VicoScreenShare.Client.Media.Codecs;
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 
 /// <summary>
@@ -25,13 +26,77 @@ public static class Av1RtpDepacketizer
     /// </summary>
     public static byte[]? Depacketize(IReadOnlyList<byte[]> rtpPayloads)
     {
+        var obuElements = BuildObuElements(rtpPayloads);
+        if (obuElements is null || obuElements.Count == 0)
+        {
+            ReturnPooledElements(obuElements);
+            return null;
+        }
+        try
+        {
+            return ReconstructObuStream(obuElements);
+        }
+        finally
+        {
+            ReturnPooledElements(obuElements);
+        }
+    }
+
+    /// <summary>
+    /// One OBU element extracted from RTP payloads. <see cref="Buffer"/>
+    /// is rented from <see cref="ArrayPool{T}.Shared"/>; <see cref="Length"/>
+    /// is the valid byte count. Caller must call
+    /// <see cref="ReturnPooledElements"/> after consuming the elements
+    /// or the pool will leak.
+    /// </summary>
+    private readonly record struct ObuElement(byte[] Buffer, int Length);
+
+    private static void ReturnPooledElements(List<ObuElement>? elements)
+    {
+        if (elements is null)
+        {
+            return;
+        }
+        for (var i = 0; i < elements.Count; i++)
+        {
+            var buf = elements[i].Buffer;
+            if (buf is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buf);
+            }
+        }
+        elements.Clear();
+    }
+
+    private static ObuElement RentElement(byte[] source, int sourceOffset, int length)
+    {
+        var buf = ArrayPool<byte>.Shared.Rent(length);
+        if (length > 0)
+        {
+            Buffer.BlockCopy(source, sourceOffset, buf, 0, length);
+        }
+        return new ObuElement(buf, length);
+    }
+
+    /// <summary>
+    /// Walks RTP payloads applying the RFC 9066 aggregation header (Z/Y
+    /// fragmentation, W element count) and returns a flat list of
+    /// stripped OBU element buffers (header + ext + payload, no
+    /// obu_has_size_field, no LEB128 size). All buffers are rented from
+    /// <see cref="ArrayPool{T}.Shared"/>; caller MUST return them via
+    /// <see cref="ReturnPooledElements"/>. Shared by both
+    /// <see cref="Depacketize"/> and <see cref="DepacketizePooled"/>.
+    /// </summary>
+    private static List<ObuElement>? BuildObuElements(IReadOnlyList<byte[]> rtpPayloads)
+    {
         if (rtpPayloads is null || rtpPayloads.Count == 0)
         {
             return null;
         }
 
-        var obuElements = new List<byte[]>();
-        byte[]? pendingFragment = null;
+        var obuElements = new List<ObuElement>();
+        ObuElement pendingFragment = default;
+        var hasPendingFragment = false;
 
         for (var pktIdx = 0; pktIdx < rtpPayloads.Count; pktIdx++)
         {
@@ -47,23 +112,18 @@ public static class Av1RtpDepacketizer
             var w = (aggHeader >> 4) & 0x3;
 
             var pos = 1;
-            var elements = new List<byte[]>();
+            var packetElements = new List<ObuElement>(4);
 
             if (w == 0)
             {
-                // Single OBU element — the rest of the payload.
                 if (pos < payload.Length)
                 {
                     var len = payload.Length - pos;
-                    var elem = new byte[len];
-                    Buffer.BlockCopy(payload, pos, elem, 0, len);
-                    elements.Add(elem);
+                    packetElements.Add(RentElement(payload, pos, len));
                 }
             }
             else if (w <= 2)
             {
-                // W=1: 2 elements (1 length-prefixed + 1 trailing).
-                // W=2: 3 elements (2 length-prefixed + 1 trailing).
                 for (var i = 0; i < w; i++)
                 {
                     if (pos >= payload.Length)
@@ -79,49 +139,34 @@ public static class Av1RtpDepacketizer
                     }
                     if (elemLen > 0)
                     {
-                        var elem = new byte[elemLen];
-                        Buffer.BlockCopy(payload, pos, elem, 0, elemLen);
-                        elements.Add(elem);
+                        packetElements.Add(RentElement(payload, pos, elemLen));
                     }
                     pos += (int)len;
                 }
-                // Trailing element: rest of payload, no length prefix.
                 if (pos < payload.Length)
                 {
                     var remaining = payload.Length - pos;
-                    var elem = new byte[remaining];
-                    Buffer.BlockCopy(payload, pos, elem, 0, remaining);
-                    elements.Add(elem);
+                    packetElements.Add(RentElement(payload, pos, remaining));
                 }
             }
             else
             {
-                // W=3: walk LEB128-prefixed elements until the remainder
-                // can't fit one more (length+payload). The remainder is
-                // the trailing element with no prefix.
                 while (pos < payload.Length)
                 {
                     var (len, leb128Bytes) = Av1RtpPacketizer.ReadLeb128(payload, pos);
                     var elemLen = (int)len;
-
                     if (pos + leb128Bytes + elemLen > payload.Length)
                     {
                         var remaining = payload.Length - pos;
-                        var elem = new byte[remaining];
-                        Buffer.BlockCopy(payload, pos, elem, 0, remaining);
-                        elements.Add(elem);
+                        packetElements.Add(RentElement(payload, pos, remaining));
                         break;
                     }
-
                     pos += leb128Bytes;
                     if (elemLen > 0)
                     {
-                        var elem = new byte[elemLen];
-                        Buffer.BlockCopy(payload, pos, elem, 0, elemLen);
-                        elements.Add(elem);
+                        packetElements.Add(RentElement(payload, pos, elemLen));
                     }
                     pos += elemLen;
-
                     if (pos >= payload.Length)
                     {
                         break;
@@ -131,17 +176,30 @@ public static class Av1RtpDepacketizer
 
             // Apply Z/Y fragmentation: Z=1 first element continues a
             // fragment from the previous packet, Y=1 last element
-            // continues into the next packet.
-            for (var i = 0; i < elements.Count; i++)
+            // continues into the next packet. Combining two pooled
+            // buffers rents a third (whose size = sum), copies into it,
+            // and returns the two source buffers to the pool.
+            for (var i = 0; i < packetElements.Count; i++)
             {
+                var elem = packetElements[i];
                 var isFirst = (i == 0);
-                var isLast = (i == elements.Count - 1);
+                var isLast = (i == packetElements.Count - 1);
 
-                if (isFirst && z && pendingFragment is not null)
+                if (isFirst && z && hasPendingFragment)
                 {
-                    var combined = new byte[pendingFragment.Length + elements[i].Length];
-                    Buffer.BlockCopy(pendingFragment, 0, combined, 0, pendingFragment.Length);
-                    Buffer.BlockCopy(elements[i], 0, combined, pendingFragment.Length, elements[i].Length);
+                    var combinedLen = pendingFragment.Length + elem.Length;
+                    var combinedBuf = ArrayPool<byte>.Shared.Rent(combinedLen);
+                    if (pendingFragment.Length > 0)
+                    {
+                        Buffer.BlockCopy(pendingFragment.Buffer, 0, combinedBuf, 0, pendingFragment.Length);
+                    }
+                    if (elem.Length > 0)
+                    {
+                        Buffer.BlockCopy(elem.Buffer, 0, combinedBuf, pendingFragment.Length, elem.Length);
+                    }
+                    ArrayPool<byte>.Shared.Return(pendingFragment.Buffer);
+                    ArrayPool<byte>.Shared.Return(elem.Buffer);
+                    var combined = new ObuElement(combinedBuf, combinedLen);
 
                     if (isLast && y)
                     {
@@ -150,35 +208,75 @@ public static class Av1RtpDepacketizer
                     else
                     {
                         obuElements.Add(combined);
-                        pendingFragment = null;
+                        pendingFragment = default;
+                        hasPendingFragment = false;
                     }
                 }
                 else if (isLast && y)
                 {
-                    pendingFragment = elements[i];
+                    pendingFragment = elem;
+                    hasPendingFragment = true;
                 }
                 else
                 {
-                    obuElements.Add(elements[i]);
+                    obuElements.Add(elem);
                 }
             }
         }
 
         // Dangling fragment at the end means the marker-bit packet was
-        // lost. Best-effort include it; downstream decoder will reject if
-        // truly broken. Without this, transient marker-bit loss would
-        // discard all content silently.
-        if (pendingFragment is not null)
+        // lost. Best-effort include it; downstream decoder will reject
+        // if truly broken.
+        if (hasPendingFragment)
         {
             obuElements.Add(pendingFragment);
         }
 
-        if (obuElements.Count == 0)
-        {
-            return null;
-        }
+        return obuElements;
+    }
 
-        return ReconstructObuStream(obuElements);
+    /// <summary>
+    /// Pooled-buffer variant of <see cref="Depacketize"/>. Returns the
+    /// assembled OBU stream in a buffer rented from
+    /// <see cref="ArrayPool{T}.Shared"/>; the caller MUST return the
+    /// rented buffer to the pool when finished. Avoids the LOH
+    /// allocation that <see cref="Depacketize"/> incurs on every IDR
+    /// (assembled stream &gt;= 85 KB lands on LOH and gets promoted to
+    /// Gen2; at 1 IDR/sec on screen content this runs Gen2 collections
+    /// that pause the decoder thread for tens of ms each, false-
+    /// triggering the wedged-decoder watchdog).
+    /// </summary>
+    public static (byte[]? PooledBuffer, int Length) DepacketizePooled(IReadOnlyList<byte[]> rtpPayloads)
+    {
+        var obuElements = BuildObuElements(rtpPayloads);
+        if (obuElements is null || obuElements.Count == 0)
+        {
+            ReturnPooledElements(obuElements);
+            return (null, 0);
+        }
+        try
+        {
+            return ReconstructObuStreamPooled(obuElements);
+        }
+        finally
+        {
+            ReturnPooledElements(obuElements);
+        }
+    }
+
+    /// <summary>
+    /// Pooled variant of <see cref="ReconstructObuStream"/>. Computes
+    /// the exact output size, rents a buffer of at least that size from
+    /// <see cref="ArrayPool{T}.Shared"/>, and writes the reconstructed
+    /// stream into the rented buffer. Caller is responsible for
+    /// returning the buffer to the pool.
+    /// </summary>
+    private static (byte[] PooledBuffer, int Length) ReconstructObuStreamPooled(List<ObuElement> elements)
+    {
+        var totalSize = ComputeReconstructedSize(elements);
+        var pooled = ArrayPool<byte>.Shared.Rent(totalSize);
+        var written = WriteReconstructedObuStream(elements, pooled);
+        return (pooled, written);
     }
 
     /// <summary>
@@ -187,7 +285,21 @@ public static class Av1RtpDepacketizer
     /// LEB128 payload size, which both the Media Foundation AV1 decoder
     /// and libdav1d expect.
     /// </summary>
-    private static byte[] ReconstructObuStream(List<byte[]> elements)
+    private static byte[] ReconstructObuStream(List<ObuElement> elements)
+    {
+        var totalSize = ComputeReconstructedSize(elements);
+        var output = new byte[totalSize];
+        var written = WriteReconstructedObuStream(elements, output);
+        if (written < output.Length)
+        {
+            var trimmed = new byte[written];
+            Buffer.BlockCopy(output, 0, trimmed, 0, written);
+            return trimmed;
+        }
+        return output;
+    }
+
+    private static int ComputeReconstructedSize(List<ObuElement> elements)
     {
         var totalSize = 0;
         foreach (var elem in elements)
@@ -197,7 +309,7 @@ public static class Av1RtpDepacketizer
                 continue;
             }
             totalSize += 1; // OBU header
-            var hasExtension = (elem[0] & 0x04) != 0;
+            var hasExtension = (elem.Buffer[0] & 0x04) != 0;
             if (hasExtension)
             {
                 totalSize += 1;
@@ -210,18 +322,19 @@ public static class Av1RtpDepacketizer
             totalSize += Av1RtpPacketizer.Leb128Size(payloadLen);
             totalSize += payloadLen;
         }
+        return totalSize;
+    }
 
-        var output = new byte[totalSize];
+    private static int WriteReconstructedObuStream(List<ObuElement> elements, byte[] output)
+    {
         var pos = 0;
-
         foreach (var elem in elements)
         {
             if (elem.Length == 0)
             {
                 continue;
             }
-
-            var header = elem[0];
+            var header = elem.Buffer[0];
             var hasExtension = (header & 0x04) != 0;
             var headerLen = 1 + (hasExtension ? 1 : 0);
             var payloadLen = elem.Length - headerLen;
@@ -229,26 +342,18 @@ public static class Av1RtpDepacketizer
             {
                 payloadLen = 0;
             }
-
             output[pos++] = (byte)(header | 0x02); // set obu_has_size_field
             if (hasExtension && elem.Length >= 2)
             {
-                output[pos++] = elem[1];
+                output[pos++] = elem.Buffer[1];
             }
             pos += Av1RtpPacketizer.WriteLeb128(output, pos, (uint)payloadLen);
             if (payloadLen > 0)
             {
-                Buffer.BlockCopy(elem, headerLen, output, pos, payloadLen);
+                Buffer.BlockCopy(elem.Buffer, headerLen, output, pos, payloadLen);
                 pos += payloadLen;
             }
         }
-
-        if (pos < output.Length)
-        {
-            var trimmed = new byte[pos];
-            Buffer.BlockCopy(output, 0, trimmed, 0, pos);
-            return trimmed;
-        }
-        return output;
+        return pos;
     }
 }

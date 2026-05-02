@@ -94,7 +94,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         {
             BuildCodecOption(VideoCodec.Vp8, "VP8 (software, universal)", available),
             BuildCodecOption(VideoCodec.H264, "H.264 (hardware via Media Foundation)", available),
-            BuildCodecOption(VideoCodec.Av1, "AV1 (hardware, coming soon)", available),
+            BuildCodecOption(VideoCodec.Av1, "AV1 (NVIDIA RTX 40+, Intel Arc, AMD RDNA 3+)", available),
         };
 
         _selectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == _settings.Video.TargetHeight)
@@ -121,8 +121,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         // the corresponding toggle when the GPU lacks the feature.
         var nvencCaps = ResolveNvencCapabilities();
         IsNvencAvailable = nvencCaps.IsAvailable;
-        NvencSupportsLookahead = nvencCaps.IsAvailable && nvencCaps.SupportsLookahead;
-        NvencSupportsIntraRefresh = nvencCaps.IsAvailable && nvencCaps.SupportsIntraRefresh;
+        _nvencCaps = nvencCaps;
         NvencUnavailableReason = nvencCaps.IsAvailable ? null : nvencCaps.UnavailableReason;
 
         // H.264 backend dropdown. NVENC option is only present when the GPU
@@ -142,6 +141,27 @@ public sealed partial class SettingsViewModel : ViewModelBase
         H264BackendOptions = backendOptions;
         _selectedH264Backend = H264BackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.H264Backend)
             ?? H264BackendOptions[0];
+
+        // AV1 decoder backend dropdown. NVDEC option appears only when
+        // the viewer's GPU has NVDEC AV1 silicon (RTX 30 / Volta+); on
+        // hosts without it the user sees Auto + MFT (Auto resolves to
+        // MFT in that case).
+        var nvdecCaps = VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecCapabilities.Probe();
+        IsNvdecAv1Available = nvdecCaps.IsAv1Available;
+        var av1DecoderOptions = new List<Av1DecoderBackendOption>
+        {
+            new(Av1DecoderBackend.Auto, IsNvdecAv1Available
+                ? "Auto — NVDEC (recommended)"
+                : "Auto — Media Foundation"),
+            new(Av1DecoderBackend.Mft, "Media Foundation (universal, slower)"),
+        };
+        if (IsNvdecAv1Available)
+        {
+            av1DecoderOptions.Insert(2, new Av1DecoderBackendOption(Av1DecoderBackend.Nvdec, "NVDEC (direct cuvid)"));
+        }
+        Av1DecoderBackendOptions = av1DecoderOptions;
+        _selectedAv1DecoderBackend = Av1DecoderBackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.Av1DecoderBackend)
+            ?? Av1DecoderBackendOptions[0];
 
         // Audio settings. Bitrate combo is fixed-set so the UI stays
         // simple; people who want to experiment with 160 kbps Opus can
@@ -262,26 +282,71 @@ public sealed partial class SettingsViewModel : ViewModelBase
     /// when the GPU supports it; on other hosts the user sees Auto + MFT.</summary>
     public IReadOnlyList<H264BackendOption> H264BackendOptions { get; }
 
+    [ObservableProperty]
+    private Av1DecoderBackendOption _selectedAv1DecoderBackend = null!;
+
+    /// <summary>The AV1 decoder backend choices we offer. NVDEC appears
+    /// only on RTX 30 / Volta+ NVIDIA GPUs; on other hosts the user
+    /// sees Auto + MFT (Auto resolves to MFT in that case).</summary>
+    public IReadOnlyList<Av1DecoderBackendOption> Av1DecoderBackendOptions { get; }
+
+    /// <summary>True when this machine has NVDEC AV1 silicon. Settings UI
+    /// can use this to grey out the dropdown's NVDEC option (it's
+    /// hidden entirely today, but exposing the bool keeps the UI
+    /// flexible for future tooltip or warning use).</summary>
+    public bool IsNvdecAv1Available { get; }
+
     /// <summary>True when the NVENC SDK encoder backend is available
     /// on this machine. Settings UI greys NVENC-only toggles otherwise.</summary>
     public bool IsNvencAvailable { get; }
 
-    public bool NvencSupportsLookahead { get; }
+    private readonly NvencCapabilities _nvencCaps;
 
-    public bool NvencSupportsIntraRefresh { get; }
+    /// <summary>
+    /// Lookahead capability for the currently selected codec — H.264 caps
+    /// for H.264, AV1 caps for AV1. Greys the toggle when the GPU lacks
+    /// the feature on the picked codec.
+    /// </summary>
+    public bool NvencSupportsLookahead => IsNvencAvailable && (
+        SelectedCodec?.Codec == VideoCodec.Av1
+            ? _nvencCaps.Av1SupportsLookahead
+            : _nvencCaps.SupportsLookahead);
+
+    /// <summary>Same idea for intra-refresh — AV1 caps when AV1 is picked.</summary>
+    public bool NvencSupportsIntraRefresh => IsNvencAvailable && (
+        SelectedCodec?.Codec == VideoCodec.Av1
+            ? _nvencCaps.Av1SupportsIntraRefresh
+            : _nvencCaps.SupportsIntraRefresh);
 
     /// <summary>Tooltip text for greyed-out NVENC controls.</summary>
     public string? NvencUnavailableReason { get; }
 
     /// <summary>
-    /// True when the currently-selected codec + backend resolves to NVENC
-    /// SDK on this machine. Drives the visibility of the "NVENC quality"
-    /// card so MFT-only sessions don't show it.
+    /// True when the currently-selected codec resolves to a NVENC SDK
+    /// path on this machine. Drives the visibility of the "NVENC quality"
+    /// card so MFT-only sessions don't show it. AV1 is always NVENC SDK
+    /// (no MFT AV1 encoder backend) — only H.264 has the MFT-or-NVENC
+    /// fork via the H264Backend dropdown.
     /// </summary>
-    public bool IsNvencActiveForQualityCard =>
-        SelectedCodec?.Codec == VideoCodec.H264
-        && IsNvencAvailable
-        && (SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto) != H264EncoderBackend.Mft;
+    public bool IsNvencActiveForQualityCard
+    {
+        get
+        {
+            if (!IsNvencAvailable)
+            {
+                return false;
+            }
+            if (SelectedCodec?.Codec == VideoCodec.Av1)
+            {
+                return true;
+            }
+            if (SelectedCodec?.Codec == VideoCodec.H264)
+            {
+                return (SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto) != H264EncoderBackend.Mft;
+            }
+            return false;
+        }
+    }
 
     partial void OnSelectedH264BackendChanged(H264BackendOption value)
     {
@@ -292,11 +357,18 @@ public sealed partial class SettingsViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(IsNvencActiveForQualityCard));
         OnPropertyChanged(nameof(IsH264Selected));
+        OnPropertyChanged(nameof(IsAv1Selected));
+        OnPropertyChanged(nameof(NvencSupportsLookahead));
+        OnPropertyChanged(nameof(NvencSupportsIntraRefresh));
     }
 
     /// <summary>True when the codec dropdown is on H.264. Drives the
     /// visibility of the H.264 backend dropdown.</summary>
     public bool IsH264Selected => SelectedCodec?.Codec == VideoCodec.H264;
+
+    /// <summary>True when the codec dropdown is on AV1. Drives the
+    /// visibility of the AV1 decoder backend dropdown.</summary>
+    public bool IsAv1Selected => SelectedCodec?.Codec == VideoCodec.Av1;
 
     public IReadOnlyList<AudioBitrateOption> AudioBitrateOptions { get; }
 
@@ -367,6 +439,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableEncoderLookahead = EnableEncoderLookahead;
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
         _settings.Video.H264Backend = SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto;
+        _settings.Video.Av1DecoderBackend = SelectedAv1DecoderBackend?.Backend ?? Av1DecoderBackend.Auto;
         _settings.Video.NvencPreset = SelectedNvencPreset?.Level ?? 4;
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
@@ -457,5 +530,7 @@ public sealed record QualityPreset(
     ScalerMode Scaler);
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);
 public sealed record H264BackendOption(H264EncoderBackend Backend, string DisplayName);
+
+public sealed record Av1DecoderBackendOption(Av1DecoderBackend Backend, string DisplayName);
 public sealed record NvencPresetOption(int Level, string DisplayName);
 public sealed record AudioBitrateOption(string DisplayName, int Bitrate);

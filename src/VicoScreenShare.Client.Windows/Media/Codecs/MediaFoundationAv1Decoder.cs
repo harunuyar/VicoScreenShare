@@ -120,6 +120,93 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
     private long _loggedDecodedFrames;
     private bool _disposed;
 
+    // ProcessOutput failure-cascade tracking. The MFT enters a stuck
+    // state after rejecting one bad sample; every subsequent call
+    // returns the same failure code. After this many consecutive
+    // failures, flush the MFT and restart streaming. Sized to be
+    // larger than typical transient negotiation hiccups (~5 frames)
+    // but small enough to recover within a few hundred ms at 144 fps.
+    private int _consecutiveProcessOutputFailures;
+    private const int ConsecutiveFailureFlushThreshold = 30;
+
+    // Some failure HRESULTs are unrecoverable without a flush — there
+    // is no benefit to waiting for the cascade threshold because the
+    // MFT will never produce output for the next-N samples regardless.
+    // We force-flush on first occurrence for these:
+    //   - E_OUTOFMEMORY (0x8007000E): MS AV1 MFT internal pool ran out;
+    //     observed mid-stream after ~30 s of healthy decoding. Without
+    //     immediate flush the decoder enters a NEED_MORE_INPUT loop
+    //     and the 75-empty watchdog only catches it ~520 ms later.
+    //   - MF_E_INVALID_STREAM_DATA (0xC00D36CB): bitstream rejected;
+    //     subsequent samples are useless until the next IDR arrives.
+    private const uint HrOutOfMemory = 0x8007000E;
+    private const uint HrInvalidStreamData = 0xC00D36CB;
+
+    // Wedged-decoder watchdog. After the MFT rejects a sample with
+    // 0xC00D36CB (MF_E_INVALID_STREAM_DATA) it can enter a "starve"
+    // state where ProcessOutput stops returning failure and instead
+    // returns MF_E_TRANSFORM_NEED_MORE_INPUT for every subsequent
+    // call — Decode() returns an empty list, but our cascade counter
+    // never increments. Without this watchdog the decoder stays
+    // wedged for the rest of the stream. Threshold is set to ~0.5 s
+    // worth of frames at 144 fps so legitimate B-frame reorder
+    // buffering doesn't trigger it (real reorder depth is 0-3 here).
+    private int _consecutiveEmptyOutputs;
+    // 30 ≈ 210 ms at 144 fps. Tried 10 — too aggressive: after each
+    // flush the decoder needs ~50-100 ms to ingest the next IDR and
+    // start producing output, but a 70 ms threshold re-fires the
+    // watchdog before the IDR is even received, dropping it during
+    // the next flush and starting the cycle over (see commit log
+    // 22:38:21-22:38:22 — 14 flushes in 800 ms, ~1 s user freeze).
+    // 30 + the cooldown below gives the decoder enough headroom to
+    // recover after a single flush.
+    private const int ConsecutiveEmptyOutputsFlushThreshold = 30;
+
+    // Threshold for raising KeyframeNeeded (NOT for local flush — that's
+    // the Flush threshold above). Lower because PLI is cheap (debounced
+    // at 500 ms upstream) and asking earlier shortens recovery time.
+    // 6 calls at 60 fps ≈ 100 ms; at lower frame rates the watchdog at
+    // the receiver level catches the same condition with a larger window.
+    private const int KeyframeRequestZeroOutputThreshold = 6;
+
+    // Cooldown after any flush: suppress the empty-streak watchdog
+    // for this many ticks so the decoder has time to ingest the next
+    // IDR and bootstrap a fresh DPB without us stripping it out from
+    // under the MFT. 300 ms covers the typical IDR transit (~50 ms)
+    // plus bootstrap (~100-200 ms) at the publisher's 1 s GOP.
+    private long _flushCooldownUntilTicks;
+    private static readonly long FlushCooldownTicks =
+        (long)(System.Diagnostics.Stopwatch.Frequency * 0.300);
+
+    // Set inside DrainOutput when a frame is produced (CPU return
+    // value or GPU sink callback). Decode() reads this to drive the
+    // wedged-decoder watchdog without false-positives in GPU mode.
+    private bool _drainProducedAFrame;
+
+    // Tracks whether we have fed the decoder an IDR/keyframe since
+    // the last successful output. The empty-streak watchdog used to
+    // fire purely on count; that produced false positives every time
+    // a Gen2 GC pause stalled the decoder thread (decoder was just
+    // slow, not wedged). Now we ONLY flush when (a) the watchdog
+    // threshold is hit AND (b) we've already given the decoder an
+    // IDR and even that produced no output — the only state from
+    // which the decoder cannot recover by itself. Cleared on every
+    // successful output. Set on Decode() when the input sample
+    // carries a Sequence Header OBU (AV1 keyframe marker).
+    private bool _idrFedSinceLastOutput;
+
+    // Counts produced frames for the refcount drift probe. Sampled
+    // every 240th frame (~1.7 s at 144 fps) so we get a multi-minute
+    // trend without flooding the log.
+    private long _bgraRefcountSampleCount;
+
+    // Initial resolution hint passed in via the dimensioned ctor; 0
+    // falls back to the historical 1920×1088 default. Used in the
+    // initial NegotiateOutputType call to skip the STREAM_CHANGE
+    // round-trip on the first IDR.
+    private readonly int _initHintWidth;
+    private readonly int _initHintHeight;
+
     /// <summary>
     /// When non-null, the decoder invokes this delegate synchronously inside
     /// <see cref="Decode"/> for each produced frame, handing over the
@@ -132,12 +219,43 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
     /// </summary>
     public Action<IntPtr, int, int, TimeSpan>? GpuOutputHandler { get; set; }
 
-    public MediaFoundationAv1Decoder() : this(externalDevice: null)
+    /// <summary>
+    /// Raised when the MFT enters a state we can't recover from in-place.
+    /// See <see cref="MediaFoundationH264Decoder.KeyframeNeeded"/> for the
+    /// full contract — this AV1 implementation follows the same pattern.
+    /// </summary>
+    public event Action? KeyframeNeeded;
+
+    private void RaiseKeyframeNeeded(string reason)
+    {
+        DebugLog.Write($"[mf-av1] keyframe-needed: {reason}");
+        try { KeyframeNeeded?.Invoke(); } catch { /* listener exceptions must not crash decoder */ }
+    }
+
+    public MediaFoundationAv1Decoder() : this(externalDevice: null, hintWidth: 0, hintHeight: 0)
     {
     }
 
     public MediaFoundationAv1Decoder(ID3D11Device? externalDevice)
+        : this(externalDevice, hintWidth: 0, hintHeight: 0)
     {
+    }
+
+    /// <summary>
+    /// Construct with a known input resolution hint. The MS AV1 MFT
+    /// otherwise initializes to a default (1920×1088) and raises
+    /// MF_E_TRANSFORM_STREAM_CHANGE on the first sample whose Sequence
+    /// Header dimensions differ — that round-trip drops the IDR and
+    /// costs ~1 s waiting for the next one. Passing the publisher's
+    /// real resolution (sourced from the StreamStarted protocol message)
+    /// lets us pre-negotiate at the correct size so STREAM_CHANGE never
+    /// fires at session start. Hints of 0 fall back to the legacy
+    /// 1920×1088 default for backwards compatibility.
+    /// </summary>
+    public MediaFoundationAv1Decoder(ID3D11Device? externalDevice, int hintWidth, int hintHeight)
+    {
+        _initHintWidth = hintWidth;
+        _initHintHeight = hintHeight;
         // Device binding strategy:
         //
         //   externalDevice != null
@@ -219,19 +337,26 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
         // the type-set with MF_E_INVALIDMEDIATYPE — the H.264 trick of
         // letting the MFT derive the output type from a placeholder input
         // doesn't carry over.
-        const ulong defaultFrameSize = (1920UL << 32) | 1080UL;
+        // Use caller-provided dimensions when available so the MFT
+        // pre-negotiates at the publisher's actual resolution; otherwise
+        // fall back to a generic 1920×1088 placeholder and accept the
+        // STREAM_CHANGE round-trip on the first keyframe.
+        var initWidth = _initHintWidth > 0 ? _initHintWidth : 1920;
+        var initHeight = _initHintHeight > 0 ? _initHintHeight : 1088;
+        var initFrameSize = ((ulong)(uint)initWidth << 32) | (uint)initHeight;
         const ulong defaultFrameRate = (60UL << 32) | 1UL;
+        DebugLog.Write($"[mf] AV1 decoder init dimensions {initWidth}x{initHeight} (hinted={_initHintWidth > 0})");
 
         var inputType = MediaFactory.MFCreateMediaType();
         inputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
         inputType.Set(MediaTypeAttributeKeys.Subtype, MFVideoFormatAv1);
         inputType.SetEnumValue(MediaTypeAttributeKeys.InterlaceMode, VideoInterlaceMode.Progressive);
-        inputType.Set(MediaTypeAttributeKeys.FrameSize, defaultFrameSize);
+        inputType.Set(MediaTypeAttributeKeys.FrameSize, initFrameSize);
         inputType.Set(MediaTypeAttributeKeys.FrameRate, defaultFrameRate);
         _transform.SetInputType(0, inputType, 0);
         inputType.Dispose();
 
-        NegotiateOutputType(defaultFrameSize, defaultFrameRate);
+        NegotiateOutputType(initFrameSize, defaultFrameRate);
         if (!_outputTypeNegotiated)
         {
             DebugLog.Write("[mf] AV1 decoder could not pick an NV12 output type at init");
@@ -324,6 +449,7 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
         try
         {
             _transform.ProcessMessage(TMessageType.MessageCommandFlush, 0);
+            _consecutiveProcessOutputFailures = 0;
             DebugLog.Write("[mf] AV1 decoder flushed");
         }
         catch (Exception ex)
@@ -332,18 +458,121 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
         }
     }
 
-    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp)
+    /// <summary>
+    /// Self-heal after a ProcessOutput failure cascade. Flush + restart
+    /// streaming returns the MFT to a state equivalent to "just constructed
+    /// and accepting input"; the next IDR (or sequence-header OBU emitted
+    /// during NVENC's intra-refresh wave) bootstraps decode again. Errors
+    /// are caught and logged — the decoder may stay wedged if the flush
+    /// itself fails, but at this point we're already broken so a worst
+    /// case of "still broken" is the same as before.
+    /// </summary>
+    private void TryFlushAndRestart()
     {
-        if (_disposed || encodedSample is null || encodedSample.Length == 0)
+        if (_disposed)
+        {
+            return;
+        }
+        DebugLog.Write($"[mf] AV1 decoder failure cascade ({_consecutiveProcessOutputFailures} consecutive failures); flushing + restarting MFT");
+        try { _transform.ProcessMessage(TMessageType.MessageCommandFlush, 0); } catch (Exception ex) { DebugLog.Write($"[mf] AV1 flush threw: {ex.Message}"); }
+        try { _transform.ProcessMessage(TMessageType.MessageNotifyEndStreaming, 0); } catch (Exception ex) { DebugLog.Write($"[mf] AV1 EndStreaming threw: {ex.Message}"); }
+        try { _transform.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, 0); } catch (Exception ex) { DebugLog.Write($"[mf] AV1 BeginStreaming threw: {ex.Message}"); }
+        _consecutiveProcessOutputFailures = 0;
+        _consecutiveEmptyOutputs = 0;
+        _flushCooldownUntilTicks =
+            System.Diagnostics.Stopwatch.GetTimestamp() + FlushCooldownTicks;
+    }
+
+    private long _decodeCallCount;
+    private long _decodeSpikeLogCount;
+
+    /// <summary>
+    /// Walks the assembled AV1 OBU stream and returns true if any
+    /// OBU has obu_type=1 (OBU_SEQUENCE_HEADER). Used by Decode() to
+    /// mark that an IDR has been fed to the decoder. Each OBU has
+    /// obu_has_size_field=1 + LEB128 size (the depacketizer rebuilt
+    /// the stream that way), so we can walk header→ext→leb128→payload
+    /// without a full parse. Bails out at the first SeqHdr found.
+    /// </summary>
+    private static bool ContainsSequenceHeaderObu(byte[] obuStream, int validLength)
+    {
+        var pos = 0;
+        var safetyHops = 0;
+        while (pos < validLength && safetyHops < 64)
+        {
+            safetyHops++;
+            var header = obuStream[pos];
+            var obuType = (header >> 3) & 0xF;
+            if (obuType == 1)
+            {
+                return true;
+            }
+            var hasExtension = (header & 0x04) != 0;
+            var hasSize = (header & 0x02) != 0;
+            var headerLen = 1 + (hasExtension ? 1 : 0);
+            if (pos + headerLen > validLength)
+            {
+                return false;
+            }
+            int payloadSize;
+            if (hasSize)
+            {
+                // Inline LEB128 read so we don't depend on the
+                // packetizer's helper from a sibling assembly.
+                uint val = 0;
+                var i = 0;
+                while (i < 8 && pos + headerLen + i < validLength)
+                {
+                    var b = obuStream[pos + headerLen + i];
+                    val |= (uint)(b & 0x7F) << (i * 7);
+                    i++;
+                    if ((b & 0x80) == 0)
+                    {
+                        break;
+                    }
+                }
+                payloadSize = (int)val;
+                pos += headerLen + i + payloadSize;
+            }
+            else
+            {
+                // No size field = OBU runs to end of stream. If this
+                // isn't a SeqHdr, no SeqHdr exists in this stream.
+                return false;
+            }
+        }
+        return false;
+    }
+
+    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp)
+        => Decode(encodedSample, encodedSample?.Length ?? 0, inputTimestamp);
+
+    public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, int length, TimeSpan inputTimestamp)
+    {
+        if (_disposed || encodedSample is null || length <= 0)
         {
             return Array.Empty<DecodedVideoFrame>();
         }
+        var decodeT0 = System.Diagnostics.Stopwatch.GetTimestamp();
 
-        var inputBuffer = MediaFactory.MFCreateMemoryBuffer(encodedSample.Length);
+        // Detect IDR by scanning OBU headers for an OBU_SEQUENCE_HEADER
+        // (obu_type=1). NVENC AV1 emits a SeqHdr OBU only at keyframes
+        // when RepeatSeqHdr is on (and RepeatSeqHdr IS on — see
+        // NvencAv1Encoder.cs). The depacketizer reconstructs the OBU
+        // stream with obu_has_size_field=1 + LEB128 size, so each OBU
+        // is walkable by header byte + size field. If we find a SeqHdr,
+        // mark that we've fed an IDR — the watchdog uses this to avoid
+        // false-positive flushes during transient decoder slowness.
+        if (ContainsSequenceHeaderObu(encodedSample, length))
+        {
+            _idrFedSinceLastOutput = true;
+        }
+
+        var inputBuffer = MediaFactory.MFCreateMemoryBuffer(length);
         inputBuffer.Lock(out nint ptr, out _, out _);
-        Marshal.Copy(encodedSample, 0, ptr, encodedSample.Length);
+        Marshal.Copy(encodedSample, 0, ptr, length);
         inputBuffer.Unlock();
-        inputBuffer.CurrentLength = encodedSample.Length;
+        inputBuffer.CurrentLength = length;
 
         var inputSample = MediaFactory.MFCreateSample();
         inputSample.AddBuffer(inputBuffer);
@@ -356,6 +585,7 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
         // the current call's value.
         inputSample.SampleTime = inputTimestamp.Ticks;
 
+        var processInT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             _transform.ProcessInput(0, inputSample, 0);
@@ -370,8 +600,95 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
             inputSample.Dispose();
             inputBuffer.Dispose();
         }
+        var processInMs = (System.Diagnostics.Stopwatch.GetTimestamp() - processInT0) * 1000.0
+            / System.Diagnostics.Stopwatch.Frequency;
+        if (processInMs > 4.0)
+        {
+            DebugLog.Write($"[recv-l4-procIn] ProcessInput={processInMs:F1}ms inputBytes={length} pts={inputTimestamp.TotalMilliseconds:F0}ms");
+        }
 
-        return DrainOutput();
+        var drainT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var output = DrainOutput();
+        var drainMs = (System.Diagnostics.Stopwatch.GetTimestamp() - drainT0) * 1000.0
+            / System.Diagnostics.Stopwatch.Frequency;
+        if (drainMs > 6.0)
+        {
+            DebugLog.Write($"[recv-l4-drain] DrainOutput={drainMs:F1}ms outputs={output.Count} pts={inputTimestamp.TotalMilliseconds:F0}ms");
+        }
+        var decodeMs = (System.Diagnostics.Stopwatch.GetTimestamp() - decodeT0) * 1000.0
+            / System.Diagnostics.Stopwatch.Frequency;
+        var nDecode = ++_decodeCallCount;
+        if (decodeMs > 8.0)
+        {
+            var spikes = ++_decodeSpikeLogCount;
+            if (spikes <= 200 || spikes % 50 == 0)
+            {
+                DebugLog.Write($"[av1-decode-spike] frame#{nDecode} decode={decodeMs:F1}ms inputBytes={length} outputs={output.Count} pts={inputTimestamp.TotalMilliseconds:F0}ms");
+            }
+        }
+
+        // Wedged-decoder watchdog. ProcessInput always succeeds, and
+        // after a rejected sample DrainOutput keeps returning empty
+        // because ProcessOutput says NEED_MORE_INPUT every time —
+        // never trips the failure-cascade flush. If many Decode
+        // calls in a row produce zero frames despite us feeding real
+        // bitstream, the MFT is stuck. Force the same flush path the
+        // failure cascade uses so the next IDR can bootstrap fresh.
+        // _drainProducedAFrame is set inside DrainOutput on either
+        // path (CPU result append OR GPU sink blit), so it works in
+        // both GPU-handoff mode and the legacy readback mode.
+        if (!_drainProducedAFrame)
+        {
+            // Suppress the watchdog inside the post-flush cooldown
+            // window. Without this, the decoder gets ~210 ms to ingest
+            // the next IDR; the next IDR's transit + bootstrap is
+            // typically 50-200 ms, which is enough headroom most of
+            // the time but can dip into the threshold and trigger a
+            // re-flush that drops the IDR. Cooldown gives a hard
+            // bottom of 300 ms before the watchdog can re-fire.
+            var nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (nowTicks < _flushCooldownUntilTicks)
+            {
+                _consecutiveEmptyOutputs = 0;
+            }
+            else
+            {
+                var emptyStreak = ++_consecutiveEmptyOutputs;
+                // Only flush when the threshold is hit AND we've
+                // already given the decoder an IDR after the last
+                // successful output. If no IDR has been fed yet, the
+                // decoder is correctly waiting for one — flushing
+                // would just discard the IDR we're about to feed.
+                // Most observed false-positive flushes happened when
+                // the decoder thread got stalled by a Gen2 GC pause
+                // and recovered fine on its own once GC released it.
+                if (emptyStreak == ConsecutiveEmptyOutputsFlushThreshold && _idrFedSinceLastOutput)
+                {
+                    DebugLog.Write($"[mf] AV1 decoder wedged ({emptyStreak} empty calls including post-IDR); flushing + restarting MFT");
+                    TryFlushAndRestart();
+                    _idrFedSinceLastOutput = false;
+                }
+                // Codec-agnostic recovery signal: ask upstream for an IDR
+                // when the decoder is silently consuming bitstream
+                // without producing output. Independent of the
+                // _idrFedSinceLastOutput gate above (that controls
+                // local flush; this controls upstream PLI). Receiver
+                // debounces, so consecutive raises within the 500 ms
+                // window collapse to one PLI.
+                if (emptyStreak == KeyframeRequestZeroOutputThreshold)
+                {
+                    RaiseKeyframeNeeded($"{emptyStreak} consecutive Decode() calls produced no output");
+                }
+            }
+        }
+        else
+        {
+            _consecutiveEmptyOutputs = 0;
+            _idrFedSinceLastOutput = false;
+        }
+        _drainProducedAFrame = false;
+
+        return output;
     }
 
     private IReadOnlyList<DecodedVideoFrame> DrainOutput()
@@ -427,6 +744,19 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
 
                 if ((uint)result.Code == MF_E_TRANSFORM_STREAM_CHANGE)
                 {
+                    // STREAM_CHANGE protocol: re-negotiate the output
+                    // type, then attempt ProcessOutput AGAIN with the
+                    // SAME buffered sample. MS docs say the MFT keeps
+                    // the input across SetOutputType so we can recover
+                    // it without losing the IDR — IF that works we
+                    // skip the ~1.4 s freeze the flush path costs.
+                    // Earlier we observed it not working; trying once
+                    // more with `continue` so the outer loop reissues
+                    // ProcessOutput. If that returns NEED_MORE_INPUT
+                    // the IDR genuinely is gone and we'll fall through
+                    // to the watchdog/flush path, but cost is the same
+                    // as today rather than worse.
+                    DebugLog.Write($"[mf] AV1 decoder STREAM_CHANGE; renegotiating, retrying ProcessOutput");
                     NegotiateOutputType();
                     continue;
                 }
@@ -446,14 +776,46 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
                         _warnedTypeNotSet = true;
                         DebugLog.Write("[mf] AV1 decoder ProcessOutput stuck with TYPE_NOT_SET; decoder output format could not be negotiated");
                     }
+                    RaiseKeyframeNeeded("ProcessOutput TYPE_NOT_SET");
                     return (IReadOnlyList<DecodedVideoFrame>?)results ?? Array.Empty<DecodedVideoFrame>();
                 }
 
                 if (result.Failure)
                 {
-                    DebugLog.Write($"[mf] AV1 decoder ProcessOutput failed HRESULT 0x{(uint)result.Code:X8}");
+                    var hr = (uint)result.Code;
+                    var consecutive = ++_consecutiveProcessOutputFailures;
+                    if (consecutive == 1 || consecutive % 30 == 0)
+                    {
+                        DebugLog.Write($"[mf] AV1 decoder ProcessOutput failed HRESULT 0x{hr:X8} consecutive={consecutive}");
+                    }
+                    if (consecutive == 1)
+                    {
+                        // First failure surfaces upstream immediately.
+                        // Subsequent ones rely on receiver-side debounce
+                        // to avoid PLI spam.
+                        RaiseKeyframeNeeded($"ProcessOutput HRESULT 0x{hr:X8}");
+                    }
+                    // Two paths to flush:
+                    // 1. Known-unrecoverable HRESULTs (OOM, invalid stream
+                    //    data) — flush on first occurrence. The MFT is wedged
+                    //    until flush regardless of how many more samples we
+                    //    feed; waiting saves nothing and costs the user a
+                    //    visible stutter window.
+                    // 2. Generic cascade — 30 consecutive failures of any
+                    //    other code. Belt-and-suspenders for HRESULTs we
+                    //    haven't classified.
+                    if (hr == HrOutOfMemory || hr == HrInvalidStreamData)
+                    {
+                        DebugLog.Write($"[mf] AV1 decoder hard-fail HRESULT 0x{hr:X8}; immediate flush");
+                        TryFlushAndRestart();
+                    }
+                    else if (consecutive == ConsecutiveFailureFlushThreshold)
+                    {
+                        TryFlushAndRestart();
+                    }
                     return (IReadOnlyList<DecodedVideoFrame>?)results ?? Array.Empty<DecodedVideoFrame>();
                 }
+                _consecutiveProcessOutputFailures = 0;
 
                 if (!_outputTypeNegotiated || _width <= 0 || _height <= 0 || outSample is null)
                 {
@@ -488,27 +850,61 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
                 {
                     if (BlitSampleToBgraGpu(outSample))
                     {
-                        // Per-subscriber AddRef: the sink's
-                        // `using var _ = new ID3D11Texture2D(ptr)` pattern
-                        // doesn't AddRef on construction (probed directly)
-                        // but does Release on dispose, so without an AddRef
-                        // per subscriber we'd drain refs off _bgraDest.
-                        // D3D11's deferred destruction hides the damage in
-                        // simple runs, but under real load the underlying
-                        // resource can be reclaimed between frames.
+                        // Successful GPU blit = decoder produced a
+                        // frame. Mark progress for the wedged-decoder
+                        // watchdog (Decode() returns empty in this
+                        // mode, so the watchdog can't tell otherwise).
+                        _drainProducedAFrame = true;
+                        // Self-balanced per-subscriber refcount contract:
+                        // we DO NOT AddRef here. Each subscriber that needs
+                        // the texture must AddRef itself before wrapping,
+                        // and Release on dispose (or simply not touch
+                        // refcount if observing only). The previous design
+                        // AddRef'd once per gpuSink target then fanned out
+                        // to N subscribers via TextureArrived; when N
+                        // renderers each Released the count underflowed
+                        // (1 - N per frame), the GPU driver could free
+                        // the texture mid-frame, and downstream renderers
+                        // got undefined contents.
                         var targets = gpuSink.GetInvocationList();
                         foreach (var target in targets)
                         {
-                            _bgraDest!.AddRef();
                             try
                             {
                                 ((Action<IntPtr, int, int, TimeSpan>)target).Invoke(
-                                    _bgraDest.NativePointer, _width, _height, outTs);
+                                    _bgraDest!.NativePointer, _width, _height, outTs);
                             }
                             catch (Exception ex)
                             {
                                 DebugLog.Write($"[mf] AV1 GpuOutputHandler threw: {ex.Message}");
-                                try { _bgraDest.Release(); } catch { }
+                            }
+                        }
+                        // Refcount drift probe. After every subscriber
+                        // has had its turn (added a ref on entry, released
+                        // it when their copy finished), the underlying
+                        // texture's refcount should return to whatever
+                        // baseline it held when we created it. If the
+                        // value climbs over time, somebody isn't releasing
+                        // — that's the candidate cause for MFT internal
+                        // pool starvation → 0x8007000E. We sample
+                        // every Nth produced frame so we don't drown the
+                        // log; the trend over minutes is what matters.
+                        var n = ++_bgraRefcountSampleCount;
+                        if (n <= 5 || n % 240 == 0)
+                        {
+                            // AddRef then Release returns the post-Release
+                            // count, which equals the current count
+                            // (because AddRef brings it +1 then Release
+                            // brings it back). Cheap and side-effect-free.
+                            try
+                            {
+                                var afterAdd = _bgraDest!.AddRef();
+                                var afterRelease = _bgraDest.Release();
+                                DebugLog.Write($"[mf-refcount] frame#{n} bgraDest refcount={afterRelease} (peak observed during AddRef={afterAdd}) subscribers={targets.Length}");
+                            }
+                            catch (Exception ex)
+                            {
+                                DebugLog.Write($"[mf-refcount] probe threw: {ex.Message}");
                             }
                         }
                         if (_loggedDecodedFrames < 3)
@@ -547,6 +943,7 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
                 }
 
                 (results ??= new List<DecodedVideoFrame>()).Add(new DecodedVideoFrame(bgra, _width, _height, outTs));
+                _drainProducedAFrame = true;
 
                 if (_loggedDecodedFrames < 3)
                 {
@@ -592,7 +989,21 @@ public sealed unsafe class MediaFoundationAv1Decoder : IVideoDecoder
             catch { }
 
             EnsureScalerAndStaging(_width, _height);
+            // Time the NV12 → BGRA blit. The decoder-side scaler runs
+            // VideoProcessorBlt on the SAME D3D11 immediate context the
+            // renderer's PaintFromQueue uses for its CopyResource. If
+            // the painter's [gpu-copy-spike] coincides with a slow
+            // [av1-blit-spike] the cause is shared-context contention
+            // (D3D11 immediate context is not free-threaded — calls
+            // serialize). Threshold matches the renderer side.
+            var blitT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             _scaler!.Process(sourceTexture, _bgraDest!, arraySlice);
+            var blitMs = (System.Diagnostics.Stopwatch.GetTimestamp() - blitT0) * 1000.0
+                / System.Diagnostics.Stopwatch.Frequency;
+            if (blitMs > 5.0)
+            {
+                DebugLog.Write($"[av1-blit-spike] VideoProcessorBlt took {blitMs:F1}ms size={_width}x{_height}");
+            }
             return true;
         }
         finally

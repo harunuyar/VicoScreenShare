@@ -104,8 +104,32 @@ public sealed class SfuPeer : IAsyncDisposable
     /// </summary>
     public event Action<SDPMediaTypesEnum, RTPPacket>? RtpPacketReceived;
 
+    private long _packetsReceived;
+    private long _prevLoggedRecvPackets;
+    private System.Threading.Timer? _recvRateLogTimer;
+
+    // PLI coalescing. Each subscriber that's seeing decode trouble fires
+    // its own RTCP PLI to the SFU; the server forwards those to the
+    // publisher (this peer) via TryForwardPli. With many viewers a burst
+    // of correlated losses (Wi-Fi blip on one shared uplink, etc) would
+    // produce N near-simultaneous PLIs, all asking for the same single
+    // IDR. We rate-limit forward attempts to one per PliCoalesceWindowMs
+    // per publisher — the resulting IDR is broadcast to every subscriber
+    // anyway, so only one needs to ask.
+    private readonly System.Diagnostics.Stopwatch _lastPliForwardedAt = new();
+    private const int PliCoalesceWindowMs = 500;
+    private long _pliForwardedTotal;
+    private long _pliCoalescedTotal;
+
     private void OnRtpPacketReceived(IPEndPoint remote, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
+        System.Threading.Interlocked.Increment(ref _packetsReceived);
+        if (_recvRateLogTimer is null)
+        {
+            _recvRateLogTimer = new System.Threading.Timer(
+                _ => LogRecvRate(), null,
+                TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+        }
         try
         {
             RtpPacketReceived?.Invoke(mediaType, rtpPacket);
@@ -113,6 +137,84 @@ public sealed class SfuPeer : IAsyncDisposable
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "SfuPeer {PeerId} RTP forwarder handler threw", PeerId);
+        }
+    }
+
+    private void LogRecvRate()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        var pkts = System.Threading.Interlocked.Read(ref _packetsReceived);
+        var dPkts = pkts - _prevLoggedRecvPackets;
+        _prevLoggedRecvPackets = pkts;
+        if (dPkts == 0)
+        {
+            return;
+        }
+        _logger?.LogInformation(
+            "[sfu-recv] peer={PeerId} 2s: {Pps:F0} pps | total={Total}",
+            PeerId.ToString("N").Substring(0, 8), dPkts / 2.0, pkts);
+    }
+
+    /// <summary>
+    /// Forward a PLI (Picture Loss Indication) from a viewer to this publisher
+    /// peer. Coalesces aggressive callers — at most one PLI per
+    /// <see cref="PliCoalesceWindowMs"/> per publisher reaches the wire. Returns
+    /// <c>true</c> when the PLI was actually forwarded, <c>false</c> when it was
+    /// suppressed by the coalesce window. The single forwarded PLI produces
+    /// one IDR which the publisher's RTP fan-out delivers to all viewers, so
+    /// dropping correlated PLIs is correct (every viewer benefits from the
+    /// same IDR).
+    /// </summary>
+    public bool TryForwardPli()
+    {
+        if (_disposed)
+        {
+            return false;
+        }
+        lock (_lastPliForwardedAt)
+        {
+            if (_lastPliForwardedAt.IsRunning && _lastPliForwardedAt.ElapsedMilliseconds < PliCoalesceWindowMs)
+            {
+                var coalesced = System.Threading.Interlocked.Increment(ref _pliCoalescedTotal);
+                _logger?.LogInformation("[sfu-pli] coalesced (publisher={PeerId} {Elapsed}ms since last forward, total coalesced={Coalesced})",
+                    PeerId, _lastPliForwardedAt.ElapsedMilliseconds, coalesced);
+                return false;
+            }
+            _lastPliForwardedAt.Restart();
+        }
+        try
+        {
+            // Use the publisher's track SSRCs so the publisher's
+            // RTCPeerConnection routes the feedback to its own video
+            // sender. localSsrc = SFU's send-side video SSRC (towards the
+            // publisher PC, which is RecvOnly here) — VideoLocalTrack.Ssrc.
+            // remoteSsrc = publisher's send-side video SSRC, learned from
+            // incoming RTP. SIPSorcery's RTCPeerConnection captures this
+            // when it processes the publisher's RTP track.
+            var localSsrc = _pc.VideoLocalTrack?.Ssrc ?? 0u;
+            var remoteSsrc = _pc.VideoRemoteTrack?.Ssrc ?? 0u;
+            if (remoteSsrc == 0)
+            {
+                // Haven't seen any video RTP from the publisher yet —
+                // there's no SSRC to address, and a PLI before video
+                // starts has no effect anyway. Treat as suppressed.
+                System.Threading.Interlocked.Increment(ref _pliCoalescedTotal);
+                _logger?.LogDebug("[sfu-pli] dropped (publisher={PeerId} no video RTP yet, no SSRC to address)", PeerId);
+                return false;
+            }
+            var feedback = new RTCPFeedback(localSsrc, remoteSsrc, PSFBFeedbackTypesEnum.PLI);
+            _pc.SendRtcpFeedback(SDPMediaTypesEnum.video, feedback);
+            System.Threading.Interlocked.Increment(ref _pliForwardedTotal);
+            _logger?.LogInformation("[sfu-pli] forwarded to publisher={PeerId} ssrc={Ssrc:X8}", PeerId, remoteSsrc);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "SfuPeer {PeerId} failed to forward PLI", PeerId);
+            return false;
         }
     }
 
@@ -296,6 +398,7 @@ public sealed class SfuPeer : IAsyncDisposable
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }
         try { _pc.onconnectionstatechange -= OnConnectionStateChange; } catch { }
         try { _pc.OnRtpPacketReceived -= OnRtpPacketReceived; } catch { }
+        try { _recvRateLogTimer?.Dispose(); } catch { }
         try { _pc.close(); } catch { }
         try { _pc.Dispose(); } catch { }
 

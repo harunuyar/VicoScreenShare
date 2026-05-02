@@ -134,6 +134,20 @@ public sealed class VideoSettings
     /// </summary>
     public H264EncoderBackend H264Backend { get; set; } = H264EncoderBackend.Auto;
 
+    /// <summary>
+    /// Which AV1 decoder backend the client uses. <see cref="Av1DecoderBackend.Auto"/>
+    /// (the default) picks NVDEC when the GPU supports it, falls back to
+    /// the Microsoft "AV1 Video Extension" MFT decoder otherwise. Force
+    /// <see cref="Av1DecoderBackend.Mft"/> to use the MFT path even on
+    /// NVDEC-capable hardware (useful for A/B comparison or as a workaround
+    /// if a driver regression breaks the cuvid path). Force
+    /// <see cref="Av1DecoderBackend.Nvdec"/> to require the direct cuvid
+    /// path; the selector still falls back to MFT if NVDEC isn't available
+    /// so the toggle never breaks the share. Ignored when the negotiated
+    /// codec is not AV1.
+    /// </summary>
+    public Av1DecoderBackend Av1DecoderBackend { get; set; } = Av1DecoderBackend.Auto;
+
     // ----- NVENC SDK quality knobs -----
     // These four properties drive the direct NVENC SDK encoder backend
     // when it's the active backend (Auto on NVIDIA, or explicit NvencSdk).
@@ -208,6 +222,38 @@ public enum H264EncoderBackend
     /// session limit hit, etc.) so picking this never breaks the share.
     /// </summary>
     NvencSdk = 2,
+}
+
+/// <summary>
+/// Selects which AV1 decoder backend the client uses on Windows. Decoder
+/// selection is per-viewer (each StreamReceiver constructs its own decoder
+/// from this preference); the publisher's encoder choice is independent.
+/// </summary>
+public enum Av1DecoderBackend
+{
+    /// <summary>
+    /// Pick NVDEC (direct cuvid driver path) on hardware that supports
+    /// it; fall back to the Microsoft "AV1 Video Extension" MFT decoder
+    /// otherwise. Recommended default — NVDEC handles 4K AV1 IDRs in
+    /// single-digit ms; MFT typically spends 30-45 ms and produces
+    /// visible micro-stutters at IDR boundaries.
+    /// </summary>
+    Auto = 0,
+
+    /// <summary>
+    /// Force the Microsoft Media Foundation AV1 decoder. Universal
+    /// (any GPU) but slower; useful for A/B comparison or as a manual
+    /// workaround if NVDEC misbehaves on a specific driver. Requires the
+    /// "AV1 Video Extension" Microsoft Store package on the viewer host.
+    /// </summary>
+    Mft = 1,
+
+    /// <summary>
+    /// Force the NVDEC direct cuvid path. RTX 30 / Volta+ NVIDIA only;
+    /// the selector falls back to MFT if NVDEC isn't available, so
+    /// picking this never breaks the share.
+    /// </summary>
+    Nvdec = 2,
 }
 
 /// <summary>

@@ -89,6 +89,20 @@ public sealed class SubscriberSession : IAsyncDisposable
     {
     }
 
+    public SubscriberSession(
+        SignalingClient signaling,
+        Guid publisherPeerId,
+        IVideoDecoderFactory decoderFactory,
+        string displayName,
+        IReadOnlyList<RTCIceServer>? iceServers,
+        IAudioDecoderFactory? audioDecoderFactory,
+        IAudioRenderer? audioRenderer,
+        int videoWidth,
+        int videoHeight)
+        : this(signaling, publisherPeerId, decoderFactory, displayName, iceServers, audioDecoderFactory, audioRenderer, enableAvSync: true, videoWidth: videoWidth, videoHeight: videoHeight)
+    {
+    }
+
     /// <summary>
     /// Build a subscriber session with explicit control over the
     /// MediaClock-based A/V sync. Set <paramref name="enableAvSync"/>
@@ -107,7 +121,9 @@ public sealed class SubscriberSession : IAsyncDisposable
         IReadOnlyList<RTCIceServer>? iceServers,
         IAudioDecoderFactory? audioDecoderFactory,
         IAudioRenderer? audioRenderer,
-        bool enableAvSync)
+        bool enableAvSync,
+        int videoWidth = 0,
+        int videoHeight = 0)
     {
         _signaling = signaling;
         PublisherPeerId = publisherPeerId;
@@ -154,6 +170,13 @@ public sealed class SubscriberSession : IAsyncDisposable
         _pc.onicecandidate += OnLocalIceCandidate;
         _signaling.IceCandidateReceived += OnRemoteIceCandidate;
 
+        // Diagnostic: log every PC state transition so we can see whether
+        // SDP/ICE actually completes after a codec-rebuild restart.
+        _pc.onconnectionstatechange += s => DebugLog.Write(
+            $"[sub {SubscriptionId:N}] connectionState={s} ice={_pc.iceConnectionState} signaling={_pc.signalingState}");
+        _pc.oniceconnectionstatechange += s => DebugLog.Write(
+            $"[sub {SubscriptionId:N}] iceConnectionState={s}");
+
         // Per-subscriber A/V sync clock. Owned here so both
         // StreamReceiver and AudioReceiver hold the same instance —
         // they latch and query through it to keep audio playout
@@ -162,7 +185,7 @@ public sealed class SubscriberSession : IAsyncDisposable
         // renderer to set the anchor (audio-only, tests).
         MediaClock = enableAvSync ? new MediaClock(displayName) : null;
 
-        Receiver = new StreamReceiver(_pc, decoderFactory, displayName, MediaClock);
+        Receiver = new StreamReceiver(_pc, decoderFactory, displayName, MediaClock, videoWidth, videoHeight);
 
         // AudioReceiver is a sibling (not a layer inside StreamReceiver)
         // so the video receiver's bounded-channel / drop-to-IDR / GPU
@@ -228,12 +251,14 @@ public sealed class SubscriberSession : IAsyncDisposable
     /// </summary>
     public async Task AcceptOfferAsync(string offerSdp)
     {
+        DebugLog.Write($"[sub {SubscriptionId:N}] AcceptOfferAsync entry — offer length={offerSdp?.Length ?? 0}");
         var remote = new RTCSessionDescriptionInit
         {
             sdp = offerSdp,
             type = RTCSdpType.offer,
         };
         var setResult = _pc.setRemoteDescription(remote);
+        DebugLog.Write($"[sub {SubscriptionId:N}] setRemoteDescription -> {setResult}");
         if (setResult != SetDescriptionResultEnum.OK)
         {
             throw new InvalidOperationException($"setRemoteDescription failed: {setResult}");
@@ -241,6 +266,7 @@ public sealed class SubscriberSession : IAsyncDisposable
 
         var answer = _pc.createAnswer(null);
         await _pc.setLocalDescription(answer).ConfigureAwait(false);
+        DebugLog.Write($"[sub {SubscriptionId:N}] setLocalDescription done — answer length={answer.sdp?.Length ?? 0} iceState={_pc.iceConnectionState} pcState={_pc.connectionState}");
         // Raise the kernel UDP receive buffer on this subscriber PC's RTP
         // socket before any media arrives. Three subscribers on the same box
         // receiving ~20 Mbit each easily fill a 64 KB default buffer mid-burst,
@@ -248,6 +274,7 @@ public sealed class SubscriberSession : IAsyncDisposable
         RtpSocketTuning.TryApply(_pc);
 
         await _signaling.SendSdpAnswerAsync(answer.sdp, SubscriptionId).ConfigureAwait(false);
+        DebugLog.Write($"[sub {SubscriptionId:N}] sent SdpAnswer to signaling");
 
         FlushPendingRemoteCandidates();
 

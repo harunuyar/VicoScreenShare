@@ -250,8 +250,8 @@ public sealed class SignalingClient : IAsyncDisposable
     /// PeerId to the session's authoritative id before broadcasting, so passing
     /// <see cref="Guid.Empty"/> here is fine — any value would be ignored.
     /// </summary>
-    public Task SendStreamStartedAsync(string streamId, StreamKind kind, bool hasAudio, int nominalFrameRate, CancellationToken ct = default) =>
-        SendAsync(MessageType.StreamStarted, new StreamStarted(Guid.Empty, streamId, kind, hasAudio, nominalFrameRate), ct);
+    public Task SendStreamStartedAsync(string streamId, StreamKind kind, bool hasAudio, int nominalFrameRate, int codec = 1, int width = 0, int height = 0, CancellationToken ct = default) =>
+        SendAsync(MessageType.StreamStarted, new StreamStarted(Guid.Empty, streamId, kind, hasAudio, nominalFrameRate, codec, width, height), ct);
 
     public Task SendStreamEndedAsync(string streamId, CancellationToken ct = default) =>
         SendAsync(MessageType.StreamEnded, new StreamEnded(Guid.Empty, streamId), ct);

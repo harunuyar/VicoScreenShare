@@ -134,6 +134,7 @@ public sealed class SettingsStore
         public bool EnableIntraRefresh { get; set; } = true;
         public int IntraRefreshPeriodFrames { get; set; } = 0;
         public H264EncoderBackend H264Backend { get; set; } = H264EncoderBackend.Auto;
+        public Av1DecoderBackend Av1DecoderBackend { get; set; } = Av1DecoderBackend.Auto;
         public int NvencPreset { get; set; } = 4;
 
         // Audio (shared-content loopback). Separate fields rather than a
@@ -184,6 +185,7 @@ public sealed class SettingsStore
             EnableIntraRefresh = source.Video.EnableIntraRefresh,
             IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
             H264Backend = source.Video.H264Backend,
+            Av1DecoderBackend = source.Video.Av1DecoderBackend,
             NvencPreset = source.Video.NvencPreset,
             AudioForceSystemAudio = source.Audio.ForceSystemAudio,
             AudioTargetBitrate = source.Audio.TargetBitrate,
@@ -215,6 +217,7 @@ public sealed class SettingsStore
                     EnableIntraRefresh = EnableIntraRefresh,
                     IntraRefreshPeriodFrames = IntraRefreshPeriodFrames >= 0 && IntraRefreshPeriodFrames <= 14_400 ? IntraRefreshPeriodFrames : 0,
                     H264Backend = H264Backend,
+                    Av1DecoderBackend = Av1DecoderBackend,
                     NvencPreset = NvencPreset >= 1 && NvencPreset <= 7 ? NvencPreset : 4,
                 },
                 Audio = new AudioSettings

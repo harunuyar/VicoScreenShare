@@ -113,6 +113,56 @@ public sealed class WebRtcSession : IAsyncDisposable
 
         _pc.onicecandidate += OnLocalIceCandidate;
         _signaling.IceCandidateReceived += OnRemoteIceCandidate;
+
+        // Listen for incoming RTCP feedback. For a publisher (Sender role)
+        // the SFU forwards subscriber-side PLI here; we surface that as
+        // KeyframeRequestedFromPeer and the streamer responds by calling
+        // encoder.RequestKeyframe(). The signaling-channel
+        // RequestKeyframe message remains as the legacy first-frame path
+        // (fired once per subscriber Connected). Both routes funnel
+        // through CaptureStreamer's debounce so two near-simultaneous
+        // arrivals collapse to a single forced IDR.
+        _pc.OnReceiveReport += OnRtcpReport;
+    }
+
+    /// <summary>
+    /// Raised when this session's <see cref="RTCPeerConnection"/> receives
+    /// an RTCP PLI (PSFB FeedbackMessageType=1) from the peer. For a
+    /// Sender-role session that's the cue to emit a fresh IDR; for a
+    /// Receiver-role session the event is raised but typically nobody
+    /// listens (subscribers don't receive PLI in normal operation).
+    /// </summary>
+    public event Action? KeyframeRequestedFromPeer;
+
+    private void OnRtcpReport(System.Net.IPEndPoint remote, SDPMediaTypesEnum mediaType, RTCPCompoundPacket compound)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        if (mediaType != SDPMediaTypesEnum.video)
+        {
+            return;
+        }
+        var fb = compound?.Feedback;
+        if (fb is null)
+        {
+            return;
+        }
+        if (fb.Header.PacketType == RTCPReportTypesEnum.PSFB
+            && fb.Header.PayloadFeedbackMessageType == PSFBFeedbackTypesEnum.PLI)
+        {
+            VicoScreenShare.Client.Diagnostics.DebugLog.Write($"[webrtc {_role}] RTCP PLI received from peer (senderSsrc={fb.SenderSSRC:X8} mediaSsrc={fb.MediaSSRC:X8})");
+            try
+            {
+                KeyframeRequestedFromPeer?.Invoke();
+            }
+            catch
+            {
+                // Subscriber-side handler exceptions must not propagate
+                // up into SIPSorcery's RTCP receive loop.
+            }
+        }
     }
 
     public RTCPeerConnection PeerConnection => _pc;
@@ -296,6 +346,7 @@ public sealed class WebRtcSession : IAsyncDisposable
         _signaling.IceCandidateReceived -= OnRemoteIceCandidate;
         try { _pc.onicecandidate -= OnLocalIceCandidate; } catch { }
         try { _pc.onconnectionstatechange -= OnPcStateChanged; } catch { }
+        try { _pc.OnReceiveReport -= OnRtcpReport; } catch { }
         try { _pc.close(); } catch { }
         try { _pc.Dispose(); } catch { }
 

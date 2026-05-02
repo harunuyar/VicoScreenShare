@@ -49,6 +49,29 @@ public sealed class PaintLoop : IDisposable
     private long _loggedFrames;
     private bool _disposed;
 
+    /// <summary>
+    /// Worst <c>iterMs</c> observed since the last call to
+    /// <see cref="ReadAndResetWorstIterMs"/>. <c>iterMs</c> is the
+    /// time from one successful paint's end to the next — captures
+    /// dequeue-wait + paint cost. A 1-second user-visible freeze
+    /// shows up as iterMs ~1000 inside one painter iteration even
+    /// when the 2-second <c>paint-pulse</c> averages out healthy.
+    /// Read by the renderer's pulse logger; reset on read so each
+    /// pulse window reports its own worst case.
+    /// </summary>
+    private double _worstIterMsSincePulse;
+    private readonly object _worstIterLock = new();
+
+    public double ReadAndResetWorstIterMs()
+    {
+        lock (_worstIterLock)
+        {
+            var v = _worstIterMsSincePulse;
+            _worstIterMsSincePulse = 0;
+            return v;
+        }
+    }
+
     public PaintLoop(TimestampedFrameQueue queue, PaintCallback paint)
     {
         _queue = queue;
@@ -128,10 +151,26 @@ public sealed class PaintLoop : IDisposable
             var maxDriftSwTicks = StopwatchTicksFromTimespanTicks(
                 TimeSpan.FromMilliseconds(100).Ticks);
 
+            // Stutter detection: log whenever the dequeue wait — the gap
+            // between successive successful paints — exceeds a threshold.
+            // Captures sub-pulse freezes (40–500 ms) that the 2 s aggregate
+            // pulses hide. Threshold is set above normal jitter and below
+            // the user-perceptible "frozen for a beat" feeling.
+            const double StutterLogThresholdMs = 15.0;
+            long lastDequeueTicks = 0;
+            // Queue-exhaustion probe: count how many WaitOne iterations
+            // we cycle through before dequeue succeeds. > 0 means the
+            // playout queue went empty momentarily (PaintLoop drained
+            // ahead of decode/transport). The value is the number of
+            // 16 ms wakeups before a frame appeared, so values >= 2
+            // mean the queue was empty for ~32 ms or more.
+
             while (!ct.IsCancellationRequested)
             {
                 // 1. Dequeue the next frame.
                 DecodedVideoFrame current = default;
+                var waitStartTicks = Stopwatch.GetTimestamp();
+                var waitIterations = 0;
                 while (!ct.IsCancellationRequested)
                 {
                     if (_queue.TryDequeue(out current))
@@ -140,10 +179,23 @@ public sealed class PaintLoop : IDisposable
                     }
 
                     _wake.WaitOne(16);
+                    waitIterations++;
                 }
                 if (ct.IsCancellationRequested)
                 {
                     break;
+                }
+
+                var dequeuedAtTicks = Stopwatch.GetTimestamp();
+                // If we burnt > 1 wait cycle (= ~32 ms with empty queue)
+                // before a frame appeared, log it directly. This catches
+                // queue-exhaustion that the steady-state paint cadence
+                // would otherwise hide — paint catches up, but the user
+                // saw a frozen tile for that duration.
+                if (waitIterations >= 2)
+                {
+                    DebugLog.Write(
+                        $"[paint-empty] queue exhausted {waitIterations} cycles (~{waitIterations * 16}ms) qDepth={_queue.Count} pts={current.Timestamp.TotalMilliseconds:F0}ms");
                 }
 
                 // 2. Compute scheduled paint time from the content
@@ -196,8 +248,34 @@ public sealed class PaintLoop : IDisposable
                 {
                     var nowTicks = Stopwatch.GetTimestamp();
                     var driftSwTicks = nowTicks - scheduledWallTicks;
-                    if (driftSwTicks > maxDriftSwTicks || driftSwTicks < -maxDriftSwTicks)
+                    var driftDetected =
+                        driftSwTicks > maxDriftSwTicks || driftSwTicks < -maxDriftSwTicks;
+
+                    // Queue-depth-based catch-up. Once the painter falls
+                    // behind, the queue's overflow policy (drop oldest)
+                    // collapses the per-frame pts gap from 7 ms (144 fps
+                    // production) to ~33 ms (30 fps consumption), so the
+                    // *measured* drift between scheduledWallTicks and now
+                    // converges to ~0 even though we're persistently 4×
+                    // behind real time. The drift guard above never fires
+                    // again, and the 30 fps cadence locks in for the rest
+                    // of the session. Detect this state by queue depth: if
+                    // the queue stays above half capacity, the producer is
+                    // outrunning us. Trip the same skip-to-latest path so
+                    // the painter realigns to fresh frames at the real
+                    // production cadence. Threshold leaves comfortable
+                    // headroom for legitimate IDR-burst absorption (which
+                    // pushes the queue into the 20-30 range transiently).
+                    var depthCatchupThreshold = _queue.MaxCapacity / 2;
+                    var depthCatchup = !driftDetected
+                        && _queue.Count >= depthCatchupThreshold;
+
+                    if (driftDetected || depthCatchup)
                     {
+                        if (depthCatchup)
+                        {
+                            DebugLog.Write($"[paint-catchup] queue depth {_queue.Count}/{_queue.MaxCapacity} ≥ {depthCatchupThreshold}; skip-to-latest + re-anchor");
+                        }
                         // Skip the queue to near-latest so we resume
                         // painting fresh content, not a stale backlog.
                         _queue.SkipToLatest(_queue.InitialPlayoutBufferFrames);
@@ -226,6 +304,7 @@ public sealed class PaintLoop : IDisposable
 
                 // 4. Sleep until the scheduled wall time. No-op if
                 //    we're already past it.
+                var preSleepTicks = Stopwatch.GetTimestamp();
                 SleepUntilStopwatchTicks(scheduledWallTicks, ct);
                 if (ct.IsCancellationRequested)
                 {
@@ -233,6 +312,7 @@ public sealed class PaintLoop : IDisposable
                 }
 
                 // 5. Paint.
+                var prePaintTicks = Stopwatch.GetTimestamp();
                 try
                 {
                     _paint(in current);
@@ -241,6 +321,34 @@ public sealed class PaintLoop : IDisposable
                 {
                     DebugLog.Write($"[paint] paint threw: {ex.GetType().Name}: {ex.Message}");
                 }
+
+                // Diagnostic: split the total iteration time into its parts
+                // so a 50 ms cadence shows up as e.g. "sleep=43 paint=7" or
+                // "sleep=0 paint=49" — telling us where the time goes.
+                if (lastDequeueTicks != 0)
+                {
+                    var paintEndTicks = Stopwatch.GetTimestamp();
+                    var iterMs = (paintEndTicks - lastDequeueTicks) * 1000.0 / Stopwatch.Frequency;
+                    lock (_worstIterLock)
+                    {
+                        if (iterMs > _worstIterMsSincePulse)
+                        {
+                            _worstIterMsSincePulse = iterMs;
+                        }
+                    }
+                    if (iterMs > StutterLogThresholdMs)
+                    {
+                        var dequeueWaitMs = (dequeuedAtTicks - waitStartTicks) * 1000.0 / Stopwatch.Frequency;
+                        var sleepMs = (prePaintTicks - preSleepTicks) * 1000.0 / Stopwatch.Frequency;
+                        var paintMs = (paintEndTicks - prePaintTicks) * 1000.0 / Stopwatch.Frequency;
+                        var preWorkMs = (preSleepTicks - dequeuedAtTicks) * 1000.0 / Stopwatch.Frequency;
+                        DebugLog.Write(
+                            $"[paint-stutter] iter={iterMs:F1}ms wait={dequeueWaitMs:F1}ms " +
+                            $"prework={preWorkMs:F1}ms sleep={sleepMs:F1}ms paint={paintMs:F1}ms " +
+                            $"waitIter={waitIterations} qDepth={_queue.Count} pts={current.Timestamp.TotalMilliseconds:F0}ms");
+                    }
+                }
+                lastDequeueTicks = Stopwatch.GetTimestamp();
 
                 if (_loggedFrames < 20)
                 {

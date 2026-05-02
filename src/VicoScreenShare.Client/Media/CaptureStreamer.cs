@@ -652,14 +652,41 @@ public sealed class CaptureStreamer : IDisposable
     /// Best-effort: if the encoder is null or being torn down, silently
     /// swallow — the next natural keyframe still arrives on the scheduled
     /// GOP boundary.
+    ///
+    /// Debounced. There are at least three upstream paths that all end
+    /// up here: the legacy signaling-channel <c>RequestKeyframe</c>
+    /// message (fired once per subscriber Connected), RTCP PLI from a
+    /// subscriber forwarded by the SFU, and any future internal trigger
+    /// (e.g. a reaction to extreme upstream loss). When two or three
+    /// arrive in the same 500 ms window — say, a subscriber Connected
+    /// at the same moment they hit a packet-loss-induced PLI — we want
+    /// exactly one forced IDR, not three. The encoder also benefits:
+    /// emitting an IDR every frame for half a second produces a
+    /// massive bitrate spike that defeats the recovery it's trying to
+    /// support. <see cref="ForceIdrMinIntervalMs"/> caps that at one
+    /// per ~half-GOP.
     /// </summary>
+    private const int ForceIdrMinIntervalMs = 500;
+    private readonly System.Diagnostics.Stopwatch _lastForceIdrAt = new();
+
     public void RequestKeyframe()
     {
         if (_disposed)
         {
             return;
         }
+        lock (_lastForceIdrAt)
+        {
+            if (_lastForceIdrAt.IsRunning && _lastForceIdrAt.ElapsedMilliseconds < ForceIdrMinIntervalMs)
+            {
+                VicoScreenShare.Client.Diagnostics.DebugLog.Write(
+                    $"[capture] RequestKeyframe suppressed (debounce, {_lastForceIdrAt.ElapsedMilliseconds}ms since last)");
+                return;
+            }
+            _lastForceIdrAt.Restart();
+        }
 
+        VicoScreenShare.Client.Diagnostics.DebugLog.Write("[capture] RequestKeyframe -> encoder.RequestKeyframe()");
         try { _encoder?.RequestKeyframe(); } catch { }
     }
 

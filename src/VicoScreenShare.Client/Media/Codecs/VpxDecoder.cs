@@ -31,6 +31,14 @@ internal sealed class VpxDecoder : IVideoDecoder
 
     public VideoCodec Codec => VideoCodec.Vp8;
 
+    /// <summary>
+    /// Raised when libvpx throws on a decode call — almost always means
+    /// the bitstream was corrupt (lost packet) and the decoder needs a
+    /// fresh keyframe to resync. <see cref="StreamReceiver"/> handles
+    /// the dispatch to RTCP PLI.
+    /// </summary>
+    public event Action? KeyframeNeeded;
+
     public IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp)
     {
         if (_disposed || encodedSample is null || encodedSample.Length == 0)
@@ -43,8 +51,10 @@ internal sealed class VpxDecoder : IVideoDecoder
         {
             samples = _decoder.DecodeVideo(encodedSample, VideoPixelFormatsEnum.Bgr, VideoCodecsEnum.VP8);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            VicoScreenShare.Client.Diagnostics.DebugLog.Write($"[vpx] keyframe-needed: DecodeVideo threw {ex.GetType().Name}: {ex.Message}");
+            try { KeyframeNeeded?.Invoke(); } catch { }
             return Array.Empty<DecodedVideoFrame>();
         }
         if (samples is null)

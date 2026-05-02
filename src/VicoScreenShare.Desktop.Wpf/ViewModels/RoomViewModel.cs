@@ -124,9 +124,29 @@ public sealed partial class RoomViewModel : ViewModelBase
     // Nominal frame rate per publisher, captured from StreamStarted so the
     // per-tile renderer's jitter buffer can size to the sender's cadence even
     // before the subscriber PC negotiation completes. Keyed by publisher peer id.
-    private readonly Dictionary<Guid, int> _announcedFrameRates = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, int> _announcedFrameRates = new();
+
+    /// <summary>
+    /// Per-publisher codec the publisher told us in their StreamStarted.
+    /// Used to pick the right decoder factory when CreateOrReplaceSubscriberAsync
+    /// builds the SubscriberSession — without this we'd use this peer's
+    /// LOCAL codec choice for the decoder, which fails the moment two peers
+    /// in the room run different codecs.
+    /// </summary>
+    // Concurrent because OnStreamStartedReceived writes from the
+    // signaling thread (synchronously, before posting to the UI
+    // dispatcher for the visual side effects) while
+    // CreateOrReplaceSubscriberAsync reads them via the UI thread
+    // shortly after. If we kept them as plain Dictionary the SDP-
+    // offer handler's read could race the StreamStarted handler's
+    // write — which surfaced as the AV1 decoder initializing at
+    // the 1920×1088 default and triggering STREAM_CHANGE on the
+    // first IDR (the user-visible cold-start freeze).
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, VideoCodec> _announcedPublisherCodecs = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (int Width, int Height)> _announcedPublisherDimensions = new();
 
     private string? _localStreamId;
+    private (int Width, int Height) _localStreamEncodedDims;
 
     // Per-stream sender stats. Receiver-side stats are per-tile now.
     private DispatcherTimer? _statsTimer;
@@ -542,6 +562,14 @@ public sealed partial class RoomViewModel : ViewModelBase
             // SdpOffers tagged with a publisher's SubscriptionId.
             session = new WebRtcSession(_signaling, WebRtcRole.Bidirectional, _sessionCodec, _iceServers);
 
+            // RTCP PLI from any subscriber (forwarded by the SFU) lands on
+            // this peer's WebRtcSession. Funnel it to CaptureStreamer the
+            // same way the legacy signaling-channel RequestKeyframe message
+            // does — both call CaptureStreamer.RequestKeyframe() which
+            // debounces internally so two near-simultaneous arrivals
+            // collapse to one forced IDR.
+            session.KeyframeRequestedFromPeer += OnPeerRequestedKeyframe;
+
             await session.NegotiateAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
 
             _webRtc = session;
@@ -595,17 +623,40 @@ public sealed partial class RoomViewModel : ViewModelBase
             var displayName = existingPeer?.DisplayName
                 ?? $"Publisher {publisherPeerId:N}".Substring(0, 16);
             var nominalFps = _announcedFrameRates.TryGetValue(publisherPeerId, out var fps) ? fps : 60;
+            var publisherCodec = _announcedPublisherCodecs.TryGetValue(publisherPeerId, out var c)
+                ? c : _sessionCodec;
+            var publisherDims = _announcedPublisherDimensions.TryGetValue(publisherPeerId, out var dims)
+                ? dims : (Width: 0, Height: 0);
             // If a tile already exists for this publisher, we're replacing its
             // underlying PC (re-offer path — Phase 5 uses this on publisher
             // reconnect). Take the old one out and dispose it after we've swapped
             // in the replacement so the grid doesn't flicker.
             var existingTile = Tiles.FirstOrDefault(t => t.PublisherPeerId == publisherPeerId);
-            return (displayName, nominalFps, toDispose: existingTile);
+            return (displayName, nominalFps, publisherCodec, publisherDims, toDispose: existingTile);
         }).ConfigureAwait(true);
 
         var displayName = snapshot.displayName;
         var nominalFps = snapshot.nominalFps;
+        var publisherCodec = snapshot.publisherCodec;
+        var publisherDims = snapshot.publisherDims;
         var toDispose = snapshot.toDispose;
+
+        // Pick a decoder factory that matches the PUBLISHER's codec, not this
+        // peer's local codec. When peers in a room run different codecs (e.g.
+        // user codec-switched on one client only), the local _decoderFactory
+        // would feed the publisher's bytes through the wrong decoder and
+        // produce zero output — visible as "stuck on Connecting" forever.
+        // The catalog's TryGet falls back to local _decoderFactory if the
+        // publisher's codec isn't available on this machine; the resulting
+        // decoder will fail at runtime but at least we won't silently use
+        // the wrong codec for matching cases.
+        var catalog = ClientHost.VideoCodecCatalog ?? new VideoCodecCatalog();
+        IVideoDecoderFactory decoderFactory = _decoderFactory;
+        if (catalog.TryGet(publisherCodec, out _, out var matchedDecoder))
+        {
+            decoderFactory = matchedDecoder;
+        }
+        DebugLog.Write($"[room] CreateOrReplaceSubscriber for {publisherPeerId:N} publisherCodec={publisherCodec} decoderFactory.Codec={decoderFactory.Codec}");
 
         // Give the subscriber an audio decoder + renderer only when the
         // host registered a renderer factory. Headless / test harness
@@ -617,11 +668,13 @@ public sealed partial class RoomViewModel : ViewModelBase
         var session = new SubscriberSession(
             _signaling,
             publisherPeerId,
-            _decoderFactory,
+            decoderFactory,
             displayName: displayName,
             iceServers: _iceServers,
             audioDecoderFactory: audioDecoderFactory,
-            audioRenderer: audioRenderer);
+            audioRenderer: audioRenderer,
+            videoWidth: publisherDims.Width,
+            videoHeight: publisherDims.Height);
 
         try
         {
@@ -634,13 +687,6 @@ public sealed partial class RoomViewModel : ViewModelBase
             return;
         }
 
-        // Seed new tiles with the user's last-used per-tile audio
-        // level so a quiet room stays quiet when a new publisher joins.
-        // Tile-local changes propagate back to _lastTileVolume /
-        // _lastTileMuted via PropertyChanged below.
-        // The PeerViewModel is forwarded so the tile can observe
-        // signaling-level liveness (peer.IsConnected) for its
-        // Reconnecting overlay, distinct from the WebRTC transport state.
         var peer = Peers.FirstOrDefault(p => p.PeerId == publisherPeerId);
         var tile = new PublisherTileViewModel(
             session, displayName, nominalFps, _navigation.UiDispatcher,
@@ -656,13 +702,8 @@ public sealed partial class RoomViewModel : ViewModelBase
                 toDispose.PropertyChanged -= OnPublisherTileAudioChanged;
                 Tiles.Remove(toDispose);
             }
-            // Seed IsFocused before the tile enters the visual tree so the
-            // Focus-layout strip trigger doesn't flash the tile for a frame
-            // before collapsing it.
             tile.IsFocused = FocusedPublisherPeerId == publisherPeerId;
             Tiles.Add(tile);
-            // If the media status was "Waiting for a streamer…" etc, clear it so
-            // the grid takes over the empty state region.
             MediaStatus = null;
         }).ConfigureAwait(true);
 
@@ -753,13 +794,37 @@ public sealed partial class RoomViewModel : ViewModelBase
             _localStreamId = streamId;
             try
             {
+                // Encoded dimensions: queried from Win32 against the
+                // capture target's handle, then run through the same
+                // downscale rule the streamer applies. Receivers use
+                // these to pre-negotiate the decoder MFT at the
+                // correct resolution, avoiding the STREAM_CHANGE
+                // round-trip that costs ~1 s of black at session
+                // start. Falls back to (0, 0) when Win32 fails (e.g.
+                // a synthetic test target with handle == 0); the
+                // receiver then absorbs the STREAM_CHANGE the legacy
+                // way.
+                var (encodedWidth, encodedHeight) =
+                    ComputeEncodedDimensions(pick.Target, pick.EffectiveSettings);
+                // Stash the dims into a field. The SFU echoes our
+                // StreamStarted back with the server's AUTHORITATIVE
+                // PeerId (which differs from our local YourPeerId —
+                // the server has its own peer-id namespace), and the
+                // self-loop subscriber path keys lookups by that
+                // server-side id. When OnStreamStartedReceived fires
+                // for our own streamId we copy these dims into the
+                // dictionary under the server's id so the lookup hits.
+                _localStreamEncodedDims = (encodedWidth, encodedHeight);
                 await _signaling.SendStreamStartedAsync(
                     streamId,
                     StreamKind.Screen,
                     hasAudio: audioEnabled,
-                    nominalFrameRate: pick.EffectiveSettings.TargetFrameRate)
+                    nominalFrameRate: pick.EffectiveSettings.TargetFrameRate,
+                    codec: (int)_sessionCodec,
+                    width: encodedWidth,
+                    height: encodedHeight)
                     .ConfigureAwait(true);
-                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={pick.EffectiveSettings.TargetFrameRate}, hasAudio={audioEnabled}, target={pick.Target.Kind} \"{pick.Target.DisplayName}\")");
+                DebugLog.Write($"[room] sent StreamStarted (streamId={streamId}, nominalFps={pick.EffectiveSettings.TargetFrameRate}, hasAudio={audioEnabled}, codec={_sessionCodec}, encoded={encodedWidth}x{encodedHeight}, target={pick.Target.Kind} \"{pick.Target.DisplayName}\")");
             }
             catch (Exception ex)
             {
@@ -773,6 +838,106 @@ public sealed partial class RoomViewModel : ViewModelBase
             DebugLog.Write($"[room] ShareScreenAsync threw {ex.GetType().Name}: {ex.Message}");
             DebugLog.Write(ex.StackTrace ?? "(no stack)");
             await StopSharingInternalAsync().ConfigureAwait(true);
+        }
+    }
+
+    /// <summary>
+    /// Compute the dimensions the encoder will produce for a given
+    /// capture target and settings. Reads the source's pixel dimensions
+    /// via Win32 (<c>GetMonitorInfo</c> for monitor handles,
+    /// <c>GetClientRect</c> for window handles), then applies
+    /// <see cref="CaptureStreamer"/>'s downscale rule: when
+    /// <c>TargetHeight</c> is set and smaller than source, scale down
+    /// preserving aspect ratio. Padded to 8-pixel multiples so the
+    /// receiver pre-negotiates at the exact post-padded size, avoiding
+    /// the STREAM_CHANGE round-trip on the first IDR. Returns (0, 0)
+    /// when handle is null or Win32 calls fail.
+    /// </summary>
+    private static (int Width, int Height) ComputeEncodedDimensions(
+        CaptureTarget target, VideoSettings settings)
+    {
+        if (!TryGetTargetDimensions(target, out var sourceW, out var sourceH))
+        {
+            return (0, 0);
+        }
+        int outW, outH;
+        if (settings.TargetHeight <= 0 || settings.TargetHeight >= sourceH)
+        {
+            outW = sourceW;
+            outH = sourceH;
+        }
+        else
+        {
+            outH = Math.Max(2, settings.TargetHeight);
+            outW = (int)Math.Round((double)sourceW * outH / sourceH);
+            if (outW <= 0) { outW = sourceW; }
+        }
+        outW = (outW + 7) & ~7;
+        outH = (outH + 7) & ~7;
+        return (outW, outH);
+    }
+
+    private static bool TryGetTargetDimensions(CaptureTarget target, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        if (target.Handle == IntPtr.Zero)
+        {
+            return false;
+        }
+        try
+        {
+            if (target.Kind == CaptureTargetKind.Monitor)
+            {
+                var info = new Win32Interop.MONITORINFO { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Win32Interop.MONITORINFO>() };
+                if (!Win32Interop.GetMonitorInfo(target.Handle, ref info))
+                {
+                    return false;
+                }
+                width = info.rcMonitor.right - info.rcMonitor.left;
+                height = info.rcMonitor.bottom - info.rcMonitor.top;
+            }
+            else
+            {
+                if (!Win32Interop.GetClientRect(target.Handle, out var rect))
+                {
+                    return false;
+                }
+                width = rect.right - rect.left;
+                height = rect.bottom - rect.top;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        return width > 0 && height > 0;
+    }
+
+    private static class Win32Interop
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+        public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct RECT
+        {
+            public int left;
+            public int top;
+            public int right;
+            public int bottom;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct MONITORINFO
+        {
+            public uint cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
         }
     }
 
@@ -948,6 +1113,15 @@ public sealed partial class RoomViewModel : ViewModelBase
     /// </summary>
     private static VideoCodec ResolveFramingCodec(SDPAudioVideoMediaFormat? sendingFormat, VideoCodec fallback)
     {
+        // AV1 is invisible to SIPSorcery's VideoCodecsEnum: when the
+        // session encodes AV1, we ride on the H.264 PT (102) but the
+        // wire framing is RFC 9066 AV1, not H.264 FU-A. The fallback
+        // (encoder codec) is the source of truth here — never accept
+        // the SDP-derived "H264" answer for an AV1 publisher.
+        if (fallback == VideoCodec.Av1)
+        {
+            return VideoCodec.Av1;
+        }
         if (sendingFormat is null)
         {
             return fallback;
@@ -1012,6 +1186,20 @@ public sealed partial class RoomViewModel : ViewModelBase
             selectorEnc.Backend = settings.H264Backend;
             selectorEnc.NvencOptions = BuildNvencOptions(settings);
         }
+        if (_encoderFactory is VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory av1EncFactory)
+        {
+            av1EncFactory.Options = BuildNvencOptions(settings);
+        }
+        // Decoder-side selector preferences are pushed onto the catalog's
+        // factory, not _decoderFactory directly — the catalog returns the
+        // shared instance for our session codec, and StreamReceiver pulls
+        // its factory from the catalog at construction time. Mid-stream
+        // backend switches don't affect already-running decoders; takes
+        // effect at next subscriber-PC creation.
+        if (_decoderFactory is VicoScreenShare.Client.Windows.Media.Codecs.Av1DecoderFactorySelector av1DecSelector)
+        {
+            av1DecSelector.Backend = settings.Av1DecoderBackend;
+        }
     }
 
     /// <summary>
@@ -1025,9 +1213,33 @@ public sealed partial class RoomViewModel : ViewModelBase
     {
         DisposePacer();
 
-        if (!settings.EnableSendPacing)
+        // AV1 must bypass SIPSorcery's SendVideo entirely — its framer
+        // table has no AV1 entry, so the H.264 PT we ride on (102) routes
+        // AV1 OBUs through the H.264 framer and corrupts them. The
+        // pacer's wire-raw path with framingCodec=Av1 produces RFC 9066
+        // RTP payloads that the receiver's Av1RtpDepacketizer
+        // reassembles correctly. Pacing is therefore mandatory for AV1;
+        // when the user has the Pacing toggle off we still build a
+        // pacer, just with a multiplier-of-5 wire rate so it effectively
+        // releases packets as fast as the wire will take them.
+        if (!settings.EnableSendPacing && settings.Codec != VideoCodec.Av1)
         {
-            return (duration, payload, _) => session.PeerConnection.SendVideo(duration, payload);
+            // Diagnostic: log first SendVideo call so we can see whether the
+            // non-pacer path actually fires after a codec rebuild. If the
+            // encoder produces frames but this never fires, the encoder
+            // callback was never wired. If it fires but the receiver gets
+            // nothing, SIPSorcery's SendVideo is no-oping (likely the new
+            // _webRtc PC has no sending format).
+            var loggedFirst = 0;
+            return (duration, payload, _) =>
+            {
+                if (System.Threading.Interlocked.Exchange(ref loggedFirst, 1) == 0)
+                {
+                    var fmt = session.PeerConnection.VideoStream?.GetSendingFormat();
+                    DebugLog.Write($"[send-novacer] first SendVideo: payload={payload?.Length ?? 0} sendingFormat={fmt?.Name() ?? "null"} pt={fmt?.ID ?? -1} pcState={session.PeerConnection.connectionState}");
+                }
+                session.PeerConnection.SendVideo(duration, payload);
+            };
         }
 
         var pc = session.PeerConnection;
@@ -1058,6 +1270,14 @@ public sealed partial class RoomViewModel : ViewModelBase
         var framingCodec = ResolveFramingCodec(sendingFormat, settings.Codec);
         var payloadTypeId = sendingFormat?.ID ?? -1;
 
+        // AV1 with pacing OFF: still build a pacer (because the wire
+        // packetisation for AV1 lives in the pacer code path), but cap
+        // its rate sky-high so packets release at line speed —
+        // honouring the user's "disabled" intent.
+        var paceRate = (!settings.EnableSendPacing && settings.Codec == VideoCodec.Av1)
+            ? 1_000_000_000
+            : ResolvePacingBitrate(settings, settings.TargetBitrate);
+
         var pacer = new PacingRtpSender(
             sendRtpRaw: (payload, ts, mb, pt) =>
                 pc.SendRtpRaw(SDPMediaTypesEnum.video, payload, ts, mb, pt),
@@ -1065,7 +1285,7 @@ public sealed partial class RoomViewModel : ViewModelBase
             initialRtpTimestamp: initialTs,
             contentCodec: settings.Codec,
             framingCodec: framingCodec,
-            targetBitsPerSecond: ResolvePacingBitrate(settings, settings.TargetBitrate));
+            targetBitsPerSecond: paceRate);
         _pacer = pacer;
         return (duration, payload, _) => pacer.Enqueue(duration, payload);
     }
@@ -1140,6 +1360,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         await DisposeAllSubscribersAsync().ConfigureAwait(true);
         if (_webRtc is not null)
         {
+            try { _webRtc.KeyframeRequestedFromPeer -= OnPeerRequestedKeyframe; } catch { }
             try { await _webRtc.DisposeAsync().ConfigureAwait(true); } catch { }
             _webRtc = null;
         }
@@ -1226,6 +1447,7 @@ public sealed partial class RoomViewModel : ViewModelBase
 
         var streamId = _localStreamId;
         _localStreamId = null;
+        _localStreamEncodedDims = (0, 0);
         if (streamId is not null && _signaling.IsConnected)
         {
             try
@@ -1275,13 +1497,50 @@ public sealed partial class RoomViewModel : ViewModelBase
             // Dispose the tile (and its subscription) for this peer if any.
             await DisposeTileAsync(peerId).ConfigureAwait(true);
 
-            _announcedFrameRates.Remove(peerId);
+            _announcedFrameRates.TryRemove(peerId, out _);
         });
     }
 
     private void OnStreamStartedReceived(StreamStarted message)
     {
-        DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId}, nominalFps={message.NominalFrameRate})");
+        DebugLog.Write($"[room] StreamStarted received from {message.PeerId} (self={YourPeerId}, streamId={message.StreamId}, nominalFps={message.NominalFrameRate}, codec={(VideoCodec)message.Codec}, dims={message.Width}x{message.Height})");
+
+        // Write the announce dictionaries synchronously on the
+        // signaling thread BEFORE we marshal the visual side effects
+        // to the UI dispatcher. The SDP-offer handler also marshals
+        // through the UI dispatcher to read these dictionaries; if we
+        // wrote them inside the Post lambda below, the read could be
+        // queued ahead of the write and end up empty (race condition
+        // — directly observed as `hinted=False` in the AV1 decoder
+        // init log even after StreamStarted carried real dims).
+        // Writing here, on the signaling thread, guarantees the dims
+        // are visible to any later UI-thread read.
+        var fps = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
+        _announcedFrameRates[message.PeerId] = fps;
+        _announcedPublisherCodecs[message.PeerId] = (VideoCodec)message.Codec;
+        if (message.Width > 0 && message.Height > 0)
+        {
+            _announcedPublisherDimensions[message.PeerId] = (message.Width, message.Height);
+        }
+        else if (message.StreamId == _localStreamId
+                 && _localStreamEncodedDims.Width > 0
+                 && _localStreamEncodedDims.Height > 0)
+        {
+            // SFU echo of our own share: the server may be running an
+            // older protocol DLL that doesn't preserve Width/Height
+            // (we observed dims=0x0 coming back even though we sent
+            // 2560×1392). The streamId matches our local share, so we
+            // know the publisher peer-id this message carries IS the
+            // server's authoritative id for us — and we know the
+            // local share's encoded dims. Plug them in here so the
+            // self-loop subscriber's decoder can pre-negotiate at
+            // the right size and skip the STREAM_CHANGE round-trip
+            // that costs ~1.4 s of cold-start freeze + ~1.1 s of
+            // audio catch-up downstream.
+            _announcedPublisherDimensions[message.PeerId] = _localStreamEncodedDims;
+            DebugLog.Write($"[room] using local share dims for self-echo {message.PeerId}: {_localStreamEncodedDims.Width}x{_localStreamEncodedDims.Height} (server stripped)");
+        }
+
         _uiDispatcher.Post(() =>
         {
             SetPeerStreaming(message.PeerId, true);
@@ -1300,9 +1559,6 @@ public sealed partial class RoomViewModel : ViewModelBase
                 return;
             }
 
-            var fps = message.NominalFrameRate > 0 ? message.NominalFrameRate : 60;
-            _announcedFrameRates[message.PeerId] = fps;
-
             // If a tile is already mounted (race between StreamStarted and the
             // subscriber SDP offer — StreamStarted can arrive after the SdpOffer),
             // push the cadence into it now.
@@ -1320,7 +1576,9 @@ public sealed partial class RoomViewModel : ViewModelBase
         _uiDispatcher.Post(async () =>
         {
             SetPeerStreaming(message.PeerId, false);
-            _announcedFrameRates.Remove(message.PeerId);
+            _announcedFrameRates.TryRemove(message.PeerId, out _);
+            _announcedPublisherCodecs.TryRemove(message.PeerId, out _);
+            _announcedPublisherDimensions.TryRemove(message.PeerId, out _);
 
             // Drop the subscription + tile for this publisher. Server has
             // already torn down its matching SfuSubscriberPeer on its side.
@@ -1578,6 +1836,20 @@ public sealed partial class RoomViewModel : ViewModelBase
         // Only meaningful when we're actively publishing. Bypass the dispatcher
         // — CaptureStreamer.RequestKeyframe() is cheap and thread-safe, and we
         // want it in flight before the next encoder input.
+        try
+        {
+            _captureStreamer?.RequestKeyframe();
+        }
+        catch { /* encoder tearing down */ }
+    }
+
+    private void OnPeerRequestedKeyframe()
+    {
+        // RTCP PLI arrived on the publisher's WebRtcSession (forwarded by
+        // the SFU from a subscriber that's seeing decode trouble).
+        // CaptureStreamer.RequestKeyframe debounces, so this is safe to
+        // call directly even when we also get the legacy signaling-
+        // channel RequestKeyframe in the same window.
         try
         {
             _captureStreamer?.RequestKeyframe();
@@ -1910,6 +2182,7 @@ public sealed partial class RoomViewModel : ViewModelBase
         await DisposeAllSubscribersAsync().ConfigureAwait(true);
         if (_webRtc is not null)
         {
+            try { _webRtc.KeyframeRequestedFromPeer -= OnPeerRequestedKeyframe; } catch { }
             try { await _webRtc.DisposeAsync().ConfigureAwait(true); } catch { }
             _webRtc = null;
         }

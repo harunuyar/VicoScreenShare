@@ -244,6 +244,20 @@
                                       HorizontalAlignment="Stretch"
                                       Margin="0,4,0,0" />
                         </StackPanel>
+
+                        <StackPanel Margin="0,12,0,0"
+                                    Visibility="{Binding IsAv1Selected, Converter={StaticResource BoolToVisibility}}">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="AV1 decoder" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Auto picks NVDEC (direct cuvid driver path) on RTX 30 / Volta+ GPUs and falls back to the Microsoft AV1 Video Extension MFT decoder on other hardware. NVDEC handles 4K AV1 IDRs in single-digit ms; MFT typically spends 30-45 ms per IDR and produces visible micro-stutters at IDR boundaries. NVDEC option only appears when your GPU supports it.&#10;&#10;Applies on the next stream you subscribe to." />
+                            </StackPanel>
+                            <ComboBox ItemsSource="{Binding Av1DecoderBackendOptions}"
+                                      SelectedItem="{Binding SelectedAv1DecoderBackend}"
+                                      DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
+                                      Margin="0,4,0,0" />
+                        </StackPanel>
                     </StackPanel>
                 </ui:Card>
 

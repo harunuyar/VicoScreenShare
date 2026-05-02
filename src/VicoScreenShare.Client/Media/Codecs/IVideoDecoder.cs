@@ -22,6 +22,32 @@ public interface IVideoDecoder : IDisposable
     IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, TimeSpan inputTimestamp);
 
     /// <summary>
+    /// Slice-aware overload. Many callers assemble the encoded sample into
+    /// an <see cref="System.Buffers.ArrayPool{T}"/>-rented buffer that is
+    /// larger than the actual sample length; this overload lets the
+    /// implementation read only the first <paramref name="length"/> bytes
+    /// rather than forcing the caller to allocate a precisely-sized copy.
+    /// Default fallback allocates a trimmed array and forwards to the
+    /// existing single-array overload — implementations that care about
+    /// allocation rate (e.g., the AV1 decoder under high IDR sizes that
+    /// would otherwise promote LOH allocations to Gen2) override this.
+    /// </summary>
+    IReadOnlyList<DecodedVideoFrame> Decode(byte[] encodedSample, int length, TimeSpan inputTimestamp)
+    {
+        if (encodedSample is null || length <= 0)
+        {
+            return Array.Empty<DecodedVideoFrame>();
+        }
+        if (length == encodedSample.Length)
+        {
+            return Decode(encodedSample, inputTimestamp);
+        }
+        var trimmed = new byte[length];
+        Buffer.BlockCopy(encodedSample, 0, trimmed, 0, length);
+        return Decode(trimmed, inputTimestamp);
+    }
+
+    /// <summary>
     /// Reset the decoder's internal state. Discards any queued input/output
     /// samples and clears any error state so the next <see cref="Decode"/>
     /// can start from a keyframe with a clean slate. Callers must follow
@@ -46,5 +72,27 @@ public interface IVideoDecoder : IDisposable
     {
         get => null;
         set { }
+    }
+
+    /// <summary>
+    /// Raised when the decoder's internal state has diverged in a way that
+    /// can't be repaired without an upstream keyframe — packet loss
+    /// poisoned its reference frames, the bitstream parser desynced, the
+    /// hardware decoder rejected the input as malformed. Subscribers
+    /// (typically <c>StreamReceiver</c>) respond by sending RTCP PLI to
+    /// the publisher so the encoder emits a fresh IDR. May be raised on
+    /// any thread the decoder happens to be processing on (NVDEC's
+    /// callback thread, MFT's async pump, etc.) — handlers must not
+    /// assume a specific thread context.
+    ///
+    /// Decoders that never enter an unrecoverable state (e.g.,
+    /// <see cref="VpxDecoder"/> in clean-path operation) never raise
+    /// this; the default add/remove implementation is empty so the
+    /// caller can subscribe unconditionally on any <c>IVideoDecoder</c>.
+    /// </summary>
+    event Action? KeyframeNeeded
+    {
+        add { }
+        remove { }
     }
 }

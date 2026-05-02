@@ -105,9 +105,135 @@ public partial class App : Application
             ClientHost.VideoCodecCatalog.Register(
                 new H264EncoderFactorySelector(sharedDevices.Device),
                 new MediaFoundationH264DecoderFactory(sharedDevices.Device));
+
+            // AV1 is registered alongside H.264. The encoder factory gates
+            // catalog appearance on NVENC AV1 silicon (RTX 40+ / Arc /
+            // RDNA 3+); the decoder factory selector picks NVDEC when
+            // available and falls back to the Microsoft "AV1 Video
+            // Extension" MFT decoder otherwise — user-overridable from
+            // Settings via VideoSettings.Av1DecoderBackend. NVDEC handles
+            // 4K AV1 IDRs in single-digit ms; MFT typically spends
+            // 30-45 ms and produces visible micro-stutters at IDR
+            // boundaries.
+            var av1DecoderSelector = new Av1DecoderFactorySelector(sharedDevices.Device);
+            ClientHost.VideoCodecCatalog.Register(
+                new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory(sharedDevices.Device),
+                av1DecoderSelector);
         }
 
+        StartDispatcherStallProbe();
+        StartWpfRenderTickProbe();
         base.OnStartup(e);
+    }
+
+    /// <summary>
+    /// WPF compositor render-thread cadence probe. Subscribes to
+    /// <see cref="System.Windows.Media.CompositionTarget.Rendering"/>,
+    /// which fires once per WPF render tick on the UI thread but is
+    /// driven by WPF's internal render thread. A gap ≥ 50 ms between
+    /// successive ticks means WPF's compositor/GPU presentation
+    /// stalled — could be a driver hang, GPU pipeline contention,
+    /// or an extended <c>D3DImage</c> backbuffer lock. The
+    /// <see cref="StartDispatcherStallProbe"/> probe can't see this:
+    /// the dispatcher stays responsive even when the render thread
+    /// is stuck. Gated on <see cref="VideoRenderActive"/> so startup
+    /// noise is filtered.
+    /// </summary>
+    private void StartWpfRenderTickProbe()
+    {
+        var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+        long lastTicks = 0;
+        var stallLogCount = 0L;
+        System.Windows.Media.CompositionTarget.Rendering += (_, _) =>
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (lastTicks != 0 && VideoRenderActive)
+            {
+                var gapMs = (now - lastTicks) * 1000.0 / freq;
+                if (gapMs >= 50.0)
+                {
+                    var gen0 = GC.CollectionCount(0);
+                    var gen1 = GC.CollectionCount(1);
+                    var gen2 = GC.CollectionCount(2);
+                    var n = ++stallLogCount;
+                    if (n <= 200 || n % 50 == 0)
+                    {
+                        DebugLog.Write(
+                            $"[wpf-rendertick-stall] gap={gapMs:F1}ms gen0={gen0} gen1={gen1} gen2={gen2}");
+                    }
+                }
+            }
+            lastTicks = now;
+        };
+    }
+
+    /// <summary>
+    /// Active-measurement UI-thread block probe. A background-thread
+    /// <see cref="System.Threading.Timer"/> fires every 16 ms; each
+    /// tick records a wall-time stamp and calls
+    /// <c>Dispatcher.InvokeAsync</c> at <c>Send</c> priority (highest;
+    /// preempts everything except input). The lambda measures how
+    /// long it took to reach the UI thread — that gap IS the UI
+    /// block time. <c>DispatcherTimer</c> at Background priority
+    /// (used by the previous version) gave too much noise: Background
+    /// runs after Render, so its tick latency reflects Render-tier
+    /// work too. Send-priority round-trip isolates real UI blocking.
+    ///
+    /// Logs only when video is actively being rendered
+    /// (<see cref="VideoRenderActive"/> set by the renderer when
+    /// frames start flowing) so we don't drown in startup XAML /
+    /// theme load stalls. Threshold 50 ms — anything under that is
+    /// indistinguishable from a normal WPF render-tick hold.
+    /// </summary>
+    public static volatile bool VideoRenderActive;
+
+    private System.Threading.Timer? _stallProbeTimer;
+
+    private void StartDispatcherStallProbe()
+    {
+        var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+        var lastGen0 = GC.CollectionCount(0);
+        var lastGen1 = GC.CollectionCount(1);
+        var lastGen2 = GC.CollectionCount(2);
+        var stallLogCount = 0L;
+        var inFlight = 0;
+        _stallProbeTimer = new System.Threading.Timer(_ =>
+        {
+            // Skip if a previous tick is still queued — measuring the
+            // *next* one when the previous is still pending doesn't
+            // tell us anything new.
+            if (System.Threading.Interlocked.Exchange(ref inFlight, 1) == 1)
+            {
+                return;
+            }
+            if (!VideoRenderActive)
+            {
+                System.Threading.Interlocked.Exchange(ref inFlight, 0);
+                return;
+            }
+            var sentTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            Dispatcher.InvokeAsync(() =>
+            {
+                var arrivedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                var rtMs = (arrivedTicks - sentTicks) * 1000.0 / freq;
+                if (rtMs >= 50.0)
+                {
+                    var gen0 = GC.CollectionCount(0);
+                    var gen1 = GC.CollectionCount(1);
+                    var gen2 = GC.CollectionCount(2);
+                    var n = ++stallLogCount;
+                    if (n <= 200 || n % 50 == 0)
+                    {
+                        DebugLog.Write(
+                            $"[ui-stall] sendRoundTrip={rtMs:F1}ms gcGen0={gen0 - lastGen0} gcGen1={gen1 - lastGen1} gcGen2={gen2 - lastGen2}");
+                    }
+                    lastGen0 = gen0;
+                    lastGen1 = gen1;
+                    lastGen2 = gen2;
+                }
+                System.Threading.Interlocked.Exchange(ref inFlight, 0);
+            }, System.Windows.Threading.DispatcherPriority.Send);
+        }, null, dueTime: TimeSpan.FromMilliseconds(500), period: TimeSpan.FromMilliseconds(16));
     }
 
     protected override void OnExit(ExitEventArgs e)

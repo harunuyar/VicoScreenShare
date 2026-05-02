@@ -122,9 +122,15 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         // WPF is coalescing our writes into fewer composites than we
         // submit (i.e. the display is running below dispatch rate,
         // typically monitor-refresh-bound or worse).
+        var worstIterMs = _paintLoop.ReadAndResetWorstIterMs();
+        // worstIterMs = max painter-iter time observed inside this
+        // 2 s window. iterMs spans dequeue-wait + paint cost, so a
+        // multi-100 ms value pinpoints exactly when the painter
+        // missed cadence even if cumulative input/exposed counts
+        // averaged out healthy across the window.
         DebugLog.Write(
             $"[paint-pulse inst={_instanceId}] 2s: input=+{dIn} scaled=+{dSc} exposed=+{dEx} wpfTicks=+{dWpf} " +
-            $"paintQ={playoutDepth}/{_playoutQueue.MaxCapacity} ring={ringBusy}/{ringSize}");
+            $"paintQ={playoutDepth}/{_playoutQueue.MaxCapacity} ring={ringBusy}/{ringSize} worstIter={worstIterMs:F0}ms");
     }
 
     public static readonly DependencyProperty ReceiverProperty =
@@ -267,6 +273,25 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     private int _slotWidth;
     private int _slotHeight;
     private bool _slotAttached;
+
+    // Stale-pixel probe. Samples 1×1 BGRA from the slot's center pixel
+    // immediately after AddDirtyRect, before Unlock. If the same pixel
+    // value repeats for >StalePixelLogMs while exposed counter is still
+    // ticking, we know WPF is being asked to composite identical pixels
+    // many times per second — pipeline beyond the decoder is moving but
+    // the actual frame content isn't changing. Distinguishes "pixels
+    // frozen on screen" from "WPF composite stalled."
+    //
+    // Single 1×1 staging texture, allocated lazily, reused for every
+    // probe call. The CopySubresourceRegion + Map + Unmap path takes
+    // ~100µs on the same device, well within frame budget.
+    private ID3D11Texture2D? _stalePixelStaging;
+    private uint _lastSampledPixel;
+    private long _identicalPixelStreakStartTicks;
+    private long _lastStaleLogTicks;
+    private long _stalePixelLogCount;
+    private const int StalePixelLogMs = 250;
+    private const int StalePixelRelogIntervalMs = 1000;
     private bool _hasPendingFrame;
     private bool _exposeQueued;
 
@@ -421,6 +446,10 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             _slot?.Dispose(); _slot = null;
             _slotWidth = 0;
             _slotHeight = 0;
+            _stalePixelStaging?.Dispose(); _stalePixelStaging = null;
+            _identicalPixelStreakStartTicks = 0;
+            _lastStaleLogTicks = 0;
+            _lastSampledPixel = 0;
             if (_textureRing is not null)
             {
                 for (var i = 0; i < _textureRing.Length; i++)
@@ -513,6 +542,10 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _attachedReceiver = receiver;
         receiver.FrameArrived += OnFrameArrived;
         receiver.TextureArrived += OnTextureArrived;
+        // Arm the App's UI-stall probe once a real video receiver
+        // is attached. Skips the startup XAML / theme stalls that
+        // dominate the log before any video flows.
+        VicoScreenShare.Desktop.App.App.VideoRenderActive = true;
         // Wire the session's shared MediaClock through to the paint
         // loop so A/V sync anchors at the actual first-paint moment.
         // Self-preview ICaptureSources don't carry one — that's fine,
@@ -523,7 +556,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             _paintLoop.SetMediaClock(streamReceiver.MediaClock);
         }
         DebugLog.Write(
-            $"[renderer] subscribed to FrameArrived + TextureArrived (receiver={receiver.GetType().Name})");
+            $"[renderer inst={_instanceId}] subscribed to FrameArrived + TextureArrived (receiver={receiver.GetType().Name} hash={receiver.GetHashCode():X8})");
     }
 
     private void DetachReceiver()
@@ -538,7 +571,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _attachedReceiver = null;
         _paintLoop.SetMediaClock(null);
         _playoutQueue.Clear();
-        DebugLog.Write("[renderer] unsubscribed FrameArrived + TextureArrived");
+        DebugLog.Write($"[renderer inst={_instanceId}] unsubscribed FrameArrived + TextureArrived");
     }
 
     private void AttachLocalSource(ICaptureSource source)
@@ -564,8 +597,15 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             "[renderer] unsubscribed ICaptureSource.FrameArrived + TextureArrived (local preview)");
     }
 
+    private long _onFrameFireCount;
+
     private void OnFrameArrived(in CaptureFrameData frame)
     {
+        var n = System.Threading.Interlocked.Increment(ref _onFrameFireCount);
+        if (n == 1)
+        {
+            DebugLog.Write($"[renderer-probe inst={_instanceId}] OnFrameArrived#1 {frame.Width}x{frame.Height} fmt={frame.Format} attachedReceiver={_attachedReceiver is not null} disposed={_disposed}");
+        }
         if (frame.Format != CaptureFramePixelFormat.Bgra8)
         {
             return;
@@ -605,18 +645,76 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         }
     }
 
+    private long _onTexFireCount;
+    private long _onTexLastTicks;
+    private long _onTexSpikeLogCount;
+
+    private long _onTexTotalSpikeCount;
+    private long _ringFullCount;
+    private long _onTexLockWaitSpikeCount;
+
     private void OnTextureArrived(IntPtr nativeTexture, int width, int height, TimeSpan timestamp)
     {
+        var n = System.Threading.Interlocked.Increment(ref _onTexFireCount);
+        var nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        var onTexEntryTicks = nowTicks;
+        if (n == 1)
+        {
+            DebugLog.Write($"[renderer-probe inst={_instanceId}] OnTextureArrived#1 nativeTexture={(nativeTexture == IntPtr.Zero ? "0" : "ptr")} {width}x{height} attachedReceiver={_attachedReceiver is not null} disposed={_disposed}");
+            _onTexLastTicks = nowTicks;
+        }
+        else
+        {
+            var sinceMs = (nowTicks - _onTexLastTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            _onTexLastTicks = nowTicks;
+            if (sinceMs > 30.0)
+            {
+                var s = ++_onTexSpikeLogCount;
+                if (s <= 200 || s % 50 == 0)
+                {
+                    DebugLog.Write($"[ontex-gap inst={_instanceId}] gap={sinceMs:F1}ms frame#{n} {width}x{height}");
+                }
+            }
+        }
         if (nativeTexture == IntPtr.Zero || width <= 0 || height <= 0)
         {
             return;
         }
 
+        // Self-balanced refcount: the decoder does NOT pre-AddRef the
+        // texture before fanning out via the receiver's TextureArrived
+        // event. Wrapping with `new ID3D11Texture2D(ptr)` does not
+        // AddRef on construction but DOES Release on dispose — so an
+        // explicit AddRef here pairs with the using-var Release for a
+        // net zero refcount delta from this consumer, regardless of
+        // how many other TextureArrived subscribers exist or whether
+        // they touch refcount. Wrap at the TOP of the function so
+        // every early return path (ring full, _disposed, init failure,
+        // null-guard, self-preview) disposes the wrapper and balances
+        // the AddRef.
+        using var sourceTexture = new ID3D11Texture2D(nativeTexture);
+        sourceTexture.AddRef();
+
         int slot;
         try
         {
+            // Layer 7b probe: same _renderLock from the OnTextureArrived
+            // direction. Catches contention where the decoder thread
+            // is the one waiting (e.g., painter is in PaintFromQueue
+            // doing CopyResource).
+            var lockT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             lock (_renderLock)
             {
+                var lockMs = (System.Diagnostics.Stopwatch.GetTimestamp() - lockT0) * 1000.0
+                    / System.Diagnostics.Stopwatch.Frequency;
+                if (lockMs > 5.0)
+                {
+                    var c = System.Threading.Interlocked.Increment(ref _onTexLockWaitSpikeCount);
+                    if (c <= 200 || c % 50 == 0)
+                    {
+                        DebugLog.Write($"[recv-l7b-ontex-lock inst={_instanceId}] decoder thread waited {lockMs:F1}ms for _renderLock");
+                    }
+                }
                 if (_disposed)
                 {
                     return;
@@ -636,8 +734,7 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                     {
                         return;
                     }
-                    using var previewSource = new ID3D11Texture2D(nativeTexture);
-                    _context!.CopyResource(_slot.D3D11Texture, previewSource);
+                    _context!.CopyResource(_slot.D3D11Texture, sourceTexture);
                     _context.Flush();
                     _hasPendingFrame = true;
                     ScaledFrameCount++;
@@ -650,13 +747,41 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                 slot = AcquireRingSlotLocked();
                 if (slot < 0)
                 {
+                    // Layer 5 probe: ring slot exhausted. Means the
+                    // painter hasn't released slots fast enough — a
+                    // direct symptom of the painter falling behind
+                    // before any visible queue starvation.
+                    var c = System.Threading.Interlocked.Increment(ref _ringFullCount);
+                    if (c <= 200 || c % 50 == 0)
+                    {
+                        DebugLog.Write($"[recv-l5-ringfull inst={_instanceId}] AcquireRingSlot returned -1 (painter behind); frame dropped");
+                    }
                     return;
                 }
 
                 EnsureRingSlotTextureLocked(slot, width, height);
 
-                using var sourceTexture = new ID3D11Texture2D(nativeTexture);
-                _context!.CopyResource(_textureRing![slot]!, sourceTexture);
+                // Pinpoint which null caused the NRE we keep seeing here.
+                // Each branch reports the SPECIFIC missing piece so the next
+                // log shows exactly which invariant broke instead of the
+                // bare "NullReferenceException" we have today.
+                if (_context is null)
+                {
+                    DebugLog.Write($"[renderer-bug] OnTextureArrived: _context is null after InitD3DLocked (slot={slot} {width}x{height})");
+                    return;
+                }
+                if (_textureRing is null)
+                {
+                    DebugLog.Write($"[renderer-bug] OnTextureArrived: _textureRing is null after AcquireRingSlotLocked (slot={slot})");
+                    return;
+                }
+                if (_textureRing[slot] is null)
+                {
+                    DebugLog.Write($"[renderer-bug] OnTextureArrived: _textureRing[{slot}] is null after EnsureRingSlotTextureLocked ({width}x{height})");
+                    return;
+                }
+
+                _context.CopyResource(_textureRing[slot]!, sourceTexture);
             }
         }
         catch (Exception ex)
@@ -674,7 +799,36 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             Timestamp: timestamp,
             TextureSlot: capturedSlot,
             OnDropped: () => ReleaseRingSlot(capturedSlot));
+
+        // Layer 6 probe: TimestampedFrameQueue.Push time. Push takes
+        // an internal lock and may fire the OnDropped of an overflow
+        // victim (which re-enters this renderer's ReleaseRingSlot).
+        // > 2 ms means meaningful contention, e.g., the painter is
+        // holding the queue lock during dequeue while we try to push.
+        var pushT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         _playoutQueue.Push(in queuedFrame);
+        var pushMs = (System.Diagnostics.Stopwatch.GetTimestamp() - pushT0) * 1000.0
+            / System.Diagnostics.Stopwatch.Frequency;
+        if (pushMs > 2.0)
+        {
+            DebugLog.Write($"[recv-l6-push inst={_instanceId}] Push={pushMs:F1}ms qDepthAfter={_playoutQueue.Count}");
+        }
+
+        // Layer 5b: total OnTextureArrived time. Includes lock
+        // acquire, ring slot acquire, EnsureRingSlotTextureLocked,
+        // CopyResource, queue Push. Ideally <2 ms; >5 ms means lock
+        // contention OR EnsureRingSlotTextureLocked is rebuilding a
+        // texture (cold path).
+        var onTexMs = (System.Diagnostics.Stopwatch.GetTimestamp() - onTexEntryTicks) * 1000.0
+            / System.Diagnostics.Stopwatch.Frequency;
+        if (onTexMs > 5.0)
+        {
+            var c = System.Threading.Interlocked.Increment(ref _onTexTotalSpikeCount);
+            if (c <= 200 || c % 50 == 0)
+            {
+                DebugLog.Write($"[recv-l5-ontex inst={_instanceId}] total={onTexMs:F1}ms slot={capturedSlot} {width}x{height}");
+            }
+        }
     }
 
     /// <summary>
@@ -693,8 +847,20 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             var slot = frame.TextureSlot;
             try
             {
+                // Layer 7 probe: _renderLock acquire wait. The painter
+                // thread shares this lock with the decoder's
+                // OnTextureArrived path. If OnTextureArrived holds the
+                // lock during a slow CopyResource, the painter waits
+                // here. > 5 ms wait = real cross-thread contention.
+                var lockT0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 lock (_renderLock)
                 {
+                    var lockMs = (System.Diagnostics.Stopwatch.GetTimestamp() - lockT0) * 1000.0
+                        / System.Diagnostics.Stopwatch.Frequency;
+                    if (lockMs > 5.0)
+                    {
+                        DebugLog.Write($"[recv-l7-renderlock inst={_instanceId}] paint thread waited {lockMs:F1}ms for _renderLock (decoder thread holding?)");
+                    }
                     if (_disposed || _textureRing is null || _textureRing[slot] is null)
                     {
                         return;
@@ -708,8 +874,49 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                     {
                         return;
                     }
-                    _context!.CopyResource(_slot.D3D11Texture, _textureRing[slot]!);
+                    if (_context is null)
+                    {
+                        DebugLog.Write($"[renderer-bug] PaintFromQueue: _context is null (slot={slot} {frame.Width}x{frame.Height})");
+                        return;
+                    }
+                    var ringTex = _textureRing[slot];
+                    if (ringTex is null)
+                    {
+                        DebugLog.Write($"[renderer-bug] PaintFromQueue: _textureRing[{slot}] became null between guard and use");
+                        return;
+                    }
+                    if (_slot.D3D11Texture is null)
+                    {
+                        DebugLog.Write($"[renderer-bug] PaintFromQueue: _slot.D3D11Texture is null after EnsureSlotLocked ({frame.Width}x{frame.Height})");
+                        return;
+                    }
+                    // Split timing: CopyResource queues a GPU command
+                    // (typically <0.1 ms) but blocks at submit if the
+                    // destination is still being read by a prior GPU op
+                    // (e.g., WPF compositor presenting the previous
+                    // frame from this ring slot, or another thread
+                    // holding the immediate context). Flush submits
+                    // queued commands and blocks if the GPU command
+                    // queue is back-pressured. Splitting tells us
+                    // which: a 60 ms copyResource means a wait-on-prior;
+                    // a 60 ms flush means GPU overloaded.
+                    var copyT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    _context.CopyResource(_slot.D3D11Texture, ringTex);
+                    var copyMidTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                     _context.Flush();
+                    var copyEndTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var copyResMs = (copyMidTicks - copyT0) * 1000.0
+                        / System.Diagnostics.Stopwatch.Frequency;
+                    var flushMs = (copyEndTicks - copyMidTicks) * 1000.0
+                        / System.Diagnostics.Stopwatch.Frequency;
+                    var copyMs = copyResMs + flushMs;
+                    if (copyMs > 5.0)
+                    {
+                        var gen0 = GC.CollectionCount(0);
+                        var gen1 = GC.CollectionCount(1);
+                        var gen2 = GC.CollectionCount(2);
+                        DebugLog.Write($"[gpu-copy-spike inst={_instanceId}] copyResource={copyResMs:F1}ms flush={flushMs:F1}ms slot={slot} size={frame.Width}x{frame.Height} gen0={gen0} gen1={gen1} gen2={gen2}");
+                    }
                     _hasPendingFrame = true;
                     ScaledFrameCount++;
                     ScheduleExposeLocked();
@@ -841,6 +1048,8 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     /// dispatcher call picks up whichever frame is freshest when it
     /// actually runs. Called under <see cref="_renderLock"/>.
     /// </summary>
+    private long _scheduleExposeTicks;
+
     private void ScheduleExposeLocked()
     {
         if (_exposeQueued)
@@ -848,6 +1057,10 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             return;
         }
         _exposeQueued = true;
+        // Capture the moment we asked the UI thread to paint. The actual
+        // ExposePendingFrame run on the dispatcher logs the queue→run
+        // latency; a high value means UI-thread contention.
+        _scheduleExposeTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         // Render priority is WPF's "the visual tree has changed,
         // paint on the next tick" tier — the right level for a
         // video frame exposure. Send (which preempts Input and
@@ -855,8 +1068,39 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(ExposePendingFrame));
     }
 
+    private long _expoLastTicks;
+    private long _expoLogCount;
+    private int _expoLastGcGen0;
+    private int _expoLastGcGen1;
+    private int _expoLastGcGen2;
+
     private void ExposePendingFrame()
     {
+        var enterTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        var queueLatencyMs = (enterTicks - _scheduleExposeTicks) * 1000.0
+            / System.Diagnostics.Stopwatch.Frequency;
+        var sinceLastExpoMs = _expoLastTicks == 0
+            ? 0.0
+            : (enterTicks - _expoLastTicks) * 1000.0
+              / System.Diagnostics.Stopwatch.Frequency;
+        _expoLastTicks = enterTicks;
+        // Capture GC counts at expose entry. Diff against the previous
+        // expose tells us if a Gen0/1/2 collection happened during the
+        // gap. A Gen2 collection on the UI thread can pause for tens
+        // to hundreds of ms — visible as a queueLatency spike with
+        // gen2Delta>0. Background GC modes only stop-the-world for
+        // pin/compact phases, but those are still the relevant cause
+        // when the spike correlates.
+        var gen0 = GC.CollectionCount(0);
+        var gen1 = GC.CollectionCount(1);
+        var gen2 = GC.CollectionCount(2);
+        var gen0Delta = gen0 - _expoLastGcGen0;
+        var gen1Delta = gen1 - _expoLastGcGen1;
+        var gen2Delta = gen2 - _expoLastGcGen2;
+        _expoLastGcGen0 = gen0;
+        _expoLastGcGen1 = gen1;
+        _expoLastGcGen2 = gen2;
+
         lock (_renderLock)
         {
             _exposeQueued = false;
@@ -872,9 +1116,17 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             _hasPendingFrame = false;
 
             var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            long lockMs = 0, addRectMs = 0, unlockMs = 0;
             try
             {
+                // Layer 8 probe: split D3DImage timings. Lock blocks
+                // when WPF's render thread is currently presenting
+                // from the back buffer; AddDirtyRect schedules the
+                // composite; Unlock releases the surface. Each step
+                // can independently spike under GPU contention.
+                var lt0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 _d3dImage.Lock();
+                lockMs = System.Diagnostics.Stopwatch.GetTimestamp() - lt0;
                 if (!_slotAttached)
                 {
                     _d3dImage.SetBackBuffer(
@@ -882,8 +1134,11 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
                         _slot.D3D9Surface.NativePointer);
                     _slotAttached = true;
                 }
+                var rt0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 _d3dImage.AddDirtyRect(new Int32Rect(0, 0, _slot.Width, _slot.Height));
+                addRectMs = System.Diagnostics.Stopwatch.GetTimestamp() - rt0;
                 ExposedFrameCount++;
+                ProbeStalePixel();
             }
             catch (Exception ex)
             {
@@ -893,10 +1148,137 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
             }
             finally
             {
+                var ut0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 try { _d3dImage.Unlock(); } catch (Exception) { }
+                unlockMs = System.Diagnostics.Stopwatch.GetTimestamp() - ut0;
             }
             LastPaintMs = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0
                 / System.Diagnostics.Stopwatch.Frequency;
+            var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+            var lockMsF = lockMs * 1000.0 / freq;
+            var addRectMsF = addRectMs * 1000.0 / freq;
+            var unlockMsF = unlockMs * 1000.0 / freq;
+            if (lockMsF > 3.0 || addRectMsF > 3.0 || unlockMsF > 3.0)
+            {
+                DebugLog.Write($"[recv-l8-d3dimg inst={_instanceId}] Lock={lockMsF:F1}ms AddRect={addRectMsF:F1}ms Unlock={unlockMsF:F1}ms");
+            }
+
+            // Hot-path diagnostic. UI-thread Render priority should run
+            // ScheduleExposeLocked → ExposePendingFrame in <16 ms. If
+            // queueLatency > 30 ms, the UI thread is blocked. If
+            // sinceLastExpo > 30 ms, the visible refresh skipped a beat —
+            // exactly what the user perceives as stutter.
+            if (queueLatencyMs > 30.0 || sinceLastExpoMs > 30.0 || LastPaintMs > 10.0)
+            {
+                var n = ++_expoLogCount;
+                if (n <= 200 || n % 50 == 0)
+                {
+                    DebugLog.Write(
+                        $"[expose-spike inst={_instanceId}] queueLatency={queueLatencyMs:F1}ms sinceLastExpo={sinceLastExpoMs:F1}ms paint={LastPaintMs:F1}ms gcGen0={gen0Delta} gcGen1={gen1Delta} gcGen2={gen2Delta}");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 1×1 BGRA readback of the slot's center pixel right after
+    /// AddDirtyRect. If the value repeats for &gt;<see cref="StalePixelLogMs"/>
+    /// while ExposedFrameCount keeps ticking, we're posting identical
+    /// pixels to WPF many times per second — visible as a "frozen"
+    /// image even though the paint loop reports healthy. Logs the
+    /// duration of each detected stale window so we can tell whether
+    /// what the user sees as a multi-second freeze is actually that
+    /// (vs WPF compose stalls or pipeline downstream of WPF).
+    /// </summary>
+    private void ProbeStalePixel()
+    {
+        if (_slot is null || _context is null) { return; }
+        try
+        {
+            if (_stalePixelStaging is null)
+            {
+                _stalePixelStaging = _device!.CreateTexture2D(new Texture2DDescription
+                {
+                    Width = 1,
+                    Height = 1,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CPUAccessFlags = CpuAccessFlags.Read,
+                    MiscFlags = ResourceOptionFlags.None,
+                });
+            }
+            var cx = _slot.Width / 2;
+            var cy = _slot.Height / 2;
+            _context.CopySubresourceRegion(
+                _stalePixelStaging, 0, 0, 0, 0,
+                _slot.D3D11Texture, 0,
+                new Vortice.Mathematics.Box(cx, cy, 0, cx + 1, cy + 1, 1));
+            var mapped = _context.Map(_stalePixelStaging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            uint pixel;
+            unsafe
+            {
+                pixel = *(uint*)mapped.DataPointer.ToPointer();
+            }
+            _context.Unmap(_stalePixelStaging, 0);
+
+            var nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+            if (pixel == _lastSampledPixel)
+            {
+                if (_identicalPixelStreakStartTicks == 0)
+                {
+                    _identicalPixelStreakStartTicks = nowTicks;
+                }
+                else
+                {
+                    var streakMs = (nowTicks - _identicalPixelStreakStartTicks) * 1000.0 / freq;
+                    var sinceLastLogMs = (nowTicks - _lastStaleLogTicks) * 1000.0 / freq;
+                    if (streakMs >= StalePixelLogMs
+                        && (_lastStaleLogTicks == 0 || sinceLastLogMs >= StalePixelRelogIntervalMs))
+                    {
+                        var n = ++_stalePixelLogCount;
+                        DebugLog.Write(
+                            $"[paint-stale inst={_instanceId}] center pixel 0x{pixel:X8} unchanged for {streakMs:F0}ms (streak #{n})");
+                        _lastStaleLogTicks = nowTicks;
+                        // Trigger upstream PLI: the decoder is producing
+                        // identical pixels — reference state is poisoned
+                        // and no error surfaced, so PLI is the only way
+                        // out. StreamReceiver's debounce caps this at
+                        // one PLI per 500ms regardless of how often the
+                        // probe fires, so the relog interval (1s) is
+                        // strictly slower than the debounce.
+                        if (Receiver is VicoScreenShare.Client.Media.StreamReceiver sr)
+                        {
+                            sr.RequestKeyframeFromRenderer($"paint-stale {streakMs:F0}ms");
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (_identicalPixelStreakStartTicks != 0 && _lastStaleLogTicks != 0)
+                {
+                    // Fired at end of a logged streak so we can see how
+                    // long the freeze actually lasted.
+                    var totalMs = (nowTicks - _identicalPixelStreakStartTicks) * 1000.0 / freq;
+                    if (totalMs >= StalePixelLogMs)
+                    {
+                        DebugLog.Write(
+                            $"[paint-stale-end inst={_instanceId}] pixel changed to 0x{pixel:X8}, streak lasted {totalMs:F0}ms");
+                    }
+                }
+                _identicalPixelStreakStartTicks = 0;
+                _lastStaleLogTicks = 0;
+                _lastSampledPixel = pixel;
+            }
+        }
+        catch
+        {
+            // Diagnostic must not crash the paint path.
         }
     }
 

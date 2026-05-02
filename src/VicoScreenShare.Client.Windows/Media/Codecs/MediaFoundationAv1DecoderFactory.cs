@@ -45,4 +45,7 @@ public sealed class MediaFoundationAv1DecoderFactory : IVideoDecoderFactory
     }
 
     public IVideoDecoder CreateDecoder() => new MediaFoundationAv1Decoder(_sharedDevice);
+
+    public IVideoDecoder CreateDecoder(int width, int height)
+        => new MediaFoundationAv1Decoder(_sharedDevice, width, height);
 }

@@ -43,7 +43,32 @@ public sealed record StreamStarted(
     string StreamId,
     StreamKind Kind,
     bool HasAudio,
-    int NominalFrameRate);
+    int NominalFrameRate,
+    /// <summary>
+    /// Wire codec identifier the publisher is using, matching
+    /// <c>VicoScreenShare.Client.Media.Codecs.VideoCodec</c>:
+    /// 0=Vp8, 1=H264, 2=Av1. Receivers use this to pick a decoder
+    /// factory matching the publisher's codec — without it, when
+    /// peers run different codecs the viewer feeds the publisher's
+    /// bytes through the wrong decoder and produces no output.
+    /// Defaults to 1 (H264) for backwards compatibility with older
+    /// senders that didn't include the field.
+    /// </summary>
+    int Codec = 1,
+    /// <summary>
+    /// Encoded video frame width in pixels. Receivers pass this to
+    /// the video decoder factory's dimensioned-construct overload so
+    /// the underlying decoder MFT (notably MS AV1) can pre-negotiate
+    /// at the correct resolution and skip the STREAM_CHANGE round-
+    /// trip that would otherwise drop the first IDR and cost ~1 s of
+    /// black at session start. 0 means "unknown" and the decoder
+    /// falls back to its default placeholder size.
+    /// </summary>
+    int Width = 0,
+    /// <summary>
+    /// Encoded video frame height in pixels. See <see cref="Width"/>.
+    /// </summary>
+    int Height = 0);
 
 public sealed record StreamEnded(Guid PeerId, string StreamId);
 
