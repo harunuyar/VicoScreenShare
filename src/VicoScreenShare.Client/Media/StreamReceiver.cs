@@ -210,9 +210,19 @@ public sealed class StreamReceiver : ICaptureSource, IDisposable
         // MFT pre-negotiates at this size and skips the STREAM_CHANGE
         // round-trip on the first IDR; other decoders' default impls
         // ignore the hint and fall back to the no-arg construct.
-        _decoder = (videoWidth > 0 && videoHeight > 0)
-            ? decoderFactory.CreateDecoder(videoWidth, videoHeight)
-            : decoderFactory.CreateDecoder();
+        DebugLog.Write($"[recv {DisplayName}] decoder-ctor entry — factory={decoderFactory.GetType().Name} codec={decoderFactory.Codec} hint={videoWidth}x{videoHeight}");
+        try
+        {
+            _decoder = (videoWidth > 0 && videoHeight > 0)
+                ? decoderFactory.CreateDecoder(videoWidth, videoHeight)
+                : decoderFactory.CreateDecoder();
+            DebugLog.Write($"[recv {DisplayName}] decoder-ctor done — type={_decoder.GetType().Name} codec={_decoder.Codec}");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[recv {DisplayName}] decoder-ctor threw: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+            throw;
+        }
         _isAv1 = _decoder.Codec == VideoCodec.Av1;
         // Opt the decoder into GPU-resident output. Decoders that don't
         // support it (VPX, and MF decoders with no shared D3D device) use

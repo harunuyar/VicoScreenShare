@@ -35,9 +35,10 @@ public static class ClientHost
 
     /// <summary>
     /// Hook so the host can register additional codec factories AFTER
-    /// the debug log has been reset. Any log lines written during codec
-    /// probing survive into the session's log file instead of being
-    /// wiped by an early <see cref="Diagnostics.DebugLog.Reset"/>.
+    /// the debug log has rotated (if needed) at startup. Any log lines
+    /// written during codec probing land in the active log file
+    /// alongside subsequent session lines. See
+    /// <see cref="Diagnostics.DebugLog.RotateIfOversized"/>.
     /// </summary>
     public static Action<VideoCodecCatalog>? RegisterAdditionalCodecs { get; set; }
 

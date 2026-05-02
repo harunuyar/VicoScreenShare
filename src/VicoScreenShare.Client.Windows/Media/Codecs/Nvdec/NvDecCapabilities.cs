@@ -75,10 +75,19 @@ public sealed class NvDecCapabilities
                 return caps;
             }
 
-            var ctxResult = NvDecApi.CuCtxCreate(out var context, NvDecApi.CU_CTX_SCHED_AUTO, device);
+            // Use the device's primary CUDA context (shared across
+            // every NVDEC code path in this process) instead of a
+            // floating context. cuCtxCreate + cuCtxDestroy in a probe
+            // followed by another cuCtxCreate in the decoder ctor was
+            // the documented cause of intermittent native AVs in
+            // cuCtxCreate on Windows. Primary contexts are refcounted
+            // by the driver — Retain bumps, Release decrements; the
+            // driver only tears the context down when the last
+            // refcount drops, so there's no destroy/recreate race.
+            var ctxResult = NvDecApi.CuDevicePrimaryCtxRetain(out _, device);
             if (ctxResult != NvDecApi.CUresult.CUDA_SUCCESS)
             {
-                DebugLog.Write($"[nvdec] cuCtxCreate returned {ctxResult}");
+                DebugLog.Write($"[nvdec] cuDevicePrimaryCtxRetain returned {ctxResult}");
                 return caps;
             }
 
@@ -161,7 +170,12 @@ public sealed class NvDecCapabilities
             }
             finally
             {
-                try { NvDecApi.CuCtxDestroy(context); } catch { }
+                // Release the primary context refcount. The driver
+                // keeps the context alive as long as at least one
+                // retainer (e.g. an NvDecAv1Decoder) still holds a
+                // reference; if Probe is the only retainer the
+                // context is torn down on this Release.
+                try { NvDecApi.CuDevicePrimaryCtxRelease(device); } catch { }
             }
         }
         catch (DllNotFoundException ex)

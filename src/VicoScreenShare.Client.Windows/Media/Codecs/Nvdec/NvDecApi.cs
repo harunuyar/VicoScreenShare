@@ -366,6 +366,30 @@ public static partial class NvDecApi
     [LibraryImport(CudaDll, EntryPoint = "cuCtxDestroy_v2")]
     public static partial CUresult CuCtxDestroy(CUcontext ctx);
 
+    /// <summary>
+    /// Retain a refcounted reference to the device's primary CUDA
+    /// context. Unlike <see cref="CuCtxCreate"/> this does NOT create a
+    /// new floating context; instead it returns the device's
+    /// driver-managed primary context (creating it on first call) and
+    /// bumps its refcount. Safe to call multiple times from the same
+    /// process — every code path that needs a CUDA context can retain
+    /// and the driver hands back the same one. Pair every Retain with
+    /// a <see cref="CuDevicePrimaryCtxRelease"/> on dispose.
+    ///
+    /// Why we use this instead of cuCtxCreate: floating contexts have a
+    /// known intermittent-AV failure mode on Windows when one floating
+    /// context is destroyed and another is created on the same device
+    /// while D3D11 work is happening concurrently. Switching the probe
+    /// and the decoders to share the primary context eliminates the
+    /// destroy/recreate cycle and the driver race that was the root
+    /// cause of "[nvdec-av1-init] cuCtxCreate" crashes in the field.
+    /// </summary>
+    [LibraryImport(CudaDll, EntryPoint = "cuDevicePrimaryCtxRetain")]
+    public static partial CUresult CuDevicePrimaryCtxRetain(out CUcontext pctx, CUdevice dev);
+
+    [LibraryImport(CudaDll, EntryPoint = "cuDevicePrimaryCtxRelease_v2")]
+    public static partial CUresult CuDevicePrimaryCtxRelease(CUdevice dev);
+
     [LibraryImport(CudaDll, EntryPoint = "cuCtxPushCurrent_v2")]
     public static partial CUresult CuCtxPushCurrent(CUcontext ctx);
 

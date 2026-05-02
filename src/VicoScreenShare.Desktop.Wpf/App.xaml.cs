@@ -34,8 +34,56 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        DebugLog.Reset();
+        DebugLog.RotateIfOversized();
         DebugLog.Write($"== ScreenSharing (WPF) start @ {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==");
+
+        // Wire unhandled-exception handlers FIRST. Without these, an
+        // exception on the WPF dispatcher or any background thread
+        // crashes the process silently — no [crash] line, no stack
+        // trace, just a vanished window. This is the diagnostic gap
+        // that hid the actual crash cause from the previous session
+        // log. Each handler writes a fat log entry (type, message,
+        // full stack trace, inner exception chain) and DebugLog.Write
+        // synchronously flushes via File.AppendAllText so the line
+        // hits disk before the process dies.
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            // Fires for any unhandled exception on any non-UI thread,
+            // and for UI-thread exceptions DispatcherUnhandledException
+            // didn't mark Handled. Process is terminating after this.
+            try
+            {
+                var ex = args.ExceptionObject as Exception;
+                DebugLog.Write($"[crash] AppDomain.UnhandledException terminating={args.IsTerminating} {FormatException(ex)}");
+            }
+            catch { /* nothing useful to do if logging itself throws */ }
+        };
+        DispatcherUnhandledException += (_, args) =>
+        {
+            // Fires for exceptions on the WPF dispatcher (UI thread).
+            // Default WPF behavior tears down the process; we don't
+            // override Handled because limping along after a UI-thread
+            // exception is worse than crashing — but we DO log first
+            // so testers can send the file and we can fix the cause.
+            try
+            {
+                DebugLog.Write($"[crash] DispatcherUnhandledException {FormatException(args.Exception)}");
+            }
+            catch { }
+        };
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            // Fires when an unawaited Task with a thrown exception is
+            // GC'd. In .NET Core+ this used to crash the process; now
+            // it's silently swallowed by default — even worse for
+            // diagnostics. Log + observe to suppress further escalation.
+            try
+            {
+                DebugLog.Write($"[crash] TaskScheduler.UnobservedTaskException {FormatException(args.Exception)}");
+                args.SetObserved();
+            }
+            catch { }
+        };
 
         // Opt this process out of Windows background-process throttling as
         // early as possible — before any media thread starts. See
@@ -136,7 +184,55 @@ public partial class App : Application
 
         StartDispatcherStallProbe();
         StartWpfRenderTickProbe();
-        base.OnStartup(e);
+        try
+        {
+            base.OnStartup(e);
+            // Last sentinel of the OnStartup pipeline. Its absence in a
+            // log means the WPF startup window (StartupUri) failed to
+            // construct or show — narrow down to that pipeline rather
+            // than guessing.
+            DebugLog.Write("[startup-window] WPF startup completed (window construction + show)");
+        }
+        catch (Exception ex)
+        {
+            // base.OnStartup throws if MainWindow XAML parse fails,
+            // DI resolution throws, etc. Without this catch the
+            // exception goes to DispatcherUnhandledException (now
+            // logged) — but logging here too means we know it
+            // originated in startup vs. later.
+            DebugLog.Write($"[crash] base.OnStartup threw: {FormatException(ex)}");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Render an exception (and its inner-exception chain) into a single
+    /// log-friendly multi-line string. Type, message, and stack trace
+    /// for each frame in the chain. Used by the unhandled-exception
+    /// handlers wired in <see cref="OnStartup"/>; a tester sending us
+    /// the debug log gets enough to diagnose without a full minidump.
+    /// </summary>
+    private static string FormatException(Exception? ex)
+    {
+        if (ex is null)
+        {
+            return "(null exception object)";
+        }
+        var sb = new System.Text.StringBuilder();
+        var indent = "";
+        for (var cur = ex; cur is not null; cur = cur.InnerException)
+        {
+            sb.Append(indent);
+            sb.Append(cur.GetType().FullName);
+            sb.Append(": ");
+            sb.AppendLine(cur.Message);
+            if (!string.IsNullOrEmpty(cur.StackTrace))
+            {
+                sb.AppendLine(cur.StackTrace);
+            }
+            indent += "  ---> ";
+        }
+        return sb.ToString();
     }
 
     /// <summary>

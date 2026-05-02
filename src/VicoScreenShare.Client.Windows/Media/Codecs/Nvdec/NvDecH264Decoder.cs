@@ -67,6 +67,8 @@ public sealed class NvDecH264Decoder : IVideoDecoder
     private readonly int _initHintHeight;
 
     private NvDecApi.CUcontext _cuContext;
+    private NvDecApi.CUdevice _cuDevice;        // Pair-key for PrimaryCtxRelease in Dispose.
+    private bool _retainedPrimaryCtx;
     private NvDecApi.CUvideoctxlock _ctxLock;
     private NvDecApi.CUvideoparser _parser;
     private NvDecApi.CUvideodecoder _decoder;
@@ -120,9 +122,19 @@ public sealed class NvDecH264Decoder : IVideoDecoder
             throw new InvalidOperationException("NVDEC H.264 decoder is not available on this host (cuvidGetDecoderCaps reported unsupported)");
         }
 
+        // Sentinel — see NvdecCrashSentinel; mirror of the AV1 path.
+        NvdecCrashSentinel.MarkAttempt("h264");
+        DebugLog.Write("[nvdec-h264-init] cuInit");
         ThrowOnCudaError(NvDecApi.CuInit(0), "cuInit");
-        ThrowOnCudaError(NvDecApi.CuDeviceGet(out var cudaDevice, 0), "cuDeviceGet");
-        ThrowOnCudaError(NvDecApi.CuCtxCreate(out _cuContext, NvDecApi.CU_CTX_SCHED_AUTO, cudaDevice), "cuCtxCreate");
+        DebugLog.Write("[nvdec-h264-init] cuDeviceGet");
+        ThrowOnCudaError(NvDecApi.CuDeviceGet(out _cuDevice, 0), "cuDeviceGet");
+        // Primary-context retain — see NvDecAv1Decoder for the rationale
+        // (avoids the floating-context destroy/recreate race that AV'd
+        // intermittently on the NVIDIA Windows driver).
+        DebugLog.Write("[nvdec-h264-init] cuDevicePrimaryCtxRetain");
+        ThrowOnCudaError(NvDecApi.CuDevicePrimaryCtxRetain(out _cuContext, _cuDevice), "cuDevicePrimaryCtxRetain");
+        _retainedPrimaryCtx = true;
+        DebugLog.Write("[nvdec-h264-init] cuvidCtxLockCreate");
         ThrowOnCudaError(NvDecApi.CuvidCtxLockCreate(out _ctxLock, _cuContext), "cuvidCtxLockCreate");
 
         _selfHandle = GCHandle.Alloc(this);
@@ -153,8 +165,10 @@ public sealed class NvDecH264Decoder : IVideoDecoder
             pExtVideoInfo = IntPtr.Zero,
         };
 
+        DebugLog.Write("[nvdec-h264-init] cuvidCreateVideoParser");
         ThrowOnCudaError(NvDecApi.CuvidCreateVideoParser(out _parser, ref parserParams), "cuvidCreateVideoParser");
 
+        NvdecCrashSentinel.ClearAttempt("h264");
         DebugLog.Write($"[nvdec-h264] decoder initialized (hintDims={hintWidth}x{hintHeight}, max={caps.H264MaxWidth}x{caps.H264MaxHeight}, engines={caps.H264NumNvdecs})");
     }
 
@@ -587,9 +601,10 @@ public sealed class NvDecH264Decoder : IVideoDecoder
             try { NvDecApi.CuvidCtxLockDestroy(_ctxLock); } catch { }
             _ctxLock = default;
         }
-        if (!_cuContext.IsZero)
+        if (_retainedPrimaryCtx)
         {
-            try { NvDecApi.CuCtxDestroy(_cuContext); } catch { }
+            try { NvDecApi.CuDevicePrimaryCtxRelease(_cuDevice); } catch { }
+            _retainedPrimaryCtx = false;
             _cuContext = default;
         }
         if (_selfHandle.IsAllocated)

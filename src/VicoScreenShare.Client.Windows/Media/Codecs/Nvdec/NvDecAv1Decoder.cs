@@ -76,6 +76,8 @@ public sealed class NvDecAv1Decoder : IVideoDecoder
     private readonly int _initHintHeight;
 
     private NvDecApi.CUcontext _cuContext;
+    private NvDecApi.CUdevice _cuDevice;        // Held so Dispose can pair PrimaryCtxRelease.
+    private bool _retainedPrimaryCtx;           // True after a successful PrimaryCtxRetain.
     private NvDecApi.CUvideoctxlock _ctxLock;
     private NvDecApi.CUvideoparser _parser;
     private NvDecApi.CUvideodecoder _decoder;
@@ -164,9 +166,29 @@ public sealed class NvDecAv1Decoder : IVideoDecoder
         // host targeting a specific D3D11 adapter, we'd use
         // cuD3D11GetDevice with the device's parent IDXGIAdapter; that
         // refinement is a follow-up — most receivers run on a single GPU.
+        // Per-step breadcrumbs so a native AV (which bypasses managed
+        // exception handlers and crashes the process silently) is at
+        // least pinpointable to a specific cuvid/CUDA call.
+        // The crash sentinel is written before every cuvid call we
+        // know to occasionally AV (cuvidCreateVideoParser is the
+        // documented offender) and cleared on the way out — see
+        // NvdecCrashSentinel for the recovery flow.
+        NvdecCrashSentinel.MarkAttempt("av1");
+        DebugLog.Write("[nvdec-av1-init] cuInit");
         ThrowOnCudaError(NvDecApi.CuInit(0), "cuInit");
-        ThrowOnCudaError(NvDecApi.CuDeviceGet(out var cudaDevice, 0), "cuDeviceGet");
-        ThrowOnCudaError(NvDecApi.CuCtxCreate(out _cuContext, NvDecApi.CU_CTX_SCHED_AUTO, cudaDevice), "cuCtxCreate");
+        DebugLog.Write("[nvdec-av1-init] cuDeviceGet");
+        ThrowOnCudaError(NvDecApi.CuDeviceGet(out _cuDevice, 0), "cuDeviceGet");
+        // Retain the device's primary CUDA context (refcounted shared
+        // singleton managed by the driver) instead of creating a new
+        // floating context. cuCtxCreate after a previous cuCtxDestroy
+        // intermittently AV'd on the NVIDIA Windows driver while D3D11
+        // work was in flight on the same GPU; primary contexts have no
+        // destroy/recreate cycle and the driver hands every retainer
+        // the same handle.
+        DebugLog.Write("[nvdec-av1-init] cuDevicePrimaryCtxRetain");
+        ThrowOnCudaError(NvDecApi.CuDevicePrimaryCtxRetain(out _cuContext, _cuDevice), "cuDevicePrimaryCtxRetain");
+        _retainedPrimaryCtx = true;
+        DebugLog.Write("[nvdec-av1-init] cuvidCtxLockCreate");
         ThrowOnCudaError(NvDecApi.CuvidCtxLockCreate(out _ctxLock, _cuContext), "cuvidCtxLockCreate");
 
         _selfHandle = GCHandle.Alloc(this);
@@ -200,8 +222,12 @@ public sealed class NvDecAv1Decoder : IVideoDecoder
             pExtVideoInfo = IntPtr.Zero,
         };
 
+        DebugLog.Write("[nvdec-av1-init] cuvidCreateVideoParser");
         ThrowOnCudaError(NvDecApi.CuvidCreateVideoParser(out _parser, ref parserParams), "cuvidCreateVideoParser");
 
+        // We made it past every cuvid call known to AV. Clear the
+        // sentinel so the next launch retries NVDEC normally.
+        NvdecCrashSentinel.ClearAttempt("av1");
         DebugLog.Write($"[nvdec] AV1 decoder initialized (hintDims={hintWidth}x{hintHeight}, max={caps.Av1MaxWidth}x{caps.Av1MaxHeight}, engines={caps.Av1NumNvdecs})");
     }
 
@@ -715,9 +741,13 @@ public sealed class NvDecAv1Decoder : IVideoDecoder
             try { NvDecApi.CuvidCtxLockDestroy(_ctxLock); } catch { }
             _ctxLock = default;
         }
-        if (!_cuContext.IsZero)
+        if (_retainedPrimaryCtx)
         {
-            try { NvDecApi.CuCtxDestroy(_cuContext); } catch { }
+            // Release the primary context refcount we took at ctor.
+            // Driver decrements; keeps the context alive if any other
+            // retainer (another decoder, the probe) still holds a ref.
+            try { NvDecApi.CuDevicePrimaryCtxRelease(_cuDevice); } catch { }
+            _retainedPrimaryCtx = false;
             _cuContext = default;
         }
         if (_selfHandle.IsAllocated)

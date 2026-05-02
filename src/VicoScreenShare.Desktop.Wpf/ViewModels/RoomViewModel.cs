@@ -665,24 +665,37 @@ public sealed partial class RoomViewModel : ViewModelBase
         var audioRenderer = ClientHost.AudioRendererFactory?.Invoke();
         var audioDecoderFactory = audioRenderer is not null ? ClientHost.AudioDecoderFactory : null;
 
-        var session = new SubscriberSession(
-            _signaling,
-            publisherPeerId,
-            decoderFactory,
-            displayName: displayName,
-            iceServers: _iceServers,
-            audioDecoderFactory: audioDecoderFactory,
-            audioRenderer: audioRenderer,
-            videoWidth: publisherDims.Width,
-            videoHeight: publisherDims.Height);
-
+        DebugLog.Write($"[room] subscriber-ctor entry — peer={publisherPeerId:N} {publisherDims.Width}x{publisherDims.Height} audioRenderer={(audioRenderer is null ? "no" : "yes")}");
+        SubscriberSession session;
         try
         {
-            await session.AcceptOfferAsync(offerSdp).ConfigureAwait(true);
+            session = new SubscriberSession(
+                _signaling,
+                publisherPeerId,
+                decoderFactory,
+                displayName: displayName,
+                iceServers: _iceServers,
+                audioDecoderFactory: audioDecoderFactory,
+                audioRenderer: audioRenderer,
+                videoWidth: publisherDims.Width,
+                videoHeight: publisherDims.Height);
+            DebugLog.Write($"[room] subscriber-ctor done — peer={publisherPeerId:N}");
         }
         catch (Exception ex)
         {
-            DebugLog.Write($"[room] subscriber offer for {publisherPeerId:N} failed: {ex.Message}");
+            DebugLog.Write($"[room] subscriber-ctor threw — peer={publisherPeerId:N}: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+            throw;
+        }
+
+        try
+        {
+            DebugLog.Write($"[room] subscriber-AcceptOffer entry — peer={publisherPeerId:N} sdpLen={offerSdp?.Length ?? 0}");
+            await session.AcceptOfferAsync(offerSdp).ConfigureAwait(true);
+            DebugLog.Write($"[room] subscriber-AcceptOffer done — peer={publisherPeerId:N}");
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[room] subscriber offer for {publisherPeerId:N} failed: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
             try { await session.DisposeAsync().ConfigureAwait(true); } catch { }
             return;
         }

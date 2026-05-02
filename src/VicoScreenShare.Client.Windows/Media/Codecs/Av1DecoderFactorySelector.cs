@@ -44,21 +44,51 @@ public sealed class Av1DecoderFactorySelector : IVideoDecoderFactory
     /// against capabilities) is the NVDEC path.</summary>
     public bool IsNvdecActive => ResolveBackend() == Av1DecoderBackend.Nvdec;
 
-    private Av1DecoderBackend ResolveBackend() => Backend switch
+    private Av1DecoderBackend ResolveBackend()
     {
-        Av1DecoderBackend.Mft => Av1DecoderBackend.Mft,
-        Av1DecoderBackend.Nvdec => _nvdec.IsAvailable ? Av1DecoderBackend.Nvdec : Av1DecoderBackend.Mft,
-        _ => _nvdec.IsAvailable ? Av1DecoderBackend.Nvdec : Av1DecoderBackend.Mft, // Auto
-    };
+        // Crash-sentinel override: if last launch died inside cuvid,
+        // pretend NVDEC isn't available for the rest of resolution.
+        var nvdecOk = _nvdec.IsAvailable && !_disableNvdecThisSession;
+        return Backend switch
+        {
+            Av1DecoderBackend.Mft => Av1DecoderBackend.Mft,
+            Av1DecoderBackend.Nvdec => nvdecOk ? Av1DecoderBackend.Nvdec : Av1DecoderBackend.Mft,
+            _ => nvdecOk ? Av1DecoderBackend.Nvdec : Av1DecoderBackend.Mft, // Auto
+        };
+    }
+
+    /// <summary>
+    /// One-session disable for NVDEC, set when <see cref="NvdecCrashSentinel"/>
+    /// indicated the previous launch crashed inside the cuvid AV1 init.
+    /// We force MFT for the current session, then clear the sentinel so
+    /// the next launch retries NVDEC normally — a single intermittent
+    /// AV costs the user one MFT session, not a permanent opt-out.
+    /// </summary>
+    private readonly bool _disableNvdecThisSession;
 
     public Av1DecoderFactorySelector(ID3D11Device sharedDevice)
     {
         _nvdec = new NvDecAv1DecoderFactory(sharedDevice);
         _mft = new MediaFoundationAv1DecoderFactory(sharedDevice);
 
-        if (_nvdec.IsAvailable)
+        if (NvdecCrashSentinel.WasLastAttemptCrashed("av1"))
+        {
+            // Previous launch's NVDEC AV1 init crashed (process-fatal
+            // native AV inside cuvid that bypassed managed handlers).
+            // Skip NVDEC for this session, then clear the sentinel so
+            // the launch after this one retries NVDEC normally.
+            _disableNvdecThisSession = true;
+            NvdecCrashSentinel.ClearAttempt("av1");
+            DebugLog.Write("[av1-decoder-select] previous launch crashed in NVDEC AV1 init — forcing MFT for this session (sentinel cleared, next launch will retry NVDEC)");
+        }
+
+        if (_nvdec.IsAvailable && !_disableNvdecThisSession)
         {
             DebugLog.Write("[av1-decoder-select] NVDEC AV1 available");
+        }
+        else if (_nvdec.IsAvailable && _disableNvdecThisSession)
+        {
+            DebugLog.Write("[av1-decoder-select] NVDEC AV1 silicon present but disabled this session (crash sentinel)");
         }
         else
         {

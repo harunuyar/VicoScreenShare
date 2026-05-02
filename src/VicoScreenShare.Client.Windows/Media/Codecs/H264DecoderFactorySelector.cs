@@ -43,19 +43,34 @@ public sealed class H264DecoderFactorySelector : IVideoDecoderFactory
     /// against capabilities) is the NVDEC path.</summary>
     public bool IsNvdecActive => ResolveBackend() == H264DecoderBackend.Nvdec;
 
-    private H264DecoderBackend ResolveBackend() => Backend switch
+    /// <summary>One-session NVDEC disable, parallel to the AV1 path.
+    /// See <see cref="Av1DecoderFactorySelector"/> for the rationale.</summary>
+    private readonly bool _disableNvdecThisSession;
+
+    private H264DecoderBackend ResolveBackend()
     {
-        H264DecoderBackend.Mft => H264DecoderBackend.Mft,
-        H264DecoderBackend.Nvdec => _nvdec.IsAvailable ? H264DecoderBackend.Nvdec : H264DecoderBackend.Mft,
-        _ => _nvdec.IsAvailable ? H264DecoderBackend.Nvdec : H264DecoderBackend.Mft, // Auto
-    };
+        var nvdecOk = _nvdec.IsAvailable && !_disableNvdecThisSession;
+        return Backend switch
+        {
+            H264DecoderBackend.Mft => H264DecoderBackend.Mft,
+            H264DecoderBackend.Nvdec => nvdecOk ? H264DecoderBackend.Nvdec : H264DecoderBackend.Mft,
+            _ => nvdecOk ? H264DecoderBackend.Nvdec : H264DecoderBackend.Mft, // Auto
+        };
+    }
 
     public H264DecoderFactorySelector(ID3D11Device sharedDevice)
     {
         _nvdec = new NvDecH264DecoderFactory(sharedDevice);
         _mft = new MediaFoundationH264DecoderFactory(sharedDevice);
 
-        DebugLog.Write($"[h264-decoder-select] backends: nvdec={(_nvdec.IsAvailable ? 1 : 0)} mft={(_mft.IsAvailable ? 1 : 0)}");
+        if (NvdecCrashSentinel.WasLastAttemptCrashed("h264"))
+        {
+            _disableNvdecThisSession = true;
+            NvdecCrashSentinel.ClearAttempt("h264");
+            DebugLog.Write("[h264-decoder-select] previous launch crashed in NVDEC H.264 init — forcing MFT for this session (sentinel cleared, next launch will retry NVDEC)");
+        }
+
+        DebugLog.Write($"[h264-decoder-select] backends: nvdec={(_nvdec.IsAvailable ? 1 : 0)} mft={(_mft.IsAvailable ? 1 : 0)} disableNvdecThisSession={_disableNvdecThisSession}");
     }
 
     public VideoCodec Codec => VideoCodec.H264;

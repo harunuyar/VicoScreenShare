@@ -648,6 +648,22 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
     private long _onTexFireCount;
     private long _onTexLastTicks;
     private long _onTexSpikeLogCount;
+    // Self-calibrating spike threshold: the first N gaps are accumulated
+    // into _onTexCalibSumMs / _onTexCalibCount; once we have N samples
+    // we freeze _onTexSpikeThresholdMs at 3× the average. The 3× factor
+    // means "spike = gap longer than 3 frame periods at the source's
+    // cadence" = "we missed at least 2 frames in a row" — a consistent
+    // semantic across 15 fps preview, 60 fps stream, 120 fps stream.
+    // 2× was too tight at high fps (flagged normal single-frame jitter
+    // as a spike); 3× filters that out while still catching real stalls.
+    // No floor — adding one was the same magic-number mistake as
+    // hardcoding 30 ms here in the first place: it penalizes high-fps
+    // sources with a tighter threshold than their cadence justifies.
+    private const int OnTexCalibSampleCount = 15;
+    private const double OnTexSpikeMultiplier = 3.0;
+    private double _onTexCalibSumMs;
+    private int _onTexCalibCount;
+    private double _onTexSpikeThresholdMs;
 
     private long _onTexTotalSpikeCount;
     private long _ringFullCount;
@@ -667,12 +683,27 @@ public sealed class D3DImageVideoRenderer : FrameworkElement
         {
             var sinceMs = (nowTicks - _onTexLastTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             _onTexLastTicks = nowTicks;
-            if (sinceMs > 30.0)
+            if (_onTexCalibCount < OnTexCalibSampleCount)
+            {
+                // Calibration phase — accumulate but never log. The
+                // first N gaps are noisy (first paint, decoder warmup)
+                // but their average still anchors the source's
+                // expected cadence well enough for the 2× threshold.
+                _onTexCalibSumMs += sinceMs;
+                _onTexCalibCount++;
+                if (_onTexCalibCount == OnTexCalibSampleCount)
+                {
+                    var avgMs = _onTexCalibSumMs / OnTexCalibSampleCount;
+                    _onTexSpikeThresholdMs = OnTexSpikeMultiplier * avgMs;
+                    DebugLog.Write($"[ontex-gap inst={_instanceId}] calibrated: avgGap={avgMs:F1}ms spikeThreshold={_onTexSpikeThresholdMs:F1}ms ({OnTexSpikeMultiplier}× over first {OnTexCalibSampleCount} frames)");
+                }
+            }
+            else if (sinceMs > _onTexSpikeThresholdMs)
             {
                 var s = ++_onTexSpikeLogCount;
                 if (s <= 200 || s % 50 == 0)
                 {
-                    DebugLog.Write($"[ontex-gap inst={_instanceId}] gap={sinceMs:F1}ms frame#{n} {width}x{height}");
+                    DebugLog.Write($"[ontex-gap inst={_instanceId}] gap={sinceMs:F1}ms frame#{n} {width}x{height} (>{_onTexSpikeThresholdMs:F1}ms)");
                 }
             }
         }
