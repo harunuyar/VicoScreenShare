@@ -24,10 +24,19 @@ using IVideoEncoder = VicoScreenShare.Client.Media.Codecs.IVideoEncoder;
 /// </summary>
 public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutputSource
 {
-    // Pool size: one slot per in-flight frame. Phase 2 has no lookahead, so
-    // 4 slots is plenty (the encoder pipeline depth is at most 1 here);
-    // bumping later when lookahead is enabled is a one-line change.
-    private const int PoolSize = 4;
+    // Pool size: one slot per in-flight frame. With no lookahead the
+    // encoder pipeline depth is at most 1, so 4 slots is plenty. With
+    // lookahead on, NVENC buffers `lookaheadDepth` frames internally
+    // before emitting any output — we have to size the pool accordingly
+    // or SubmitEncode times out waiting for a free slot on every frame
+    // (the symptom: encoder accepts ≤PoolSize frames at startup, then
+    // wedges with "[nvenc] SubmitEncode: timed out waiting for free
+    // slot" because the DPB never drains). +4 is the in-flight transit
+    // margin for ProcessInput → ProcessOutput overlap.
+    private const int BasePoolSize = 4;
+    private static int ComputePoolSize(NvencEncodeOptions options)
+        => Math.Max(BasePoolSize, options.LookaheadDepth + BasePoolSize);
+    private readonly int _poolSize;
 
     private readonly int _width;
     private readonly int _height;
@@ -115,6 +124,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         _bitrate = Math.Max(500_000, bitrate);
         _gopFrames = Math.Max(1, gopFrames);
         _options = options;
+        _poolSize = ComputePoolSize(options);
         _device = device;
         _context = device.ImmediateContext;
 
@@ -184,12 +194,12 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
             {
                 throw new NvencException(NVENCSTATUS.NV_ENC_ERR_OUT_OF_MEMORY, "CreateEventW(cancel)");
             }
-            _slots = new Slot[PoolSize];
-            for (int i = 0; i < PoolSize; i++)
+            _slots = new Slot[_poolSize];
+            for (int i = 0; i < _poolSize; i++)
             {
                 _slots[i] = AllocateSlot(width, height);
             }
-            _freeSlots = new SemaphoreSlim(PoolSize, PoolSize);
+            _freeSlots = new SemaphoreSlim(_poolSize, _poolSize);
         }
         catch
         {
@@ -207,7 +217,7 @@ public sealed unsafe class NvencH264Encoder : IVideoEncoder, IAsyncEncodedOutput
         _pumpThread.Start();
 
         DebugLog.Write($"[nvenc] H264 encoder initialized {width}x{height}@{_fps} {_bitrate} bps "
-            + $"(P4 LOW_LATENCY, async, pool={PoolSize})");
+            + $"(P4 LOW_LATENCY, async, pool={_poolSize})");
     }
 
     private void InitializeEncoderConfig()
