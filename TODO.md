@@ -10,12 +10,10 @@ Offer two explicit share modes. Readability mode is tuned end-to-end for sharp t
 ### Resolution and bitrate guardrails
 Users can currently pick a resolution and a bitrate independently. Bad combinations (high resolution, low bitrate) produce blurry output that looks like the app is broken. Warn in the UI, or auto-correct to a pairing that's actually watchable.
 
-## Audio
-
 ## Encoder quality
 
-### Raise quality-vs-speed preset
-NVENC SDK path currently uses preset P4 (`NV_ENC_PRESET_P4_GUID`, mid). P5 / P6 trade encode time for visibly better quality at the same bitrate; P4 was picked for safety but the headroom on a 4070-class card is large. Push higher, measure encode-time on target hardware via `bench-encode --backend nvenc`, keep the new preset if quality improves without blowing the real-time budget. The "Readability mode" entry above is the natural place to gate this.
+### Tune the default NVENC preset
+NVENC preset is user-selectable (P1..P7) but the default ships at the conservative end. P5 / P6 trade encode time for visibly better quality at the same bitrate; the headroom on a 4070-class card is large. Measure encode-time on target hardware via `bench-encode --backend nvenc` across the preset range, then set the default to the highest preset that stays inside the real-time budget. The "Readability mode" entry above is the natural place to gate this.
 
 ## Loss resilience
 
@@ -101,8 +99,8 @@ Publishing requires Windows because the capture pipeline is tied to Windows Grap
 
 ## Existing features to verify or fix
 
-### Verify intra-refresh actually takes effect
-Intra-refresh is wired through the encoder's codec-API attributes, but the underlying hardware / driver support is patchy and failures are silent. Confirm by inspecting real output (NAL unit types) that intra macroblocks are actually being emitted across frames; if not, either make it work or remove the option.
+### Verify intra-refresh actually takes effect on the NVENC SDK path
+NVENC SDK path sets `EnableIntraRefresh` and `intraRefreshPeriod` natively, gated on a capability probe. The MFT shim is a confirmed no-op (NVIDIA's MFT silently drops `CODECAPI_AVEncVideoIntraRefreshMode` — the user-facing setting was removed for that path). What's still pending is a NAL-unit-level confirmation that the SDK path's output actually contains intra macroblocks distributed across frames at the configured period; if it doesn't, the SDK feature flag isn't honored either and we should treat intra-refresh as a known-bad option on NVIDIA across the board.
 
 ### Faster adaptive-bitrate recovery
 Current controller takes on the order of a minute to climb from the floor back to target after a transient loss event. Tune the probe-up rate and smooth the loss input so recoveries feel responsive.
