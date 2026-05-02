@@ -60,9 +60,34 @@ public sealed class CaptureStreamer : IDisposable
     private long _lastAcceptedFrameTicks = long.MinValue;
     private long _lastArrivalWallTicks;
     private long _lastArrivalFrameTicks;
-    private int _timingLogFrames;
+    private int _lastLoggedSourceWidth;
+    private int _lastLoggedSourceHeight;
+    private long _startWallTicks;
+    private bool _usingTexturePath;
     private bool _attached;
     private bool _disposed;
+
+    /// <summary>
+    /// Threshold in milliseconds for the [arrival-*-spike] log: an arrival
+    /// gap larger than this signals the capture provider stalled (DWM
+    /// throttling, GPU contention, encoder backpressure on the framepool).
+    /// 2 frame periods at the configured fps — at 60 fps that's 33 ms,
+    /// at 30 fps it's 67 ms, at 120 fps it's 17 ms. Hardcoding 33 ms (as
+    /// I did initially) means every gap fires at 30 fps and real spikes
+    /// stay invisible at 120 fps; the threshold has to scale with fps.
+    /// </summary>
+    private double ArrivalSpikeThresholdMs => 2000.0 / _targetFps;
+
+    /// <summary>
+    /// Threshold in milliseconds for the [timing-*-spike] log: a
+    /// synchronous encode that ate half the per-frame budget is worth
+    /// surfacing. Half a frame period at the configured fps — at 60 fps
+    /// that's ~8 ms, at 30 fps ~17 ms, at 120 fps ~4 ms. Async encoders
+    /// (NVENC) usually return ~immediately on the calling thread so they
+    /// never spike on this metric; the spike is meaningful for the sync
+    /// MFT path or pipeline contention.
+    /// </summary>
+    private double EncodeSpikeThresholdMs => 500.0 / _targetFps;
 
     public CaptureStreamer(ICaptureSource source, Action<uint, byte[], TimeSpan> onEncoded, VideoSettings settings)
         : this(source, onEncoded, settings, new VpxEncoderFactory())
@@ -154,7 +179,10 @@ public sealed class CaptureStreamer : IDisposable
         {
             _encoder?.UpdateBitrate(bitsPerSecond);
         }
-        catch { /* encoder tearing down */ }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[send] UpdateBitrate({bitsPerSecond / 1000} kbps) threw: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>Underlying codec identifier of the last encoder instance
@@ -173,8 +201,15 @@ public sealed class CaptureStreamer : IDisposable
         }
 
         _attached = true;
-        _timingLogFrames = 0;
-        _diagnosticFrames = 0;
+        _lastLoggedSourceWidth = 0;
+        _lastLoggedSourceHeight = 0;
+        _startWallTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        // Share-start spec line. ReplaceEncoder will log the resolved
+        // encoder backend + dimensions when the first frame arrives;
+        // this line records the publisher's requested config (codec
+        // family is decided by the caller-supplied encoderFactory).
+        DebugLog.Write($"[settings-share] requested fps={_targetFps} bitrate={_targetBitrate / 1000}kbps gop={_gopFrames}f targetHeight={(_targetHeight == 0 ? "source" : _targetHeight.ToString())} alignedDims={_requiresMacroblockAlignedDimensions}");
 
         // When the encoder factory advertises texture input AND the capture
         // source can produce textures (WindowsCaptureSource fires the event,
@@ -212,9 +247,17 @@ public sealed class CaptureStreamer : IDisposable
         {
             _source.FrameArrived -= OnFrameArrived;
         }
-    }
 
-    private bool _usingTexturePath;
+        // One-glance share summary at the end. The startup snapshot,
+        // share-start line, and this stop line bracket every share
+        // session unambiguously in the log.
+        var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+        var elapsedSec = _startWallTicks == 0
+            ? 0.0
+            : (System.Diagnostics.Stopwatch.GetTimestamp() - _startWallTicks) / freq;
+        var avgKbps = elapsedSec > 0 ? (EncodedByteCount * 8.0 / elapsedSec) / 1000.0 : 0.0;
+        DebugLog.Write($"[settings-share] stopped after {elapsedSec:F1}s frames={EncodedFrameCount}/{FrameCount} encodedBytes={EncodedByteCount} avgBitrate={avgKbps:F0}kbps");
+    }
 
     /// <summary>
     /// Phase-locked frame throttle. Maintains a monotonic deadline that
@@ -293,8 +336,6 @@ public sealed class CaptureStreamer : IDisposable
         return (encWidth, encHeight);
     }
 
-    private int _diagnosticFrames;
-
     /// <summary>
     /// GPU path handler. Fires inside the framepool callback thread. Runs
     /// the throttle, derives encoder dims from the source aspect on first
@@ -305,25 +346,31 @@ public sealed class CaptureStreamer : IDisposable
     {
         var wallNow = Stopwatch.GetTimestamp();
         var frameTs = timestamp.Ticks;
-        if (_timingLogFrames < 3)
+        // Arrival gap spike: log only when the wall-clock gap between
+        // successive captured frames exceeds 2 frame periods at the
+        // configured fps. Steady state is silent. The capture provider
+        // having a stall (DWM throttling, GPU contention, encoder
+        // backpressuring the framepool) shows up here as a multi-frame
+        // wallGap.
+        if (_lastArrivalWallTicks != 0)
         {
-            if (_lastArrivalWallTicks != 0)
+            var ticksPerMs = Stopwatch.Frequency / 1000.0;
+            var wallGapMs = (wallNow - _lastArrivalWallTicks) / ticksPerMs;
+            if (wallGapMs > ArrivalSpikeThresholdMs)
             {
-                var ticksPerMs = Stopwatch.Frequency / 1000.0;
-                var wallGapMs = (wallNow - _lastArrivalWallTicks) / ticksPerMs;
                 var captureGapMs = (frameTs - _lastArrivalFrameTicks) / (double)TimeSpan.TicksPerMillisecond;
-                DebugLog.Write($"[arrival-gpu] wallGap={wallGapMs:F1}ms captureGap={captureGapMs:F1}ms");
+                DebugLog.Write($"[arrival-gpu-spike] wallGap={wallGapMs:F1}ms captureGap={captureGapMs:F1}ms (>{ArrivalSpikeThresholdMs:F1}ms @ {_targetFps}fps)");
             }
-            _lastArrivalWallTicks = wallNow;
-            _lastArrivalFrameTicks = frameTs;
         }
+        _lastArrivalWallTicks = wallNow;
+        _lastArrivalFrameTicks = frameTs;
 
         if (!ShouldAcceptFrame(frameTs))
         {
             return;
         }
 
-        var timingStart = _timingLogFrames < 3 ? Stopwatch.GetTimestamp() : 0L;
+        var timingStart = Stopwatch.GetTimestamp();
 
         SourceWidth = width;
         SourceHeight = height;
@@ -336,11 +383,14 @@ public sealed class CaptureStreamer : IDisposable
 
         var (encWidth, encHeight) = ResolveEncoderDimensions(sourceWidth, sourceHeight);
 
-        if (_diagnosticFrames < 3)
+        // Dimension-change log: fire on first frame and on any source
+        // dimension change (windowed share resize, etc). Keeps a clean
+        // dimension trace in the log without per-frame spam.
+        if (sourceWidth != _lastLoggedSourceWidth || sourceHeight != _lastLoggedSourceHeight)
         {
-            Interlocked.Increment(ref _diagnosticFrames);
-            DebugLog.Write(
-                $"[send-gpu] src {sourceWidth}x{sourceHeight} -> enc {encWidth}x{encHeight}");
+            DebugLog.Write($"[send-gpu] src {sourceWidth}x{sourceHeight} -> enc {encWidth}x{encHeight}");
+            _lastLoggedSourceWidth = sourceWidth;
+            _lastLoggedSourceHeight = sourceHeight;
         }
 
         EncodedFrame? encoded;
@@ -397,10 +447,16 @@ public sealed class CaptureStreamer : IDisposable
         }
 
         var encodeEnd = Stopwatch.GetTimestamp();
-        _timingLogFrames++;
         var ticksPerMs = Stopwatch.Frequency / 1000.0;
         var totalMs = (encodeEnd - timingStart) / ticksPerMs;
-        DebugLog.Write($"[timing-gpu #{_timingLogFrames}] total={totalMs:F1}ms");
+        // Encode-spike: synchronous encode-path time that exceeded half
+        // the per-frame budget. Threshold scales with fps so the
+        // intent ("you ate half the wall-time you have") stays
+        // constant: 8 ms at 60 fps, 17 ms at 30 fps, 4 ms at 120 fps.
+        if (totalMs > EncodeSpikeThresholdMs)
+        {
+            DebugLog.Write($"[timing-gpu-spike] total={totalMs:F1}ms (>{EncodeSpikeThresholdMs:F1}ms @ {_targetFps}fps)");
+        }
     }
 
     private void OnFrameArrived(in CaptureFrameData frame)
@@ -416,25 +472,25 @@ public sealed class CaptureStreamer : IDisposable
         // rate or _frameLock contention with the preview path), not us.
         var wallNow = Stopwatch.GetTimestamp();
         var frameTs = frame.Timestamp.Ticks;
-        if (_timingLogFrames < 3)
+        if (_lastArrivalWallTicks != 0)
         {
-            if (_lastArrivalWallTicks != 0)
+            var ticksPerMs = Stopwatch.Frequency / 1000.0;
+            var wallGapMs = (wallNow - _lastArrivalWallTicks) / ticksPerMs;
+            if (wallGapMs > ArrivalSpikeThresholdMs)
             {
-                var ticksPerMs = Stopwatch.Frequency / 1000.0;
-                var wallGapMs = (wallNow - _lastArrivalWallTicks) / ticksPerMs;
                 var captureGapMs = (frameTs - _lastArrivalFrameTicks) / (double)TimeSpan.TicksPerMillisecond;
-                DebugLog.Write($"[arrival] wallGap={wallGapMs:F1}ms captureGap={captureGapMs:F1}ms");
+                DebugLog.Write($"[arrival-spike] wallGap={wallGapMs:F1}ms captureGap={captureGapMs:F1}ms (>{ArrivalSpikeThresholdMs:F1}ms @ {_targetFps}fps)");
             }
-            _lastArrivalWallTicks = wallNow;
-            _lastArrivalFrameTicks = frameTs;
         }
+        _lastArrivalWallTicks = wallNow;
+        _lastArrivalFrameTicks = frameTs;
 
         if (!ShouldAcceptFrame(frameTs))
         {
             return;
         }
 
-        var timingStart = _timingLogFrames < 3 ? Stopwatch.GetTimestamp() : 0L;
+        var timingStart = Stopwatch.GetTimestamp();
 
         // Source crop: even dimensions (libvpx chroma subsampling) and non-negative.
         SourceWidth = frame.Width;
@@ -465,7 +521,7 @@ public sealed class CaptureStreamer : IDisposable
                 .CopyTo(_sourceBgraBuffer.AsSpan(y * packedRowBytes, packedRowBytes));
         }
 
-        var compactEnd = timingStart != 0 ? Stopwatch.GetTimestamp() : 0L;
+        var compactEnd = Stopwatch.GetTimestamp();
 
         // Downscale (if needed) into the scaled buffer.
         byte[] encoderInput;
@@ -493,29 +549,31 @@ public sealed class CaptureStreamer : IDisposable
             encoderInputStride = encWidth * 4;
         }
 
-        var downscaleEnd = timingStart != 0 ? Stopwatch.GetTimestamp() : 0L;
+        var downscaleEnd = Stopwatch.GetTimestamp();
 
-        if (_diagnosticFrames < 3)
+        if (sourceWidth != _lastLoggedSourceWidth || sourceHeight != _lastLoggedSourceHeight)
         {
-            Interlocked.Increment(ref _diagnosticFrames);
-            DebugLog.Write(
-                $"[send] src w={frame.Width} h={frame.Height} stride={frame.StrideBytes} -> enc w={encWidth} h={encHeight}");
+            DebugLog.Write($"[send] src w={frame.Width} h={frame.Height} stride={frame.StrideBytes} -> enc w={encWidth} h={encHeight}");
+            _lastLoggedSourceWidth = sourceWidth;
+            _lastLoggedSourceHeight = sourceHeight;
         }
 
         var timestamp = frame.Timestamp;
         EncodeAndEmit(encoderInput, encoderInputStride, encWidth, encHeight, timestamp);
 
-        if (timingStart != 0)
+        var encodeEndCpu = Stopwatch.GetTimestamp();
+        var ticksPerMsCpu = Stopwatch.Frequency / 1000.0;
+        var totalMsCpu = (encodeEndCpu - timingStart) / ticksPerMsCpu;
+        // Spike-only — same fps-derived threshold as the GPU path. Logs
+        // the per-stage breakdown only when total exceeded half the
+        // per-frame budget at the configured fps.
+        if (totalMsCpu > EncodeSpikeThresholdMs)
         {
-            var encodeEnd = Stopwatch.GetTimestamp();
-            _timingLogFrames++;
-            var ticksPerMs = Stopwatch.Frequency / 1000.0;
-            var compactMs = (compactEnd - timingStart) / ticksPerMs;
-            var downscaleMs = (downscaleEnd - compactEnd) / ticksPerMs;
-            var encodeMs = (encodeEnd - downscaleEnd) / ticksPerMs;
-            var totalMs = (encodeEnd - timingStart) / ticksPerMs;
+            var compactMs = (compactEnd - timingStart) / ticksPerMsCpu;
+            var downscaleMs = (downscaleEnd - compactEnd) / ticksPerMsCpu;
+            var encodeMs = (encodeEndCpu - downscaleEnd) / ticksPerMsCpu;
             DebugLog.Write(
-                $"[timing #{_timingLogFrames}] compact={compactMs:F1}ms downscale={downscaleMs:F1}ms encode={encodeMs:F1}ms total={totalMs:F1}ms");
+                $"[timing-spike] compact={compactMs:F1}ms downscale={downscaleMs:F1}ms encode={encodeMs:F1}ms total={totalMsCpu:F1}ms (>{EncodeSpikeThresholdMs:F1}ms @ {_targetFps}fps)");
         }
     }
 
@@ -606,7 +664,7 @@ public sealed class CaptureStreamer : IDisposable
             _asyncOutput.OutputAvailable -= OnAsyncEncoderOutput;
             _asyncOutput = null;
         }
-        try { _encoder?.Dispose(); } catch { }
+        try { _encoder?.Dispose(); } catch (Exception ex) { DebugLog.Write($"[send] encoder dispose threw: {ex.GetType().Name}: {ex.Message}"); }
 
         _encoder = _encoderFactory.CreateEncoder(width, height, _targetFps, _targetBitrate, _gopFrames);
         _encoderWidth = width;
@@ -617,6 +675,13 @@ public sealed class CaptureStreamer : IDisposable
             _asyncOutput = asyncSrc;
             asyncSrc.OutputAvailable += OnAsyncEncoderOutput;
         }
+
+        // Resolved-config snapshot. The encoder's own factory/selector
+        // already logs which backend it picked; this line ties the
+        // encoder identity to the dimensions/fps/bitrate/GOP that
+        // CaptureStreamer requested for this share. Together they're
+        // enough to reconstruct the encoder spec from the log alone.
+        DebugLog.Write($"[settings-share] encoder={_encoder.GetType().Name} codec={_encoder.Codec} {width}x{height}@{_targetFps} {_targetBitrate / 1000}kbps gop={_gopFrames}f path={(_usingTexturePath ? "GPU-texture" : "CPU")}");
     }
 
     /// <summary>

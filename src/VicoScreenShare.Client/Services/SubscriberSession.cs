@@ -302,7 +302,14 @@ public sealed class SubscriberSession : IAsyncDisposable
         {
             _ = _signaling.SendIceCandidateAsync(candidate.toJSON(), SubscriptionId);
         }
-        catch { /* teardown */ }
+        catch (ObjectDisposedException)
+        {
+            // Race with Dispose. Expected, not a real abnormality.
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[sub {SubscriptionId:N}] OnLocalIceCandidate send threw: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void OnRemoteIceCandidate(IceCandidate ice)
@@ -358,7 +365,14 @@ public sealed class SubscriberSession : IAsyncDisposable
                 _pc.addIceCandidate(init);
             }
         }
-        catch { /* ignore malformed */ }
+        catch (ObjectDisposedException)
+        {
+            // Race with Dispose. Expected, not a real abnormality.
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[sub {SubscriptionId:N}] addIceCandidate threw: {ex.GetType().Name}: {ex.Message} (candidate={candidateJson})");
+        }
     }
 
     public async ValueTask DisposeAsync()

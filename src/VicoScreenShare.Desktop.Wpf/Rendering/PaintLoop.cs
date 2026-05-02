@@ -350,12 +350,18 @@ public sealed class PaintLoop : IDisposable
                 }
                 lastDequeueTicks = Stopwatch.GetTimestamp();
 
-                if (_loggedFrames < 20)
+                if (_loggedFrames == 0)
                 {
-                    _loggedFrames++;
+                    // One-shot "first paint" line confirms the loop
+                    // started painting. Subsequent frame metadata is
+                    // covered by [paint-stutter] (spikes) and
+                    // [paint-pulse] (2 s aggregate). The previous
+                    // first-20 dump produced 20 lines per session
+                    // start that nobody read past the first.
+                    _loggedFrames = 1;
                     var paintedAt = Stopwatch.GetTimestamp();
                     var lateMs = (paintedAt - scheduledWallTicks) * 1000.0 / Stopwatch.Frequency;
-                    DebugLog.Write($"[paint] painted pts={current.Timestamp.TotalMilliseconds:F2}ms " +
+                    DebugLog.Write($"[paint] first paint pts={current.Timestamp.TotalMilliseconds:F2}ms " +
                                    $"queue={_queue.Count} late={lateMs:F2}ms");
                 }
             }

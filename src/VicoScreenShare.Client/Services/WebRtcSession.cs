@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using VicoScreenShare.Client.Diagnostics;
 using VicoScreenShare.Client.Media.Codecs;
 using VicoScreenShare.Protocol.Messages;
 
@@ -197,6 +198,7 @@ public sealed class WebRtcSession : IAsyncDisposable
         {
             var offer = _pc.createOffer(null);
             await _pc.setLocalDescription(offer).ConfigureAwait(false);
+            DebugLog.Write($"[pub] setLocalDescription done — offer length={offer.sdp?.Length ?? 0}");
             // Immediately after setLocalDescription the RTP channel exists and
             // its UDP socket is bound; this is the earliest point we can raise
             // the kernel receive buffer above the tiny Windows default so a
@@ -218,6 +220,7 @@ public sealed class WebRtcSession : IAsyncDisposable
                 sdp = answerSdp,
                 type = RTCSdpType.answer,
             });
+            DebugLog.Write($"[pub] setRemoteDescription -> {setResult} (answer length={answerSdp?.Length ?? 0})");
             if (setResult != SetDescriptionResultEnum.OK)
             {
                 throw new InvalidOperationException($"setRemoteDescription failed: {setResult}");
@@ -264,7 +267,16 @@ public sealed class WebRtcSession : IAsyncDisposable
             var json = candidate.toJSON();
             _ = _signaling.SendIceCandidateAsync(json);
         }
-        catch { /* best-effort during teardown */ }
+        catch (ObjectDisposedException)
+        {
+            // Race with Dispose: the _disposed check at the top of this
+            // method passed, then teardown won. Expected, not a real
+            // abnormality.
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[pub] OnLocalIceCandidate send threw: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private void OnRemoteIceCandidate(IceCandidate ice)
@@ -304,7 +316,14 @@ public sealed class WebRtcSession : IAsyncDisposable
                 _pc.addIceCandidate(init);
             }
         }
-        catch { /* ignore malformed candidates */ }
+        catch (ObjectDisposedException)
+        {
+            // Race with Dispose. Expected, not a real abnormality.
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[pub] addIceCandidate threw: {ex.GetType().Name}: {ex.Message} (candidate={candidateJson})");
+        }
     }
 
     /// <summary>Exposed for tests so they can assert the buffer drained as expected.</summary>
@@ -319,6 +338,7 @@ public sealed class WebRtcSession : IAsyncDisposable
 
     private void OnPcStateChanged(RTCPeerConnectionState state)
     {
+        DebugLog.Write($"[pub] connectionState={state} ice={_pc.iceConnectionState} signaling={_pc.signalingState}");
         ConnectionStateChanged?.Invoke(state);
     }
 

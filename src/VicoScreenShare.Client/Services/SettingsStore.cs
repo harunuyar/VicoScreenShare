@@ -99,6 +99,20 @@ public sealed class SettingsStore
             var tempPath = _path + ".tmp";
             File.WriteAllText(tempPath, json);
             File.Move(tempPath, _path, overwrite: true);
+
+            // Settings save is a tester-driven event we want to know
+            // about. Dump a full snapshot so the log shows the active
+            // config across the save boundary — saves us from having
+            // to ask "what did your settings.json look like at that
+            // moment". Same formatter as the startup snapshot.
+            try
+            {
+                Diagnostics.DebugLog.Write(Diagnostics.SettingsLogFormatter.Format("settings-saved", settings));
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.DebugLog.Write($"[settings-saved] formatter threw: {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 

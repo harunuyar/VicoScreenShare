@@ -72,12 +72,19 @@ public partial class App : Application
         // the first renderer instance constructed picks up the user's
         // configured value. The settings store is read for real by the
         // VMs later — this is just a one-shot read for the static.
+        // Same load drives the [settings-startup] snapshot so the log
+        // begins with a complete picture of the active config (testers
+        // can describe behavior verbally; the log already has the why).
         try
         {
             var s = new VicoScreenShare.Client.Services.SettingsStore().LoadOrCreate();
             ReceiveBufferFrames = Math.Clamp(s.Video.ReceiveBufferFrames, 1, 240);
+            DebugLog.Write(VicoScreenShare.Client.Diagnostics.SettingsLogFormatter.Format("settings-startup", s));
         }
-        catch { /* fall back to default */ }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"[settings-startup] load failed: {ex.GetType().Name}: {ex.Message}");
+        }
 
         MediaFoundationRuntime.EnsureInitialized();
         if (MediaFoundationRuntime.IsAvailable)
