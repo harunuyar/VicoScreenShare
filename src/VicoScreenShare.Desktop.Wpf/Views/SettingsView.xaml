@@ -453,12 +453,20 @@
                 BorderThickness="0,1,0,0"
                 BorderBrush="{DynamicResource ControlElevationBorderBrush}"
                 Padding="16,12">
-            <ui:Button Appearance="Primary"
-                       Content="Save changes"
-                       Icon="{ui:SymbolIcon Symbol=Save24}"
-                       Command="{Binding SaveCommand}"
-                       IsEnabled="{Binding IsDirty}"
-                       HorizontalAlignment="Right" />
+            <Grid>
+                <ui:Button Appearance="Secondary"
+                           Content="Restore defaults"
+                           Icon="{ui:SymbolIcon Symbol=ArrowReset24}"
+                           Command="{Binding RestoreDefaultsCommand}"
+                           HorizontalAlignment="Left"
+                           ToolTip="Reset all settings to their defaults. You still need to click Save to apply." />
+                <ui:Button Appearance="Primary"
+                           Content="Save changes"
+                           Icon="{ui:SymbolIcon Symbol=Save24}"
+                           Command="{Binding SaveCommand}"
+                           IsEnabled="{Binding IsDirty}"
+                           HorizontalAlignment="Right" />
+            </Grid>
         </Border>
     </Grid>
 </UserControl>

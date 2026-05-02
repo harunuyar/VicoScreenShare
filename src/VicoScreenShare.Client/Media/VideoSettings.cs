@@ -102,13 +102,16 @@ public sealed class VideoSettings
     /// <see cref="SendPacingBitrateMultiplier"/> instead of being dumped
     /// in a back-to-back burst. Smooths the keyframe spike — a 1 MB IDR
     /// stops overrunning a viewer's downlink router queue, at the cost
-    /// of one-time per-keyframe latency proportional to (keyframe size /
-    /// pace rate). The receiver's content-PTS pacer absorbs the latency
-    /// after the first keyframe, so steady-state cadence is unchanged.
-    /// Default off; flip on when a viewer on a slower link reports
-    /// blocky / dropped video on every keyframe.
+    /// of one-time per-keyframe wire-time spread proportional to
+    /// (keyframe size / pace rate). The receiver's content-PTS pacer
+    /// absorbs that, so steady-state cadence is unchanged. Default on,
+    /// matching what every modern WebRTC stack (libwebrtc, Pion,
+    /// Mediasoup, LiveKit) does — viewers on residential downlinks see
+    /// none of the blocky-keyframe artifact that an unpaced sender
+    /// produces. Flip off only for pure-LAN sessions where the bursting
+    /// is harmless and the per-keyframe spread isn't worth paying.
     /// </summary>
-    public bool EnableSendPacing { get; set; } = false;
+    public bool EnableSendPacing { get; set; } = true;
 
     /// <summary>
     /// Multiplier on <see cref="TargetBitrate"/> that sets the pacer's
@@ -116,10 +119,14 @@ public sealed class VideoSettings
     /// bitrate (smoothest, highest one-time keyframe latency).
     /// Higher values let the pacer release packets faster, reducing
     /// keyframe latency at the cost of larger wire bursts. Range
-    /// <c>[1, 5]</c>. Ignored when <see cref="EnableSendPacing"/> is
-    /// off.
+    /// <c>[1, 5]</c>. Default <c>2</c> — at standard resolutions
+    /// (1080p60 @ 12 Mbps, 4K60 @ 40 Mbps) a typical keyframe drains
+    /// in ≤ <c>ReceiveBufferFrames</c> worth of wall-time, so the
+    /// receiver-side jitter buffer fully absorbs the spread without
+    /// stretching playout. Mirrors libwebrtc's pacing ratio (~2.5×).
+    /// Ignored when <see cref="EnableSendPacing"/> is off.
     /// </summary>
-    public int SendPacingBitrateMultiplier { get; set; } = 1;
+    public int SendPacingBitrateMultiplier { get; set; } = 2;
 
     /// <summary>
     /// Which H.264 encoder backend the client uses. <see cref="H264EncoderBackend.Auto"/>

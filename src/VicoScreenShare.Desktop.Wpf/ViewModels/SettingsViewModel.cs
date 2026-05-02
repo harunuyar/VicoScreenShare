@@ -68,24 +68,31 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
         // Presets named "widthP@fps" — unambiguous and matches how OBS /
         // Twitch / YouTube display quality options, which is what users
-        // already know. Bitrates are H.264 screen-content targets roughly
-        // aligned with Twitch's recommended gaming bitrates; user can still
-        // override via the slider. 1-second keyframe interval everywhere —
-        // viewers converge on join in 1 s instead of 2, and a single
-        // keyframe re-sync is less painful on loss-prone links. Bilinear
-        // scaler everywhere — cheap on GPU, right for game/video content;
-        // users who want Lanczos for readable text can pick it in the
-        // Scaler dropdown directly.
+        // already know. H.264 bitrates are screen-content targets roughly
+        // aligned with Twitch's recommended gaming bitrates. AV1 column
+        // is ~60% of the H.264 rate per AOMedia compression-ratio data
+        // for equivalent perceptual quality (slightly better on screen
+        // content thanks to AV1's screen-content tools, slightly worse
+        // on heavy-motion gaming — 60% is the safe blended target).
+        // Per-codec values let the call site stay explicit instead of
+        // smuggling a multiplier in at apply-time.
+        // 1-second keyframe interval everywhere — viewers converge on
+        // join in 1 s instead of 2, and a single keyframe re-sync is
+        // less painful on loss-prone links. Bilinear scaler everywhere —
+        // cheap on GPU, right for game/video content; users who want
+        // Lanczos for readable text can pick it in the Scaler dropdown
+        // directly.
         QualityPresets = new[]
         {
-            new QualityPreset("720p30",  720,  30,  4_000_000,  1.0, ScalerMode.Bilinear),
-            new QualityPreset("1080p30", 1080, 30,  6_000_000,  1.0, ScalerMode.Bilinear),
-            new QualityPreset("1080p60", 1080, 60,  10_000_000, 1.0, ScalerMode.Bilinear),
-            new QualityPreset("1080p120",1080, 120, 16_000_000, 1.0, ScalerMode.Bilinear),
-            new QualityPreset("1440p60", 1440, 60,  18_000_000, 1.0, ScalerMode.Bilinear),
-            new QualityPreset("1440p120",1440, 120, 28_000_000, 1.0, ScalerMode.Bilinear),
-            new QualityPreset("2160p30", 2160, 30,  24_000_000, 1.0, ScalerMode.Bilinear),
-            new QualityPreset("2160p60", 2160, 60,  40_000_000, 1.0, ScalerMode.Bilinear),
+            //                                                  H.264 bps    AV1 bps
+            new QualityPreset("720p30",  720,  30,    4_000_000,  2_500_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1080p30", 1080, 30,    6_000_000,  3_500_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1080p60", 1080, 60,   10_000_000,  6_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1080p120",1080, 120,  16_000_000, 10_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1440p60", 1440, 60,   18_000_000, 11_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("1440p120",1440, 120,  28_000_000, 17_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("2160p30", 2160, 30,   24_000_000, 14_000_000, 1.0, ScalerMode.Bilinear),
+            new QualityPreset("2160p60", 2160, 60,   40_000_000, 24_000_000, 1.0, ScalerMode.Bilinear),
         };
 
         var catalog = ClientHost.VideoCodecCatalog ?? new VideoCodecCatalog();
@@ -497,10 +504,64 @@ public sealed partial class SettingsViewModel : ViewModelBase
         SelectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == preset.TargetHeight)
             ?? SelectedTargetHeight;
         FrameRate = preset.FrameRate;
-        BitrateSliderValue = BpsToSliderValue(preset.Bitrate);
+        // Resolve the bitrate for the codec the user has currently
+        // selected. Switching codec after applying a preset doesn't
+        // re-trigger this — the bitrate the user last explicitly set
+        // wins. To re-apply for a new codec, click the preset again.
+        BitrateSliderValue = BpsToSliderValue(preset.BitrateFor(SelectedCodec?.Codec ?? VideoCodec.H264));
         KeyframeIntervalSeconds = preset.KeyframeIntervalSeconds;
         SelectedScalerMode = ScalerModeOptions.FirstOrDefault(o => o.Mode == preset.Scaler)
             ?? SelectedScalerMode;
+    }
+
+    /// <summary>
+    /// Reset every bound setting to the in-code default (the value a fresh
+    /// <see cref="VideoSettings"/> / <see cref="AudioSettings"/> instance
+    /// produces — NOT whatever is currently saved to disk). Setting each
+    /// public property fires PropertyChanged → IsDirty=true so the Save
+    /// pill becomes visible; the user must click Save to persist. This
+    /// matters: the user can audit the proposed reset, change their mind,
+    /// or tweak before committing, instead of an irreversible auto-save.
+    /// </summary>
+    [RelayCommand]
+    private void RestoreDefaults()
+    {
+        var v = new VideoSettings();
+        var a = new AudioSettings();
+
+        SelectedTargetHeight = TargetHeightOptions.FirstOrDefault(o => o.Height == v.TargetHeight)
+            ?? TargetHeightOptions.First(o => o.Height == 1080);
+        FrameRate = SnapToFrameRateOption(v.TargetFrameRate);
+        BitrateSliderValue = BpsToSliderValue(v.TargetBitrate);
+        KeyframeIntervalSeconds = v.KeyframeIntervalSeconds;
+        SelectedScalerMode = ScalerModeOptions.FirstOrDefault(o => o.Mode == v.Scaler)
+            ?? ScalerModeOptions[0];
+        SelectedCodec = CodecOptions.FirstOrDefault(c => c.Codec == v.Codec && c.IsAvailable)
+            ?? CodecOptions.First(c => c.IsAvailable);
+        ReceiveBufferFrames = v.ReceiveBufferFrames;
+        EnableAdaptiveBitrate = v.EnableAdaptiveBitrate;
+        EnableSendPacing = v.EnableSendPacing;
+        SendPacingBitrateMultiplier = v.SendPacingBitrateMultiplier;
+        EnableAdaptiveQuantization = v.EnableAdaptiveQuantization;
+        EnableEncoderLookahead = v.EnableEncoderLookahead;
+        EnableIntraRefresh = v.EnableIntraRefresh;
+        SelectedNvencPreset = NvencPresetOptions.FirstOrDefault(o => o.Level == v.NvencPreset)
+            ?? NvencPresetOptions.First(o => o.Level == 4);
+        SelectedH264Backend = H264BackendOptions.FirstOrDefault(o => o.Backend == v.H264Backend)
+            ?? H264BackendOptions[0];
+        SelectedH264DecoderBackend = H264DecoderBackendOptions.FirstOrDefault(o => o.Backend == v.H264DecoderBackend)
+            ?? H264DecoderBackendOptions[0];
+        SelectedAv1EncoderBackend = Av1EncoderBackendOptions.FirstOrDefault(o => o.Backend == v.Av1Backend)
+            ?? Av1EncoderBackendOptions[0];
+        SelectedAv1DecoderBackend = Av1DecoderBackendOptions.FirstOrDefault(o => o.Backend == v.Av1DecoderBackend)
+            ?? Av1DecoderBackendOptions[0];
+
+        ForceSystemAudio = a.ForceSystemAudio;
+        AudioStereo = a.Stereo;
+        SelectedAudioBitrate = AudioBitrateOptions.FirstOrDefault(o => o.Bitrate == a.TargetBitrate)
+            ?? AudioBitrateOptions[1];
+
+        StatusMessage = "Defaults restored. Click Save to apply.";
     }
 
     [RelayCommand]
@@ -610,13 +671,37 @@ public sealed partial class SettingsViewModel : ViewModelBase
 
 public sealed record TargetHeightOption(string DisplayName, int Height);
 public sealed record ScalerModeOption(string DisplayName, ScalerMode Mode);
+/// <summary>
+/// Codec-aware quality preset. AV1 (and VP8 too — they're the codecs the
+/// app supports apart from H.264) needs roughly 60% of the H.264 bitrate
+/// for equivalent perceptual quality. Storing both rates per preset
+/// makes the math explicit at the call site instead of hiding it in a
+/// magic ratio applied at apply-time. <see cref="BitrateFor"/> picks the
+/// right one based on the user's currently-selected codec.
+/// </summary>
 public sealed record QualityPreset(
     string Name,
     int TargetHeight,
     int FrameRate,
-    int Bitrate,
+    int H264Bitrate,
+    int Av1Bitrate,
     double KeyframeIntervalSeconds,
-    ScalerMode Scaler);
+    ScalerMode Scaler)
+{
+    /// <summary>
+    /// Resolve the preset's bitrate for the user's currently-selected
+    /// codec. AV1 returns the AV1 column; everything else (H.264, VP8,
+    /// or any future addition) returns the H.264 column — VP8's
+    /// efficiency is roughly H.264-equivalent, and a future codec is
+    /// safer over-provisioned than under-provisioned at preset apply
+    /// time.
+    /// </summary>
+    public int BitrateFor(VideoCodec codec) => codec switch
+    {
+        VideoCodec.Av1 => Av1Bitrate,
+        _ => H264Bitrate,
+    };
+}
 public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAvailable);
 public sealed record H264BackendOption(H264EncoderBackend Backend, string DisplayName);
 
