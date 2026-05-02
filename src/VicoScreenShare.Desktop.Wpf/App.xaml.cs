@@ -106,18 +106,24 @@ public partial class App : Application
                 new H264EncoderFactorySelector(sharedDevices.Device),
                 new MediaFoundationH264DecoderFactory(sharedDevices.Device));
 
-            // AV1 is registered alongside H.264. The encoder factory gates
-            // catalog appearance on NVENC AV1 silicon (RTX 40+ / Arc /
-            // RDNA 3+); the decoder factory selector picks NVDEC when
-            // available and falls back to the Microsoft "AV1 Video
-            // Extension" MFT decoder otherwise — user-overridable from
-            // Settings via VideoSettings.Av1DecoderBackend. NVDEC handles
-            // 4K AV1 IDRs in single-digit ms; MFT typically spends
-            // 30-45 ms and produces visible micro-stutters at IDR
+            // AV1 is registered alongside H.264. The encoder factory selector
+            // prefers the direct NVENC SDK path on RTX 40+ silicon and falls
+            // back to a Media Foundation AV1 encoder MFT (Intel Arc / Xe2 /
+            // AMD RDNA 3+); user-overridable from Settings via
+            // VideoSettings.Av1Backend. AV1 codec visibility is gated on
+            // EITHER backend being available — Quick Sync / AMF boxes get
+            // AV1 even without NVENC.
+            //
+            // The decoder factory selector picks NVDEC when available and
+            // falls back to the Microsoft "AV1 Video Extension" MFT decoder
+            // otherwise — user-overridable via VideoSettings.Av1DecoderBackend.
+            // NVDEC handles 4K AV1 IDRs in single-digit ms; MFT typically
+            // spends 30-45 ms and produces visible micro-stutters at IDR
             // boundaries.
+            var av1EncoderSelector = new Av1EncoderFactorySelector(sharedDevices.Device);
             var av1DecoderSelector = new Av1DecoderFactorySelector(sharedDevices.Device);
             ClientHost.VideoCodecCatalog.Register(
-                new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory(sharedDevices.Device),
+                av1EncoderSelector,
                 av1DecoderSelector);
         }
 

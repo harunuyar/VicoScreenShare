@@ -142,6 +142,32 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _selectedH264Backend = H264BackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.H264Backend)
             ?? H264BackendOptions[0];
 
+        // AV1 encoder backend dropdown. NVENC SDK option appears only when
+        // the publisher's GPU has NVENC AV1 silicon (RTX 40+); MFT option
+        // appears only when an Intel / AMD AV1 encoder MFT is registered.
+        // Auto resolves to whichever is available, with NVENC preferred.
+        IsNvencAv1Available = nvencCaps.IsAv1Available;
+        IsMftAv1EncoderAvailable = VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationAv1Encoder.HasAv1EncoderInstalled();
+        var av1EncoderOptions = new List<Av1EncoderBackendOption>
+        {
+            new(Av1EncoderBackend.Auto, IsNvencAv1Available
+                ? "Auto — NVENC SDK (recommended)"
+                : IsMftAv1EncoderAvailable
+                    ? "Auto — Media Foundation"
+                    : "Auto — (no AV1 encoder available)"),
+        };
+        if (IsMftAv1EncoderAvailable)
+        {
+            av1EncoderOptions.Add(new Av1EncoderBackendOption(Av1EncoderBackend.Mft, "Media Foundation (universal driver MFT)"));
+        }
+        if (IsNvencAv1Available)
+        {
+            av1EncoderOptions.Add(new Av1EncoderBackendOption(Av1EncoderBackend.NvencSdk, "Direct NVENC SDK"));
+        }
+        Av1EncoderBackendOptions = av1EncoderOptions;
+        _selectedAv1EncoderBackend = Av1EncoderBackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.Av1Backend)
+            ?? Av1EncoderBackendOptions[0];
+
         // AV1 decoder backend dropdown. NVDEC option appears only when
         // the viewer's GPU has NVDEC AV1 silicon (RTX 30 / Volta+); on
         // hosts without it the user sees Auto + MFT (Auto resolves to
@@ -296,6 +322,23 @@ public sealed partial class SettingsViewModel : ViewModelBase
     /// flexible for future tooltip or warning use).</summary>
     public bool IsNvdecAv1Available { get; }
 
+    [ObservableProperty]
+    private Av1EncoderBackendOption _selectedAv1EncoderBackend = null!;
+
+    /// <summary>The AV1 encoder backend choices we offer. NVENC SDK appears
+    /// only on RTX 40+ NVIDIA GPUs; MFT appears only when an Intel / AMD
+    /// AV1 encoder MFT is registered (Arc / Xe2 iGPU, RDNA 3+).</summary>
+    public IReadOnlyList<Av1EncoderBackendOption> Av1EncoderBackendOptions { get; }
+
+    /// <summary>True when this machine has NVENC AV1 silicon (RTX 40+).</summary>
+    public bool IsNvencAv1Available { get; }
+
+    /// <summary>True when an AV1 encoder MFT is registered (Intel Arc / Xe2
+    /// iGPU, AMD RDNA 3+, etc.). Microsoft does not ship a software AV1
+    /// encoder MFT, so on machines without one of these GPUs this is
+    /// false and the MFT option is hidden from the dropdown.</summary>
+    public bool IsMftAv1EncoderAvailable { get; }
+
     /// <summary>True when the NVENC SDK encoder backend is available
     /// on this machine. Settings UI greys NVENC-only toggles otherwise.</summary>
     public bool IsNvencAvailable { get; }
@@ -324,24 +367,30 @@ public sealed partial class SettingsViewModel : ViewModelBase
     /// <summary>
     /// True when the currently-selected codec resolves to a NVENC SDK
     /// path on this machine. Drives the visibility of the "NVENC quality"
-    /// card so MFT-only sessions don't show it. AV1 is always NVENC SDK
-    /// (no MFT AV1 encoder backend) — only H.264 has the MFT-or-NVENC
-    /// fork via the H264Backend dropdown.
+    /// card so MFT-only sessions don't show it. Both H.264 and AV1 have
+    /// the MFT-or-NVENC fork via their respective backend dropdowns.
     /// </summary>
     public bool IsNvencActiveForQualityCard
     {
         get
         {
-            if (!IsNvencAvailable)
-            {
-                return false;
-            }
             if (SelectedCodec?.Codec == VideoCodec.Av1)
             {
-                return true;
+                if (!IsNvencAv1Available)
+                {
+                    return false;
+                }
+                var av1Pref = SelectedAv1EncoderBackend?.Backend ?? Av1EncoderBackend.Auto;
+                // Auto on a NVENC-capable box stays NVENC. Mft forces MFT.
+                // NvencSdk forces NVENC.
+                return av1Pref != Av1EncoderBackend.Mft;
             }
             if (SelectedCodec?.Codec == VideoCodec.H264)
             {
+                if (!IsNvencAvailable)
+                {
+                    return false;
+                }
                 return (SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto) != H264EncoderBackend.Mft;
             }
             return false;
@@ -349,6 +398,11 @@ public sealed partial class SettingsViewModel : ViewModelBase
     }
 
     partial void OnSelectedH264BackendChanged(H264BackendOption value)
+    {
+        OnPropertyChanged(nameof(IsNvencActiveForQualityCard));
+    }
+
+    partial void OnSelectedAv1EncoderBackendChanged(Av1EncoderBackendOption value)
     {
         OnPropertyChanged(nameof(IsNvencActiveForQualityCard));
     }
@@ -440,6 +494,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
         _settings.Video.H264Backend = SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto;
         _settings.Video.Av1DecoderBackend = SelectedAv1DecoderBackend?.Backend ?? Av1DecoderBackend.Auto;
+        _settings.Video.Av1Backend = SelectedAv1EncoderBackend?.Backend ?? Av1EncoderBackend.Auto;
         _settings.Video.NvencPreset = SelectedNvencPreset?.Level ?? 4;
 
         _settings.Audio.ForceSystemAudio = ForceSystemAudio;
@@ -532,5 +587,6 @@ public sealed record CodecOption(VideoCodec Codec, string DisplayName, bool IsAv
 public sealed record H264BackendOption(H264EncoderBackend Backend, string DisplayName);
 
 public sealed record Av1DecoderBackendOption(Av1DecoderBackend Backend, string DisplayName);
+public sealed record Av1EncoderBackendOption(Av1EncoderBackend Backend, string DisplayName);
 public sealed record NvencPresetOption(int Level, string DisplayName);
 public sealed record AudioBitrateOption(string DisplayName, int Bitrate);

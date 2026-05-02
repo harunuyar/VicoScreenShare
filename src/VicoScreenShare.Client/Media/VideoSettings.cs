@@ -148,6 +148,22 @@ public sealed class VideoSettings
     /// </summary>
     public Av1DecoderBackend Av1DecoderBackend { get; set; } = Av1DecoderBackend.Auto;
 
+    /// <summary>
+    /// Which AV1 encoder backend the client uses. <see cref="Av1EncoderBackend.Auto"/>
+    /// (the default) picks the NVENC SDK direct path on RTX 40+ silicon and
+    /// falls back to whatever AV1 encoder MFT the GPU driver has registered
+    /// otherwise (NVIDIA's MFT shim on RTX 40+, Intel Quick Sync on Arc /
+    /// Xe2, AMD AMF on RDNA 3+). Force <see cref="Av1EncoderBackend.Mft"/>
+    /// to route through the driver MFT — works on every GPU vendor that
+    /// ships an AV1 encoder MFT, but loses the NVENC-only knobs (temporal
+    /// AQ, lookahead, intra-refresh, custom VBV) on NVIDIA hardware. Force
+    /// <see cref="Av1EncoderBackend.NvencSdk"/> to require the SDK direct
+    /// path; the selector falls back to MFT if NVENC isn't available, so
+    /// the toggle never breaks the share. Ignored when <see cref="Codec"/>
+    /// is not AV1.
+    /// </summary>
+    public Av1EncoderBackend Av1Backend { get; set; } = Av1EncoderBackend.Auto;
+
     // ----- NVENC SDK quality knobs -----
     // These four properties drive the direct NVENC SDK encoder backend
     // when it's the active backend (Auto on NVIDIA, or explicit NvencSdk).
@@ -220,6 +236,39 @@ public enum H264EncoderBackend
     /// Force the direct NVENC SDK path. NVIDIA GPUs only; the selector
     /// still falls back to MFT if construction fails (driver missing,
     /// session limit hit, etc.) so picking this never breaks the share.
+    /// </summary>
+    NvencSdk = 2,
+}
+
+/// <summary>
+/// Selects which AV1 encoder backend the client uses on Windows when the
+/// publisher's negotiated codec is AV1. Mirrors <see cref="H264EncoderBackend"/>
+/// on the H.264 path.
+/// </summary>
+public enum Av1EncoderBackend
+{
+    /// <summary>
+    /// Pick the NVENC SDK direct path on RTX 40+ silicon; fall back to a
+    /// Media Foundation AV1 encoder MFT (Intel Arc / Xe2 / AMD RDNA 3+)
+    /// when the NVENC AV1 path isn't available. Recommended default.
+    /// </summary>
+    Auto = 0,
+
+    /// <summary>
+    /// Force whatever AV1 encoder MFT the GPU driver registers — works on
+    /// NVIDIA (RTX 40+ ships an MFT shim alongside the SDK), Intel Quick
+    /// Sync on Arc / Xe2 / 12th-gen+ iGPUs, and AMD AMF on RDNA 3+. Lacks
+    /// NVENC's adaptive quantization, lookahead, intra-refresh, and custom
+    /// VBV — the MFT contract doesn't expose them. Selector still falls
+    /// back to the SDK if no MFT AV1 transform is registered, so picking
+    /// this never breaks the share.
+    /// </summary>
+    Mft = 1,
+
+    /// <summary>
+    /// Force the direct NVENC SDK path. RTX 40+ NVIDIA only; the selector
+    /// falls back to MFT if NVENC isn't available, so picking this never
+    /// breaks the share.
     /// </summary>
     NvencSdk = 2,
 }

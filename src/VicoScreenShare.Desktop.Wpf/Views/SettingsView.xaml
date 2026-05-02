@@ -248,6 +248,20 @@
                         <StackPanel Margin="0,12,0,0"
                                     Visibility="{Binding IsAv1Selected, Converter={StaticResource BoolToVisibility}}">
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="AV1 encoder" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Auto picks the direct NVENC SDK on RTX 40+ NVIDIA GPUs (gives temporal AQ, lookahead, intra-refresh, custom VBV) and falls back to whatever AV1 encoder MFT your GPU driver registered otherwise — NVIDIA also ships an MFT shim, Intel Quick Sync on Arc / Xe2, AMD AMF on RDNA 3+. Force Media Foundation to route through that MFT; you lose the NVENC-only knobs but the share still works on any AV1-capable GPU. Direct NVENC SDK and Media Foundation options only appear when your GPU supports them.&#10;&#10;Applies on your next share." />
+                            </StackPanel>
+                            <ComboBox ItemsSource="{Binding Av1EncoderBackendOptions}"
+                                      SelectedItem="{Binding SelectedAv1EncoderBackend}"
+                                      DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
+                                      Margin="0,4,0,0" />
+                        </StackPanel>
+
+                        <StackPanel Margin="0,12,0,0"
+                                    Visibility="{Binding IsAv1Selected, Converter={StaticResource BoolToVisibility}}">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                                 <TextBlock Text="AV1 decoder" Style="{StaticResource FieldLabel}" />
                                 <ui:SymbolIcon Style="{StaticResource InfoIcon}"
                                                ToolTip="Auto picks NVDEC (direct cuvid driver path) on RTX 30 / Volta+ GPUs and falls back to the Microsoft AV1 Video Extension MFT decoder on other hardware. NVDEC handles 4K AV1 IDRs in single-digit ms; MFT typically spends 30-45 ms per IDR and produces visible micro-stutters at IDR boundaries. NVDEC option only appears when your GPU supports it.&#10;&#10;Applies on the next stream you subscribe to." />
@@ -343,7 +357,7 @@
                          HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                            <TextBlock Text="Smooth keyframe sends" Style="{StaticResource CardHeader}" />
+                            <TextBlock Text="Pace outgoing packets" Style="{StaticResource CardHeader}" />
                             <ui:SymbolIcon Style="{StaticResource InfoIcon}"
                                            ToolTip="Releases your encoded RTP packets at a steady bitrate instead of dumping each frame onto the wire as a burst. Stops a big keyframe from overrunning a viewer's downlink and dropping packets. Adds latency proportional to (keyframe size / pace rate) — typically a few hundred ms once at session start, absorbed by the receiver's content-time pacer.&#10;&#10;Applies on your next share." />
                         </StackPanel>

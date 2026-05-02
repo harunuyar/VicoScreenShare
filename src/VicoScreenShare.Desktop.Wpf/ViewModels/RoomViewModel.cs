@@ -1190,6 +1190,12 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             av1EncFactory.Options = BuildNvencOptions(settings);
         }
+        if (_encoderFactory is VicoScreenShare.Client.Windows.Media.Codecs.Av1EncoderFactorySelector av1Selector)
+        {
+            av1Selector.Scaler = settings.Scaler;
+            av1Selector.Backend = settings.Av1Backend;
+            av1Selector.NvencOptions = BuildNvencOptions(settings);
+        }
         // Decoder-side selector preferences are pushed onto the catalog's
         // factory, not _decoderFactory directly — the catalog returns the
         // shared instance for our session codec, and StreamReceiver pulls

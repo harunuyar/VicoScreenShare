@@ -146,19 +146,48 @@ internal static class Program
                 }
                 break;
             case "av1":
-                // AV1 only goes through NVENC SDK — there's no MFT AV1
-                // encoder shim worth using. Still requires a shared device.
-                sharedDevices = new D3D11DeviceManager();
-                sharedDevices.Initialize();
-                var av1Factory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory(sharedDevices.Device);
-                av1Factory.Options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
                 {
-                    Preset = int.Parse(args.GetValueOrDefault("preset", "4")),
-                    EnableAdaptiveQuantization = args.GetValueOrDefault("aq", "1") != "0",
-                    EnableTemporalAq = args.GetValueOrDefault("aq", "1") != "0",
-                    EnableIntraRefresh = args.GetValueOrDefault("intra-refresh", "0") != "0",
-                };
-                factory = av1Factory;
+                    // AV1 has two backends: NVENC SDK (RTX 40+) and MFT
+                    // (Intel Arc / Xe2 iGPU, AMD RDNA 3+). Default = auto,
+                    // which matches what the app's selector does.
+                    sharedDevices = new D3D11DeviceManager();
+                    sharedDevices.Initialize();
+                    var av1Backend = args.GetValueOrDefault("backend", "auto");
+                    if (av1Backend == "nvenc")
+                    {
+                        var av1NvencFactory = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencAv1EncoderFactory(sharedDevices.Device);
+                        av1NvencFactory.Options = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+                        {
+                            Preset = int.Parse(args.GetValueOrDefault("preset", "4")),
+                            EnableAdaptiveQuantization = args.GetValueOrDefault("aq", "1") != "0",
+                            EnableTemporalAq = args.GetValueOrDefault("aq", "1") != "0",
+                            EnableIntraRefresh = args.GetValueOrDefault("intra-refresh", "0") != "0",
+                        };
+                        factory = av1NvencFactory;
+                    }
+                    else if (av1Backend == "mft")
+                    {
+                        factory = new VicoScreenShare.Client.Windows.Media.Codecs.MediaFoundationAv1EncoderFactory(sharedDevices.Device);
+                    }
+                    else if (av1Backend == "auto")
+                    {
+                        var selector = new VicoScreenShare.Client.Windows.Media.Codecs.Av1EncoderFactorySelector(sharedDevices.Device);
+                        selector.Backend = VicoScreenShare.Client.Media.Av1EncoderBackend.Auto;
+                        selector.NvencOptions = new VicoScreenShare.Client.Windows.Media.Codecs.Nvenc.NvencEncodeOptions
+                        {
+                            Preset = int.Parse(args.GetValueOrDefault("preset", "4")),
+                            EnableAdaptiveQuantization = args.GetValueOrDefault("aq", "1") != "0",
+                            EnableTemporalAq = args.GetValueOrDefault("aq", "1") != "0",
+                            EnableIntraRefresh = args.GetValueOrDefault("intra-refresh", "0") != "0",
+                        };
+                        factory = selector;
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"ERROR: unknown av1 backend '{av1Backend}' (expected auto, nvenc, or mft)");
+                        return 2;
+                    }
+                }
                 break;
             case "vp8":
                 factory = new VpxEncoderFactory();
