@@ -104,7 +104,7 @@ public partial class App : Application
             // lands.
             ClientHost.VideoCodecCatalog.Register(
                 new H264EncoderFactorySelector(sharedDevices.Device),
-                new MediaFoundationH264DecoderFactory(sharedDevices.Device));
+                new H264DecoderFactorySelector(sharedDevices.Device));
 
             // AV1 is registered alongside H.264. The encoder factory selector
             // prefers the direct NVENC SDK path on RTX 40+ silicon and falls

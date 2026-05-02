@@ -4,13 +4,14 @@ using System;
 using VicoScreenShare.Client.Diagnostics;
 
 /// <summary>
-/// One-shot probe for NVDEC AV1 support. Mirrors
+/// One-shot probe for NVDEC AV1 + H.264 support. Mirrors
 /// <see cref="Nvenc.NvencCapabilities"/> on the encoder side: load the
 /// CUDA + cuvid DLLs, init a CUDA context bound to ordinal-0 device,
-/// query <c>cuvidGetDecoderCaps</c> for AV1 / 4:2:0 / 8-bit, then tear
-/// down. Result is cached for the lifetime of the process — the probe
-/// itself takes ~30 ms at first call which we don't want to pay every
-/// time the codec catalog is queried.
+/// query <c>cuvidGetDecoderCaps</c> for AV1 / 4:2:0 / 8-bit and
+/// H.264 / 4:2:0 / 8-bit, then tear down. Result is cached for the
+/// lifetime of the process — the probe itself takes ~30 ms at first
+/// call which we don't want to pay every time the codec catalog is
+/// queried.
 /// </summary>
 public sealed class NvDecCapabilities
 {
@@ -22,6 +23,12 @@ public sealed class NvDecCapabilities
     public uint Av1MinWidth { get; private set; }
     public uint Av1MinHeight { get; private set; }
     public byte Av1NumNvdecs { get; private set; }
+    public bool IsH264Available { get; private set; }
+    public uint H264MaxWidth { get; private set; }
+    public uint H264MaxHeight { get; private set; }
+    public uint H264MinWidth { get; private set; }
+    public uint H264MinHeight { get; private set; }
+    public byte H264NumNvdecs { get; private set; }
 
     private static NvDecCapabilities? _cached;
     private static readonly object _cacheLock = new();
@@ -102,16 +109,41 @@ public sealed class NvDecCapabilities
                 caps.Av1NumNvdecs = probe.nNumNVDECs;
                 DebugLog.Write($"[nvdec] AV1 caps: supported={caps.IsAv1Available} max={probe.nMaxWidth}x{probe.nMaxHeight} min={probe.nMinWidth}x{probe.nMinHeight} engines={probe.nNumNVDECs} mask=0x{probe.nOutputFormatMask:X4} histSup={probe.bIsHistogramSupported} structSize={structSize}");
 
-                // If the API reported success but flagged AV1 as
-                // unsupported, run a diagnostic sweep across other
-                // codecs / chromas. If H.264/4:2:0 also reports
-                // unsupported, the binding is wrong; if H.264 works
-                // and AV1 doesn't, the GPU genuinely lacks AV1 decode.
+                // H.264 capability probe — same shape as the AV1 probe
+                // above, just a different codec enum value. NVDEC has
+                // shipped H.264 4:2:0 8-bit decode since the original
+                // NVDEC silicon (Kepler), so on any modern NVIDIA GPU
+                // this should return supported=1.
+                var h264Probe = new NvDecApi.CUVIDDECODECAPS
+                {
+                    eCodecType = NvDecApi.cudaVideoCodec.H264,
+                    eChromaFormat = NvDecApi.cudaVideoChromaFormat._420,
+                    nBitDepthMinus8 = 0,
+                };
+                var h264ProbeResult = NvDecApi.CuvidGetDecoderCaps(ref h264Probe);
+                if (h264ProbeResult == NvDecApi.CUresult.CUDA_SUCCESS)
+                {
+                    caps.IsH264Available = h264Probe.bIsSupported != 0;
+                    caps.H264MaxWidth = h264Probe.nMaxWidth;
+                    caps.H264MaxHeight = h264Probe.nMaxHeight;
+                    caps.H264MinWidth = h264Probe.nMinWidth;
+                    caps.H264MinHeight = h264Probe.nMinHeight;
+                    caps.H264NumNvdecs = h264Probe.nNumNVDECs;
+                    DebugLog.Write($"[nvdec] H264 caps: supported={caps.IsH264Available} max={h264Probe.nMaxWidth}x{h264Probe.nMaxHeight} min={h264Probe.nMinWidth}x{h264Probe.nMinHeight} engines={h264Probe.nNumNVDECs}");
+                }
+                else
+                {
+                    DebugLog.Write($"[nvdec] H264 cuvidGetDecoderCaps returned {h264ProbeResult}; H.264 NVDEC unavailable");
+                }
+
+                // If the AV1 API reported success but flagged AV1 as
+                // unsupported, also sweep HEVC / VP9 for diagnostic
+                // value. H.264 is no longer in this sweep — it's a
+                // real backend now.
                 if (!caps.IsAv1Available)
                 {
                     foreach (var (codec, label) in new[]
                     {
-                        (NvDecApi.cudaVideoCodec.H264, "H264"),
                         (NvDecApi.cudaVideoCodec.HEVC, "HEVC"),
                         (NvDecApi.cudaVideoCodec.VP9, "VP9"),
                     })

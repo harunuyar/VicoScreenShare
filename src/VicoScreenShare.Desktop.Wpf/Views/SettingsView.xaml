@@ -246,6 +246,20 @@
                         </StackPanel>
 
                         <StackPanel Margin="0,12,0,0"
+                                    Visibility="{Binding IsH264Selected, Converter={StaticResource BoolToVisibility}}">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock Text="H.264 decoder" Style="{StaticResource FieldLabel}" />
+                                <ui:SymbolIcon Style="{StaticResource InfoIcon}"
+                                               ToolTip="Auto picks NVDEC (direct cuvid driver path) on NVIDIA GPUs and falls back to the Media Foundation H.264 MFT decoder on other hardware. NVDEC typically decodes IDRs in single-digit ms vs ~30-45 ms on the MFT path, eliminating micro-stutters at IDR boundaries. NVDEC option only appears when your GPU supports it.&#10;&#10;Applies on the next stream you subscribe to." />
+                            </StackPanel>
+                            <ComboBox ItemsSource="{Binding H264DecoderBackendOptions}"
+                                      SelectedItem="{Binding SelectedH264DecoderBackend}"
+                                      DisplayMemberPath="DisplayName"
+                                      HorizontalAlignment="Stretch"
+                                      Margin="0,4,0,0" />
+                        </StackPanel>
+
+                        <StackPanel Margin="0,12,0,0"
                                     Visibility="{Binding IsAv1Selected, Converter={StaticResource BoolToVisibility}}">
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                                 <TextBlock Text="AV1 encoder" Style="{StaticResource FieldLabel}" />

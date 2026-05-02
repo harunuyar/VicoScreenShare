@@ -149,6 +149,20 @@ public sealed class VideoSettings
     public Av1DecoderBackend Av1DecoderBackend { get; set; } = Av1DecoderBackend.Auto;
 
     /// <summary>
+    /// Which H.264 decoder backend the client uses. <see cref="H264DecoderBackend.Auto"/>
+    /// (the default) picks NVDEC on NVIDIA GPUs (single-digit ms per IDR
+    /// vs 30-45 ms on the MFT path) and falls back to the Media Foundation
+    /// H.264 MFT decoder on non-NVIDIA hardware. Force
+    /// <see cref="H264DecoderBackend.Mft"/> to use the MFT path on a
+    /// NVIDIA box (A/B comparison, driver regression workaround). Force
+    /// <see cref="H264DecoderBackend.Nvdec"/> to require the direct cuvid
+    /// path; the selector still falls back to MFT if NVDEC isn't available
+    /// so the toggle never breaks the share. Ignored when the negotiated
+    /// codec is not H.264.
+    /// </summary>
+    public H264DecoderBackend H264DecoderBackend { get; set; } = H264DecoderBackend.Auto;
+
+    /// <summary>
     /// Which AV1 encoder backend the client uses. <see cref="Av1EncoderBackend.Auto"/>
     /// (the default) picks the NVENC SDK direct path on RTX 40+ silicon and
     /// falls back to whatever AV1 encoder MFT the GPU driver has registered
@@ -271,6 +285,35 @@ public enum Av1EncoderBackend
     /// breaks the share.
     /// </summary>
     NvencSdk = 2,
+}
+
+/// <summary>
+/// Selects which H.264 decoder backend the client uses on Windows.
+/// Mirrors <see cref="Av1DecoderBackend"/> on the AV1 path.
+/// </summary>
+public enum H264DecoderBackend
+{
+    /// <summary>
+    /// Pick NVDEC (direct cuvid driver path) on hardware that supports
+    /// it; fall back to the Media Foundation H.264 MFT decoder otherwise.
+    /// Recommended default — NVDEC typically decodes IDRs in single-digit
+    /// ms vs ~30-45 ms on the MFT path.
+    /// </summary>
+    Auto = 0,
+
+    /// <summary>
+    /// Force the Media Foundation H.264 decoder. Universal (any GPU) but
+    /// slower; useful for A/B comparison or as a manual workaround if
+    /// NVDEC misbehaves on a specific driver.
+    /// </summary>
+    Mft = 1,
+
+    /// <summary>
+    /// Force the NVDEC direct cuvid path. NVIDIA only; the selector falls
+    /// back to MFT if NVDEC isn't available, so picking this never breaks
+    /// the share.
+    /// </summary>
+    Nvdec = 2,
 }
 
 /// <summary>

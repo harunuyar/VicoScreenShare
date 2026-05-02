@@ -1206,6 +1206,10 @@ public sealed partial class RoomViewModel : ViewModelBase
         {
             av1DecSelector.Backend = settings.Av1DecoderBackend;
         }
+        if (_decoderFactory is VicoScreenShare.Client.Windows.Media.Codecs.H264DecoderFactorySelector h264DecSelector)
+        {
+            h264DecSelector.Backend = settings.H264DecoderBackend;
+        }
     }
 
     /// <summary>

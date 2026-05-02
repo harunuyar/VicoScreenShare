@@ -130,17 +130,38 @@ public sealed partial class SettingsViewModel : ViewModelBase
         var backendOptions = new List<H264BackendOption>
         {
             new(H264EncoderBackend.Auto, IsNvencAvailable
-                ? "Auto — NVENC SDK (recommended)"
+                ? "Auto — NVENC (recommended)"
                 : "Auto — Media Foundation"),
-            new(H264EncoderBackend.Mft, "Media Foundation (legacy, universal)"),
+            new(H264EncoderBackend.Mft, "Media Foundation"),
         };
         if (IsNvencAvailable)
         {
-            backendOptions.Insert(2, new H264BackendOption(H264EncoderBackend.NvencSdk, "Direct NVENC SDK"));
+            backendOptions.Insert(2, new H264BackendOption(H264EncoderBackend.NvencSdk, "NVENC (direct)"));
         }
         H264BackendOptions = backendOptions;
         _selectedH264Backend = H264BackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.H264Backend)
             ?? H264BackendOptions[0];
+
+        // H.264 decoder backend dropdown. NVDEC appears only when the
+        // viewer's GPU has NVDEC H.264 silicon (any modern NVIDIA); on
+        // hosts without it the user sees Auto + MFT (Auto resolves to
+        // MFT in that case).
+        var nvdecH264Caps = VicoScreenShare.Client.Windows.Media.Codecs.Nvdec.NvDecCapabilities.Probe();
+        IsNvdecH264Available = nvdecH264Caps.IsH264Available;
+        var h264DecoderOptions = new List<H264DecoderBackendOption>
+        {
+            new(H264DecoderBackend.Auto, IsNvdecH264Available
+                ? "Auto — NVDEC (recommended)"
+                : "Auto — Media Foundation"),
+            new(H264DecoderBackend.Mft, "Media Foundation"),
+        };
+        if (IsNvdecH264Available)
+        {
+            h264DecoderOptions.Insert(2, new H264DecoderBackendOption(H264DecoderBackend.Nvdec, "NVDEC (direct)"));
+        }
+        H264DecoderBackendOptions = h264DecoderOptions;
+        _selectedH264DecoderBackend = H264DecoderBackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.H264DecoderBackend)
+            ?? H264DecoderBackendOptions[0];
 
         // AV1 encoder backend dropdown. NVENC SDK option appears only when
         // the publisher's GPU has NVENC AV1 silicon (RTX 40+); MFT option
@@ -151,18 +172,18 @@ public sealed partial class SettingsViewModel : ViewModelBase
         var av1EncoderOptions = new List<Av1EncoderBackendOption>
         {
             new(Av1EncoderBackend.Auto, IsNvencAv1Available
-                ? "Auto — NVENC SDK (recommended)"
+                ? "Auto — NVENC (recommended)"
                 : IsMftAv1EncoderAvailable
                     ? "Auto — Media Foundation"
                     : "Auto — (no AV1 encoder available)"),
         };
         if (IsMftAv1EncoderAvailable)
         {
-            av1EncoderOptions.Add(new Av1EncoderBackendOption(Av1EncoderBackend.Mft, "Media Foundation (universal driver MFT)"));
+            av1EncoderOptions.Add(new Av1EncoderBackendOption(Av1EncoderBackend.Mft, "Media Foundation"));
         }
         if (IsNvencAv1Available)
         {
-            av1EncoderOptions.Add(new Av1EncoderBackendOption(Av1EncoderBackend.NvencSdk, "Direct NVENC SDK"));
+            av1EncoderOptions.Add(new Av1EncoderBackendOption(Av1EncoderBackend.NvencSdk, "NVENC (direct)"));
         }
         Av1EncoderBackendOptions = av1EncoderOptions;
         _selectedAv1EncoderBackend = Av1EncoderBackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.Av1Backend)
@@ -179,11 +200,11 @@ public sealed partial class SettingsViewModel : ViewModelBase
             new(Av1DecoderBackend.Auto, IsNvdecAv1Available
                 ? "Auto — NVDEC (recommended)"
                 : "Auto — Media Foundation"),
-            new(Av1DecoderBackend.Mft, "Media Foundation (universal, slower)"),
+            new(Av1DecoderBackend.Mft, "Media Foundation"),
         };
         if (IsNvdecAv1Available)
         {
-            av1DecoderOptions.Insert(2, new Av1DecoderBackendOption(Av1DecoderBackend.Nvdec, "NVDEC (direct cuvid)"));
+            av1DecoderOptions.Insert(2, new Av1DecoderBackendOption(Av1DecoderBackend.Nvdec, "NVDEC (direct)"));
         }
         Av1DecoderBackendOptions = av1DecoderOptions;
         _selectedAv1DecoderBackend = Av1DecoderBackendOptions.FirstOrDefault(o => o.Backend == _settings.Video.Av1DecoderBackend)
@@ -307,6 +328,18 @@ public sealed partial class SettingsViewModel : ViewModelBase
     /// <summary>The H.264 backend choices we offer. NVENC SDK appears only
     /// when the GPU supports it; on other hosts the user sees Auto + MFT.</summary>
     public IReadOnlyList<H264BackendOption> H264BackendOptions { get; }
+
+    [ObservableProperty]
+    private H264DecoderBackendOption _selectedH264DecoderBackend = null!;
+
+    /// <summary>The H.264 decoder backend choices we offer. NVDEC appears
+    /// only on NVIDIA GPUs; on other hosts the user sees Auto + MFT
+    /// (Auto resolves to MFT in that case).</summary>
+    public IReadOnlyList<H264DecoderBackendOption> H264DecoderBackendOptions { get; }
+
+    /// <summary>True when this machine has NVDEC H.264 silicon. Settings
+    /// UI uses this to gate the dropdown's NVDEC option.</summary>
+    public bool IsNvdecH264Available { get; }
 
     [ObservableProperty]
     private Av1DecoderBackendOption _selectedAv1DecoderBackend = null!;
@@ -493,6 +526,7 @@ public sealed partial class SettingsViewModel : ViewModelBase
         _settings.Video.EnableEncoderLookahead = EnableEncoderLookahead;
         _settings.Video.EnableIntraRefresh = EnableIntraRefresh;
         _settings.Video.H264Backend = SelectedH264Backend?.Backend ?? H264EncoderBackend.Auto;
+        _settings.Video.H264DecoderBackend = SelectedH264DecoderBackend?.Backend ?? H264DecoderBackend.Auto;
         _settings.Video.Av1DecoderBackend = SelectedAv1DecoderBackend?.Backend ?? Av1DecoderBackend.Auto;
         _settings.Video.Av1Backend = SelectedAv1EncoderBackend?.Backend ?? Av1EncoderBackend.Auto;
         _settings.Video.NvencPreset = SelectedNvencPreset?.Level ?? 4;
@@ -588,5 +622,6 @@ public sealed record H264BackendOption(H264EncoderBackend Backend, string Displa
 
 public sealed record Av1DecoderBackendOption(Av1DecoderBackend Backend, string DisplayName);
 public sealed record Av1EncoderBackendOption(Av1EncoderBackend Backend, string DisplayName);
+public sealed record H264DecoderBackendOption(H264DecoderBackend Backend, string DisplayName);
 public sealed record NvencPresetOption(int Level, string DisplayName);
 public sealed record AudioBitrateOption(string DisplayName, int Bitrate);

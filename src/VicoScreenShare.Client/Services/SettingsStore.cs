@@ -134,6 +134,7 @@ public sealed class SettingsStore
         public bool EnableIntraRefresh { get; set; } = true;
         public int IntraRefreshPeriodFrames { get; set; } = 0;
         public H264EncoderBackend H264Backend { get; set; } = H264EncoderBackend.Auto;
+        public H264DecoderBackend H264DecoderBackend { get; set; } = H264DecoderBackend.Auto;
         public Av1DecoderBackend Av1DecoderBackend { get; set; } = Av1DecoderBackend.Auto;
         public Av1EncoderBackend Av1Backend { get; set; } = Av1EncoderBackend.Auto;
         public int NvencPreset { get; set; } = 4;
@@ -186,6 +187,7 @@ public sealed class SettingsStore
             EnableIntraRefresh = source.Video.EnableIntraRefresh,
             IntraRefreshPeriodFrames = source.Video.IntraRefreshPeriodFrames,
             H264Backend = source.Video.H264Backend,
+            H264DecoderBackend = source.Video.H264DecoderBackend,
             Av1DecoderBackend = source.Video.Av1DecoderBackend,
             Av1Backend = source.Video.Av1Backend,
             NvencPreset = source.Video.NvencPreset,
@@ -219,6 +221,7 @@ public sealed class SettingsStore
                     EnableIntraRefresh = EnableIntraRefresh,
                     IntraRefreshPeriodFrames = IntraRefreshPeriodFrames >= 0 && IntraRefreshPeriodFrames <= 14_400 ? IntraRefreshPeriodFrames : 0,
                     H264Backend = H264Backend,
+                    H264DecoderBackend = H264DecoderBackend,
                     Av1DecoderBackend = Av1DecoderBackend,
                     Av1Backend = Av1Backend,
                     NvencPreset = NvencPreset >= 1 && NvencPreset <= 7 ? NvencPreset : 4,

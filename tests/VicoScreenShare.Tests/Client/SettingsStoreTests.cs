@@ -338,4 +338,38 @@ public class SettingsStoreTests : IDisposable
         var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
         loaded.Video.TargetFrameRate.Should().Be(30, "rest of file still parses around the unknown enum value");
     }
+
+    [Fact]
+    public void H264DecoderBackend_round_trips_through_save_and_load()
+    {
+        var store = new SettingsStore(_settingsPath);
+        store.Save(new ClientSettings
+        {
+            Video = new VideoSettings
+            {
+                H264DecoderBackend = H264DecoderBackend.Nvdec,
+            },
+        });
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+        loaded.Video.H264DecoderBackend.Should().Be(H264DecoderBackend.Nvdec);
+    }
+
+    [Fact]
+    public void H264DecoderBackend_defaults_to_Auto_on_fresh_file()
+    {
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+        loaded.Video.H264DecoderBackend.Should().Be(H264DecoderBackend.Auto);
+    }
+
+    [Fact]
+    public void H264DecoderBackend_unknown_value_in_file_does_not_crash_load()
+    {
+        File.WriteAllText(
+            _settingsPath,
+            """{ "h264DecoderBackend": 99, "targetFrameRate": 30 }""");
+
+        var loaded = new SettingsStore(_settingsPath).LoadOrCreate();
+        loaded.Video.TargetFrameRate.Should().Be(30, "rest of file still parses around the unknown enum value");
+    }
 }
