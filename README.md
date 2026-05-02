@@ -31,7 +31,7 @@ VicoScreenShare is screen-sharing-first, room-model, self-hosted. The server is 
 **Video quality**
 
 - Presets from 720p30 @ 4 Mbps up to 2160p60 @ 40 Mbps — user controls both dimensions and bitrate, no paywall gates.
-- Hardware encoder auto-select: async NVENC / Quick Sync / AMF, with software H.264 and VP8 as fallbacks. VP8 is always available for viewers that lack hardware H.264.
+- Hardware encoder auto-select for H.264 (async NVENC / Quick Sync / AMF) and AV1 (NVENC SDK on RTX 40+ / Arc / RDNA 3+), with software H.264 and VP8 as fallbacks. VP8 is always available for viewers that lack hardware H.264.
 - GPU capture end-to-end: Windows Graphics Capture → D3D11 shared textures → hardware encoder → RTP. No PCIe round-trip on the hot path.
 - Optional Lanczos3 compute-shader downscaler for sessions where text legibility matters (code, documents). Bilinear is the default.
 - Configurable keyframe interval (0.5–10s) and opt-in cyclic intra-refresh — spreads intra-macroblocks across frames instead of firing 250 Mbit keyframe bursts, trades ~1s initial convergence for no periodic bitrate spikes.
@@ -72,7 +72,7 @@ Projects:
 
 - `VicoScreenShare.Protocol` — shared signaling DTOs (`netstandard2.1`).
 - `VicoScreenShare.Client` — platform-neutral signaling, WebRTC session management, codec abstractions, adaptive bitrate, RTP stats (`net10.0`).
-- `VicoScreenShare.Client.Windows` — WGC capture, D3D11 scalers, Media Foundation H.264 encode/decode (`net10.0-windows`).
+- `VicoScreenShare.Client.Windows` — WGC capture, D3D11 scalers, NVENC SDK / Media Foundation H.264 + AV1 encoders, NVDEC / Media Foundation decoders (`net10.0-windows`).
 - `VicoScreenShare.Desktop.Wpf` — WPF MVVM frontend, D3DImage renderer, stats overlay.
 - `VicoScreenShare.Server` — ASP.NET Core + SIPSorcery SFU.
 - `tests/` — xUnit + FluentAssertions; `VicoScreenShare.MediaHarness` for manual capture / encode / decode without the UI.
@@ -145,7 +145,7 @@ Run the output directly, behind any reverse proxy you like (nginx, Caddy, Traefi
 
 - **Client**: Windows 10 version 2004 or later. Uses `Windows.Graphics.Capture` + D3D11; no WinUI dependency. On pre–Windows 11 22H2 the yellow capture border stays visible and the capture frame rate can be DWM-paced below the display refresh; functionally everything else works.
 - **Server**: any .NET 10 target (Linux, Windows, macOS).
-- **GPUs**: any GPU with a DXVA H.264 decoder works for viewing. For publishing, hardware H.264 encode is auto-selected from NVENC (NVIDIA), Quick Sync (Intel), or AMF (AMD); software H.264 and VP8 are fallbacks.
+- **GPUs**: any GPU with a DXVA H.264 decoder works for viewing. AV1 viewing prefers NVDEC on NVIDIA and falls back to the Microsoft AV1 Video Extension MFT decoder otherwise. For publishing, hardware H.264 encode is auto-selected from NVENC (NVIDIA), Quick Sync (Intel), or AMF (AMD); AV1 encode requires NVENC silicon (RTX 40+, Arc, RDNA 3+); software H.264 and VP8 are fallbacks.
 - **Mobile**: not planned. Browser client is a long-term maybe.
 
 ## Contributing
@@ -161,7 +161,6 @@ Areas where help would move the needle:
 
 - Browser viewer (WebRTC + a WASM decoder or native VP8).
 - Linux and macOS capture sources.
-- AV1 encode / decode paths (stubs exist).
 - Better TURN defaults and a guide for deploying your own coturn.
 
 ## License
